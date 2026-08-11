@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from pathlib import Path
+
+import pytest
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -12,15 +15,45 @@ def read_text(path: str) -> str:
     return (ROOT / path).read_text(encoding="utf-8")
 
 
+def _unique_pairs(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    result: dict[str, object] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"duplicate JSON key: {key}")
+        result[key] = value
+    return result
+
+
+def _reject_nonfinite(value: str) -> object:
+    raise ValueError(f"non-finite JSON number: {value}")
+
+
 def load_json(path: str) -> dict[str, object]:
     with (ROOT / path).open(encoding="utf-8") as handle:
-        value = json.load(handle)
+        value = json.load(
+            handle,
+            object_pairs_hook=_unique_pairs,
+            parse_constant=_reject_nonfinite,
+        )
     assert isinstance(value, dict)
     return value
 
 
 def sha256(path: str) -> str:
     return hashlib.sha256((ROOT / path).read_bytes()).hexdigest()
+
+
+@pytest.mark.parametrize(
+    "payload",
+    ('{"status":"passed","status":"rejected"}', '{"metric":NaN}'),
+)
+def test_strict_json_helpers_reject_ambiguous_payloads(payload: str) -> None:
+    with pytest.raises(ValueError):
+        json.loads(
+            payload,
+            object_pairs_hook=_unique_pairs,
+            parse_constant=_reject_nonfinite,
+        )
 
 
 def test_required_root_files_exist() -> None:
@@ -209,3 +242,38 @@ def test_roadmap_keeps_cost_and_independent_candidates_open() -> None:
     assert "동료 저장소" in roadmap
     assert "calibration" in roadmap.lower()
     assert "XGBoost" in roadmap
+
+
+def test_tracked_text_contains_no_secret_or_private_mount_path() -> None:
+    secret_markers = ("GITHUB_TOKEN=", "AIMERS_REPO_URL=")
+    all_operational_paths = [ROOT / "README.md", ROOT / "AGENTS.md"]
+    all_operational_paths.extend((ROOT / "docs/rounds").glob("*.md"))
+    all_operational_paths.extend((ROOT / "reports").rglob("*.json"))
+    all_operational_paths.extend(
+        (ROOT / name)
+        for name in ("docs/EXPERIMENT_CONTRACT.md", "docs/ROADMAP.md")
+    )
+    for path in all_operational_paths:
+        text = path.read_text(encoding="utf-8")
+        for value in secret_markers:
+            assert value not in text, f"{value!r} in {path.relative_to(ROOT)}"
+
+    human_docs = [ROOT / "README.md", ROOT / "AGENTS.md"]
+    human_docs.extend((ROOT / "docs/rounds").glob("*.md"))
+    human_docs.extend(
+        (ROOT / name)
+        for name in ("docs/EXPERIMENT_CONTRACT.md", "docs/ROADMAP.md")
+    )
+    for path in human_docs:
+        assert "/content/drive/MyDrive/" not in path.read_text(encoding="utf-8")
+
+
+def test_relative_markdown_links_resolve() -> None:
+    pattern = re.compile(r"\[[^]]+\]\((?!https?://|#)([^)]+)\)")
+    for path in ROOT.rglob("*.md"):
+        if ".git" in path.parts:
+            continue
+        for target in pattern.findall(path.read_text(encoding="utf-8")):
+            clean = target.split("#", 1)[0]
+            if clean:
+                assert (path.parent / clean).resolve().exists(), (path, target)

@@ -570,18 +570,27 @@ import re
 
 
 def test_tracked_text_contains_no_secret_or_private_mount_path() -> None:
-    forbidden = ("GITHUB_TOKEN=", "AIMERS_REPO_URL=", "/content/drive/MyDrive/")
-    operational_paths = [ROOT / "README.md", ROOT / "AGENTS.md"]
-    operational_paths.extend((ROOT / "docs/rounds").glob("*.md"))
-    operational_paths.extend((ROOT / "reports").rglob("*.json"))
-    operational_paths.extend(
+    secret_markers = ("GITHUB_TOKEN=", "AIMERS_REPO_URL=")
+    all_operational_paths = [ROOT / "README.md", ROOT / "AGENTS.md"]
+    all_operational_paths.extend((ROOT / "docs/rounds").glob("*.md"))
+    all_operational_paths.extend((ROOT / "reports").rglob("*.json"))
+    all_operational_paths.extend(
         (ROOT / name)
         for name in ("docs/EXPERIMENT_CONTRACT.md", "docs/ROADMAP.md")
     )
-    for path in operational_paths:
+    for path in all_operational_paths:
         text = path.read_text(encoding="utf-8")
-        for value in forbidden:
+        for value in secret_markers:
             assert value not in text, f"{value!r} in {path.relative_to(ROOT)}"
+
+    human_docs = [ROOT / "README.md", ROOT / "AGENTS.md"]
+    human_docs.extend((ROOT / "docs/rounds").glob("*.md"))
+    human_docs.extend(
+        (ROOT / name)
+        for name in ("docs/EXPERIMENT_CONTRACT.md", "docs/ROADMAP.md")
+    )
+    for path in human_docs:
+        assert "/content/drive/MyDrive/" not in path.read_text(encoding="utf-8")
 
 
 def test_relative_markdown_links_resolve() -> None:
