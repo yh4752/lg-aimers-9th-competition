@@ -186,3 +186,26 @@ def test_round_index_links_to_all_round_documents() -> None:
     ):
         assert f"]({name})" in index
         assert (ROOT / "docs/rounds" / name).is_file()
+
+
+def test_readme_is_a_competition_dashboard() -> None:
+    readme = read_text("README.md")
+    for phrase in (
+        "LG Aimers 9th",
+        "현재 기준선",
+        "실험 장부",
+        "검증 프로토콜",
+        "다음 후보",
+        "Google Drive",
+    ):
+        assert phrase in readme
+    assert "31개 LG Aimers VOD" not in readme
+
+
+def test_roadmap_keeps_cost_and_independent_candidates_open() -> None:
+    roadmap = read_text("docs/ROADMAP.md")
+    assert "비용만으로" in roadmap
+    assert "독립 후보" in roadmap
+    assert "동료 저장소" in roadmap
+    assert "calibration" in roadmap.lower()
+    assert "XGBoost" in roadmap
