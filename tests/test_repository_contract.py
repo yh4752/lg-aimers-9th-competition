@@ -157,3 +157,32 @@ def test_xgboost_rescue_is_technically_verified_not_submitted() -> None:
         "075e38e355462953543da4532b658568898a6458c6d30e604d5fcbb6b4772006"
     )
     assert report["public_score"] is None
+
+
+def test_ledger_records_every_completed_family_and_protocol() -> None:
+    ledger = read_text("reports/EXPERIMENT_LEDGER.md")
+    for experiment in (
+        "catboost_smooth_v1",
+        "round9_temporal_oof",
+        "fwfm_standalone",
+        "tabm_residual",
+        "calibration_blending",
+        "xgboost_score_push_v3",
+        "xgboost_original_preproc_rescue",
+    ):
+        assert experiment in ledger
+    assert "검증 프로토콜" in ledger
+    assert "Public" in ledger
+
+
+def test_round_index_links_to_all_round_documents() -> None:
+    index = read_text("docs/rounds/README.md")
+    for name in (
+        "01-r9-foundation.md",
+        "02-fwfm.md",
+        "03-tabm-residual.md",
+        "04-calibration.md",
+        "05-xgboost.md",
+    ):
+        assert f"]({name})" in index
+        assert (ROOT / "docs/rounds" / name).is_file()
