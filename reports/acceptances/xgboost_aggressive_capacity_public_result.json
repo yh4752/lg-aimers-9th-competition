@@ -1,0 +1,43 @@
+{
+  "status": "public_scored",
+  "candidate_id": "xgboost_aggressive_capacity_v1",
+  "run_id": "a0b99dd0e7eb41fba2b5ff729b11aeb1",
+  "submission_file": "submit_xgboost_v3.zip",
+  "submitted_at": "2026-08-11T23:52:02+09:00",
+  "public_score": 820.9583317093,
+  "local_brier": 0.2479270213638507,
+  "local_score": 752.5433411090132,
+  "scale": 1.05,
+  "mean_shift": "linear_extrapolated",
+  "members": [
+    {
+      "structure": "depthwise_d6",
+      "seed": 42,
+      "rounds": 119
+    },
+    {
+      "structure": "depthwise_d6",
+      "seed": 2026,
+      "rounds": 134
+    },
+    {
+      "structure": "lossguide_l63",
+      "seed": 42,
+      "rounds": 119
+    },
+    {
+      "structure": "lossguide_l63",
+      "seed": 2026,
+      "rounds": 106
+    }
+  ],
+  "archive_sha256": "f81b5df770733898535d9a1d4a019b7c339aa72d7cbce0cb67a3e49ccb41f43a",
+  "failures": [],
+  "sources": {
+    "receipt": "https://drive.google.com/file/d/1zoCNN3_odRw3SXLE1VtsxhLIS-nD_m2y/view",
+    "candidate_scores": "https://drive.google.com/file/d/13gj77dDRxCoDyPfiy-WVveeY2252nc1E/view",
+    "comparison_report": "https://drive.google.com/file/d/1UvRG_J0Sh6Tk0Muz57Qt2fYYb0Klb751/view",
+    "submission_zip": "https://drive.google.com/file/d/1ZOll0MQZXIn3nvZruAAWpxh4U55OWtwD/view"
+  },
+  "public_evidence": "User-provided DACON submission history screenshot verified on 2026-08-12"
+}

@@ -192,6 +192,41 @@ def test_xgboost_rescue_is_technically_verified_not_submitted() -> None:
     assert report["public_score"] is None
 
 
+def test_xgboost_aggressive_capacity_public_result_is_bound() -> None:
+    report = load_json(
+        "reports/acceptances/xgboost_aggressive_capacity_public_result.json"
+    )
+    assert report["status"] == "public_scored"
+    assert report["candidate_id"] == "xgboost_aggressive_capacity_v1"
+    assert report["run_id"] == "a0b99dd0e7eb41fba2b5ff729b11aeb1"
+    assert report["public_score"] == 820.9583317093
+    assert report["local_brier"] == 0.2479270213638507
+    assert report["local_score"] == 752.5433411090132
+    assert report["archive_sha256"] == (
+        "f81b5df770733898535d9a1d4a019b7c339aa72d7cbce0cb67a3e49ccb41f43a"
+    )
+    assert report["scale"] == 1.05
+    assert report["mean_shift"] == "linear_extrapolated"
+    assert report["members"] == [
+        {"structure": "depthwise_d6", "seed": 42, "rounds": 119},
+        {"structure": "depthwise_d6", "seed": 2026, "rounds": 134},
+        {"structure": "lossguide_l63", "seed": 42, "rounds": 119},
+        {"structure": "lossguide_l63", "seed": 2026, "rounds": 106},
+    ]
+
+
+def test_agents_default_to_broad_performance_exploration() -> None:
+    agents = read_text("AGENTS.md")
+    for phrase in (
+        "모델 깊이",
+        "GPU 사용량을 사전에 제한하지 않는다",
+        "비용과 실행 시간은 안내와 실행 순서에만 사용한다",
+        "탐색을 막지 않고",
+        "새 폴더·문서·자동화",
+    ):
+        assert phrase in agents
+
+
 def test_ledger_records_every_completed_family_and_protocol() -> None:
     ledger = read_text("reports/EXPERIMENT_LEDGER.md")
     for experiment in (
