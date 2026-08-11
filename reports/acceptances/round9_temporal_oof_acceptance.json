@@ -1,0 +1,21 @@
+{
+  "status": "passed",
+  "stage": "round9_temporal_oof",
+  "model_id": "kyh_hs_r9_stable_mean_temporal_oof_v1",
+  "protocol": "r9_yearly_transition_v1",
+  "drive_run_dir": "/content/drive/MyDrive/LG_AIMERS_2026/outputs/run_20260809T141427Z_3352d5030d2e427bbdd5f0f9c21ef367",
+  "verification_artifact": "r9_temporal_oof_verification.json",
+  "verification_status": "passed",
+  "row_count": 746504,
+  "fold_rows": {
+    "valid_2022": 247472,
+    "valid_2023": 245525,
+    "valid_2024": 253507
+  },
+  "brier": 0.24825099524638927,
+  "prediction_sha256": "7e1452fdb4dd8ef4f8cec01262854a7e10e673c528717832317f2860dca87057",
+  "data_preflight_sha256": "f547e4018957d3b5c57fef0d4f52f436bd3dd3379850416c26a4c1b33b8f1290",
+  "training_code_sha256": "345c3b06705e8ed2edf392b6c0deaefdcbaaf6706953591597c591ebcf736882",
+  "verification_summary": "2021→2022, 2022→2023, 2023→2024 전이의 746,504개 OOF 행을 공식 데이터·preflight hash와 독립 대조해 passed를 확인했습니다.",
+  "verification_command": "Colab 단계 9: verify-temporal-oof --predictions r9_temporal_oof.csv --manifest r9_temporal_oof_manifest.json --data-preflight data_preflight.json --data-dir DATA_DIR --result r9_temporal_oof_verification.json"
+}

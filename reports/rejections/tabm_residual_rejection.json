@@ -1,0 +1,43 @@
+{
+  "status": "rejected",
+  "candidate_id": "tabm_residual",
+  "reason": "TabM residual was worse than R9 globally, in both validation folds, and in every F/non-F segment; only provenance/probability and the loose calibration gap gate passed.",
+  "decision_basis": "performance_gate",
+  "drive_run_dir": "/content/drive/MyDrive/LG_AIMERS_2026/outputs/run_20260809T141427Z_3352d5030d2e427bbdd5f0f9c21ef367",
+  "artifacts": {
+    "predictions": "tabm_residual_oof.csv",
+    "manifest": "tabm_residual_manifest.json",
+    "build": "tabm_residual_build.json",
+    "verification": "tabm_residual_verification.json",
+    "audit": "tabm_residual_audit.json",
+    "groups": "tabm_residual_groups.csv"
+  },
+  "row_count": 499032,
+  "all_gates_passed": false,
+  "gates": {
+    "global_brier_strictly_lower": false,
+    "both_fold_briers_strictly_lower": false,
+    "segment_delta_at_most": false,
+    "fold_segment_delta_at_most": false,
+    "global_calibration_gap_delta_at_most": true,
+    "provenance_and_probability_checks": true
+  },
+  "diagnostic": {
+    "r9_global_brier": 0.250711786685226,
+    "tabm_global_brier": 0.2548630286197798,
+    "global_brier_delta": 0.004151241934553795,
+    "valid_2023_brier_delta": 0.00609503566414743,
+    "valid_2024_brier_delta": 0.0022686510969892604,
+    "game_type_f_brier_delta": 0.01525227383640898,
+    "non_f_brier_delta": 0.002756626850721783,
+    "worst_fold_segment_brier_delta": 0.02862235669164276
+  },
+  "source_hashes": {
+    "config_sha256": "f23ae98448e4d6c87003edf432f85510a067bb0ae6fe7fe0c405eeb0054185f9",
+    "data_preflight_sha256": "f547e4018957d3b5c57fef0d4f52f436bd3dd3379850416c26a4c1b33b8f1290",
+    "manifest_sha256": "42bcbcc0e8d7a7391c36e9f0b02aadbf1e70ace95f108dc8b157a00bb1958ddb",
+    "prediction_sha256": "abfe9db3245d52169603432a15867df6084153c448cbb5433dc6f161eed9bec9",
+    "r9_prediction_sha256": "7e1452fdb4dd8ef4f8cec01262854a7e10e673c528717832317f2860dca87057",
+    "training_code_sha256": "11456684c447fdbcd749f1b52f5d89755ec4968ed313148ce3ba9630e8a64e3a"
+  }
+}

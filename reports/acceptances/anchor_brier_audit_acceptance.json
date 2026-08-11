@@ -1,0 +1,27 @@
+{
+  "status": "passed",
+  "stage": "anchor_brier_audit",
+  "model_id": "kyh_hs_r9_stable_mean_temporal_oof_v1",
+  "protocol": "r9_yearly_transition_v1",
+  "drive_run_dir": "/content/drive/MyDrive/LG_AIMERS_2026/outputs/run_20260809T141427Z_3352d5030d2e427bbdd5f0f9c21ef367",
+  "audit_artifacts": {
+    "summary": "r9_anchor_brier_audit.json",
+    "bins": "r9_anchor_brier_bins.csv",
+    "groups": "r9_anchor_brier_groups.csv"
+  },
+  "audit_status": "audited",
+  "row_count": 746504,
+  "global_brier": 0.24825099524638927,
+  "fold_brier": {
+    "valid_2022": 0.24328876245518222,
+    "valid_2023": 0.25400596478570003,
+    "valid_2024": 0.24752133009775956
+  },
+  "source_hashes": {
+    "prediction_sha256": "7e1452fdb4dd8ef4f8cec01262854a7e10e673c528717832317f2860dca87057",
+    "data_preflight_sha256": "f547e4018957d3b5c57fef0d4f52f436bd3dd3379850416c26a4c1b33b8f1290",
+    "training_code_sha256": "345c3b06705e8ed2edf392b6c0deaefdcbaaf6706953591597c591ebcf736882"
+  },
+  "verification_summary": "독립 검증이 통과한 746,504개 시간 전이 OOF에 대해 Brier·보정·상황별 진단을 완료했습니다. 전체 Brier는 0.248251이며, 2023 전이와 game_type=F 구간의 과신을 이후 FwFM OOF 비교의 필수 점검 항목으로 기록했습니다.",
+  "verification_command": "Colab 단계 10: audit-r9-temporal-oof --predictions r9_temporal_oof.csv --manifest r9_temporal_oof_manifest.json --data-preflight data_preflight.json --data-dir DATA_DIR --result r9_anchor_brier_audit.json --bins-result r9_anchor_brier_bins.csv --groups-result r9_anchor_brier_groups.csv"
+}

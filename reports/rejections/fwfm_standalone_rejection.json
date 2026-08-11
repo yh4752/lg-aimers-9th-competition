@@ -1,0 +1,16 @@
+{
+  "status": "rejected",
+  "candidate_id": "fwfm_standalone",
+  "reason": "Standalone FwFM missed the global OOF gate and its exploratory submission scored 88.5362742196.",
+  "decision_basis": "performance_gate",
+  "diagnostic": {
+    "row_count": 746504,
+    "fwfm_global_brier": 0.2501797846421676,
+    "r9_global_brier": 0.24825099524638927,
+    "fwfm_valid_2023_brier": 0.2522255165735472,
+    "r9_valid_2023_brier": 0.25400596478570003,
+    "fwfm_game_type_f_brier": 0.24182915183269357,
+    "r9_game_type_f_brier": 0.2504909347736725,
+    "public_score": 88.5362742196
+  }
+}

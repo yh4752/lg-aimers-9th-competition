@@ -1,0 +1,9 @@
+{
+  "stage": "core_and_anchor_audit",
+  "status": "passed",
+  "branch": "kyh/high-score-pipeline",
+  "anchor_zip_sha256": "8c6c99f5819656646dcaf1ce1af17621ec3273eb7bbddca40a194f85c9534ebf",
+  "protected_files_changed": false,
+  "real_round9_oof_available": false,
+  "next_increment_gate": "obtain_or_rebuild_leakage_free_round9_temporal_predictions"
+}

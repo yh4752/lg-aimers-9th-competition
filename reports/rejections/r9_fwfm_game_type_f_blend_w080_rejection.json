@@ -1,0 +1,23 @@
+{
+  "status": "rejected",
+  "candidate_id": "r9_fwfm_game_type_f_blend_w080",
+  "reason": "F80 improved global OOF but failed the predeclared cross-fold game_type=F stability gates.",
+  "decision_basis": "performance_gate",
+  "failed_gates": [
+    "at_least_two_game_type_f_folds_improve",
+    "other_game_type_f_fold_delta_at_most_0_001"
+  ],
+  "diagnostic": {
+    "global_brier": 0.24728849890644408,
+    "r9_global_brier": 0.24825099524638927,
+    "game_type_f_fold_brier_delta": {
+      "valid_2022": 0.0012445047861280034,
+      "valid_2023": -0.03270023900231689,
+      "valid_2024": 0.0027836817571194328
+    }
+  },
+  "source_hashes": {
+    "r9_predictions_sha256": "7e1452fdb4dd8ef4f8cec01262854a7e10e673c528717832317f2860dca87057",
+    "fwfm_predictions_sha256": "f9c5c682a19c0bf4f2ff64b97f3be04c988cdf5a159b29d501eb2e49f246e112"
+  }
+}

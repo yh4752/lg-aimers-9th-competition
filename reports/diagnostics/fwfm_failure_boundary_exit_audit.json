@@ -1,0 +1,22 @@
+{
+  "status": "read_only_diagnostic",
+  "diagnostic_id": "fwfm_failure_boundary_exit_audit_v1",
+  "drive_run_dir": "/content/drive/MyDrive/LG_AIMERS_2026/outputs/run_20260809T141427Z_3352d5030d2e427bbdd5f0f9c21ef367",
+  "row_count": 746504,
+  "f_row_count": 86144,
+  "stable_signal_count": 0,
+  "recommended_action": "close_fwfm_family",
+  "artifact_sha256": {
+    "config": "0715091b486daa751e9cec5e3318806929a569f18681d32f55cc5a990e0e83bc",
+    "groups": "3d2518eaa596e404c17782b877525258c161b8e511901d0745722f7b2405fa73",
+    "training_code": "6eea0491d574b38d102b604489a9821ef90dd0e23777bbef6aac255adaf8d8ed"
+  },
+  "source_hashes": {
+    "anchor_acceptance_sha256": "9ccffd3fe983a0a125efed0822ba1722a2887a1505bb424ea02ed3e6a1283e0f",
+    "data_preflight_sha256": "f547e4018957d3b5c57fef0d4f52f436bd3dd3379850416c26a4c1b33b8f1290",
+    "fwfm_manifest_sha256": "67bb1caae74a2de4b8b05c5926f775d95eb1543b32a9d6bdf4c7ad680aa169ec",
+    "fwfm_predictions_sha256": "f9c5c682a19c0bf4f2ff64b97f3be04c988cdf5a159b29d501eb2e49f246e112",
+    "r9_manifest_sha256": "3cc892e8092f17d191385aba1699adfbb01176e47a6a96a5d6925121826a019d",
+    "r9_predictions_sha256": "7e1452fdb4dd8ef4f8cec01262854a7e10e673c528717832317f2860dca87057"
+  }
+}
