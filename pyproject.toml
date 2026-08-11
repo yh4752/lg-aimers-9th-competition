@@ -1,0 +1,11 @@
+[project]
+name = "lg-aimers-9th-competition"
+version = "0.1.0"
+requires-python = ">=3.11"
+
+[project.optional-dependencies]
+dev = ["pytest==8.4.1"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
