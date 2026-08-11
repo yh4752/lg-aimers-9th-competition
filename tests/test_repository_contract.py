@@ -227,6 +227,29 @@ def test_agents_default_to_broad_performance_exploration() -> None:
         assert phrase in agents
 
 
+def test_xgboost_public_result_is_visible_in_existing_documents() -> None:
+    readme = read_text("README.md")
+    ledger = read_text("reports/EXPERIMENT_LEDGER.md")
+    round_doc = read_text("docs/rounds/05-xgboost.md")
+    roadmap = read_text("docs/ROADMAP.md")
+
+    assert "820.9583317093" in readme
+    assert "xgboost_aggressive_capacity_v1" in ledger
+    assert "820.9583317093" in ledger
+    for phrase in (
+        "depthwise_d6",
+        "lossguide_l63",
+        "depthwise_d8",
+        "lossguide_l255",
+        "714.8814792915847",
+        "750.5344761643662",
+        "752.5433411090132",
+    ):
+        assert phrase in round_doc
+    assert "정렬된 OOF" in roadmap
+    assert "CatBoost" in roadmap
+
+
 def test_ledger_records_every_completed_family_and_protocol() -> None:
     ledger = read_text("reports/EXPERIMENT_LEDGER.md")
     for experiment in (

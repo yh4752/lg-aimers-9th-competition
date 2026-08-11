@@ -13,7 +13,7 @@
 | 닫힌 계열 | FwFM standalone 및 F 제한 blend |
 | 기각된 구성 | TabM residual, calibration의 고정 세 변형 |
 | 열린 계열 | segment-aware calibration, 독립 TabM 후보, XGBoost |
-| XGBoost v3 | 4-fold 평균 `0.24701737756648098`, exploratory accepted, Public 미확인 |
+| XGBoost v3 | 공격적 4-member ensemble, Public `820.9583317093` |
 | XGBoost rescue | 2024 `0.24826687414041645`, technical verified, Public 미확인 |
 
 점수가 같은 표에 있어도 검증 프로토콜이 다르면 직접 순위를 매기지 않는다. R9은
@@ -26,8 +26,9 @@
 - TabM residual 한 구성은 기각됐지만 다른 독립 TabM 후보를 막지 않는다.
 - Calibration 세 변형은 평균 Brier를 개선했지만 calibration gap과 fold 안정성
   gate를 통과하지 못했다. Family는 열려 있다.
-- XGBoost v3와 original preprocessing rescue는 탐색 또는 기술 준비 상태다.
-  아직 Public 개선으로 주장하지 않는다.
+- XGBoost v3의 depth 6·63 leaves 4-member ensemble은 Public
+  `820.9583317093`을 기록했다. 더 큰 depth 8·127·255 leaves가 자동으로 더 좋지는
+  않았으며, 넓은 탐색 후 중간 용량·seed ensemble·시즌 보정을 함께 선택한 결과다.
 
 ## 문서
 

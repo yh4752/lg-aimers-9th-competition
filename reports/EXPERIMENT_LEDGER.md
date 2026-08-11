@@ -19,6 +19,7 @@
 | 11 | `calibration_blending` | R9 calibration | R9 3-fold·746,504행 | best `game_type_temperature` Brier `0.24789890676984772`, 두 gate 실패 | exact variants rejected, family open | — | [rejection](rejections/calibration_blending_rejection.json) |
 | 12 | `xgboost_score_push_v3` | XGBoost | 4개 역사 시간 fold 선택 후 2024 holdout | 4-fold 평균 Brier `0.24701737756648098`, 2024 `0.248274358430683` | exploratory accepted | — | [acceptance](acceptances/xgboost_v3_exploratory_acceptance.json) |
 | 13 | `xgboost_original_preproc_rescue` | XGBoost | 2023→2024 holdout 후 full fit | `lossguide_l31`, 2024 Brier `0.24826687414041645`, 기술 gate 7개 PASS | verified ready | — | [acceptance](acceptances/xgboost_original_preproc_rescue_acceptance.json) |
+| 14 | `xgboost_aggressive_capacity_v1` | XGBoost | 역사 fold 구조 탐색·최근 시즌 ensemble | depthwise d6·lossguide l63 4-member, local Brier `0.2479270213638507` | public scored | `820.9583317093` | [result](acceptances/xgboost_aggressive_capacity_public_result.json) |
 
 ## 현재 결론
 
@@ -26,7 +27,7 @@
 - FwFM standalone, 제한 blend와 종료 감사가 모두 끝나 FwFM 계열은 닫혔다.
 - TabM residual 후보만 기각됐으며 다른 TabM 설계를 자동으로 막지 않는다.
 - Calibration의 고정된 세 변형은 기각됐지만 segment-aware family는 열려 있다.
-- XGBoost v3와 rescue는 각각 탐색 수용·기술 준비 상태이며 Public 개선을 의미하지
-  않는다.
+- XGBoost의 넓은 구조·seed·후처리 탐색은 Public `820.9583317093`을 기록했다.
+  큰 트리를 사전 배제하지 않되, 실제 선택은 중간 용량의 d6·l63 ensemble이었다.
 - 대용량 OOF, 모델과 ZIP은 Google Drive에 두고 이 장부는 작은 evidence와 실행
   ID로 원본을 식별한다.

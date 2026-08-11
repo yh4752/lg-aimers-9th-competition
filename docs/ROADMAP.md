@@ -16,6 +16,7 @@
 - Calibration 고정 세 변형 감사: exact variants rejected, family open
 - XGBoost v3: exploratory accepted
 - XGBoost original preprocessing rescue: verified ready
+- XGBoost 공격적 구조·seed ensemble: Public `820.9583317093`
 - 새 저장소의 실행 계약, 장부와 작은 판정 evidence 정리
 
 ## 다음 순서
@@ -37,6 +38,10 @@ Preflight, 시간 전이 OOF 검증, 행 독립성, evidence와 package gate를 
 V3와 rescue의 체크포인트·해시 계약을 보존해 새 경로로 옮긴다. 두 실험은 검증
 프로토콜이 다르므로 R9과 단순 Brier 순위를 만들지 않는다. 제출 여부는 package
 gate와 현재 artifact를 다시 확인한 뒤 별도로 결정한다.
+
+다음 CatBoost 혼합 검토는 두 모델의 정렬된 OOF가 같은 행·검증 프로토콜인지 먼저
+확인하고, 혼합 비율과 grid를 실행 전에 고정한다. 이는 다음 검토 후보이며 현재
+Public 점수에 맞춘 사후 가중치 선택은 하지 않는다.
 
 ### 4. 동료 저장소 연구 선별 검토
 

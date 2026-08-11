@@ -38,3 +38,20 @@ Public 개선이나 공식 제출 완료를 의미하지 않는다.
 
 - [XGBoost v3 exploratory acceptance](../../reports/acceptances/xgboost_v3_exploratory_acceptance.json)
 - [Original preprocessing rescue acceptance](../../reports/acceptances/xgboost_original_preproc_rescue_acceptance.json)
+- [Aggressive capacity Public result](../../reports/acceptances/xgboost_aggressive_capacity_public_result.json)
+
+## 공격적 구조 탐색의 Public 결과
+
+최종 후보는 `depthwise_d6`와 `lossguide_l63` 각각 seed 42·2026의 네 모델을
+평균했다. 선택된 rounds는 순서대로 119, 134, 119, 106이며 확률 배율 `1.05`와
+`linear_extrapolated` 시즌 평균 보정을 적용했다.
+
+| 단계 | 로컬 점수 |
+|---|---:|
+| 네 모델 단순 평균 | `714.8814792915847` |
+| 선형 시즌 평균 보정 | `750.5344761643662` |
+| 확률 배율 1.05 | `752.5433411090132` |
+
+최종 Public은 `820.9583317093`이었다. `depthwise_d8`, `lossguide_l127`,
+`lossguide_l255`도 탐색했지만 d6·l63보다 낮았다. 결론은 깊은 트리를 미리 막는
+것이 아니라 충분히 탐색하고 실제 fold·ensemble·보정 결과로 선택해야 한다는 것이다.
