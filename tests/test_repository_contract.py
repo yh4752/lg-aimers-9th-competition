@@ -47,3 +47,35 @@ def test_gitignore_blocks_large_and_secret_inputs() -> None:
         "__pycache__/",
     ):
         assert pattern in text
+
+
+def test_agents_enforces_execution_ownership_and_mutation_boundaries() -> None:
+    agents = read_text("AGENTS.md")
+    required = (
+        "Codex는 코드",
+        "전체 데이터",
+        "사용자가 수행",
+        "비용만으로 후보를 제외하지 않는다",
+        "사용자 요청 없이 push하지 않는다",
+        "노트북",
+        "패키징",
+        "제출",
+    )
+    for phrase in required:
+        assert phrase in agents
+
+
+def test_experiment_contract_preserves_temporal_and_package_gates() -> None:
+    contract = read_text("docs/EXPERIMENT_CONTRACT.md")
+    required = (
+        "planned → code_ready → waiting_for_user_run → passed → package_ready",
+        "rejected",
+        "failed",
+        "시간 전이",
+        "행 순서",
+        "SHA-256",
+        "acceptance",
+        "제출 패키지를 만들지 않는다",
+    )
+    for phrase in required:
+        assert phrase in contract
