@@ -1,0 +1,25 @@
+{
+  "status": "verified_ready",
+  "candidate_id": "xgboost_original_preproc_rescue",
+  "run_id": "7c3820cb6b904193b9cf337ad602dff1",
+  "protocol": "2023_to_2024_holdout_then_full_fit",
+  "selected_candidate": "lossguide_l31",
+  "final_2024_brier": 0.24826687414041645,
+  "best_iteration": 236,
+  "full_fit_rounds": 237,
+  "archive_sha256": "075e38e355462953543da4532b658568898a6458c6d30e604d5fcbb6b4772006",
+  "identity_sha256": "122e498e932c63c2ed4271281a0f10bbcf3b492cfe4c190e8f81be7f2b9c81cc",
+  "config_sha256": "38918c8d4d89e3f4434a614ee8384c443fcfb01687836a0bd165e021967dad71",
+  "technical_gates": {
+    "data_manifest": "PASS",
+    "t4_gpu": "PASS",
+    "temporal_comparison": "PASS",
+    "full_fit": "PASS",
+    "prediction_validation": "PASS",
+    "exact_zip_members_crc": "PASS",
+    "isolated_python311_cpu_smoke": "PASS"
+  },
+  "public_score": null,
+  "source_drive_folder": "https://drive.google.com/drive/folders/1W51XSB-L7MZao8cI5ZWMaKhNuhEuYwTC",
+  "next_decision": "Keep as a technically verified exploratory package until a separate submission decision is approved."
+}

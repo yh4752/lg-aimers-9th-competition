@@ -1,0 +1,47 @@
+{
+  "status": "rejected",
+  "candidate_id": "calibration_blending_exact_variants",
+  "family": "calibration_blending",
+  "family_closed": false,
+  "protocol": "r9_yearly_transition_v1",
+  "row_count": 746504,
+  "anchor_global_brier": 0.24825099524638927,
+  "best_candidate": "game_type_temperature",
+  "best_global_brier": 0.24789890676984772,
+  "best_game_type_f_brier": 0.2474564827036286,
+  "best_worst_fold_delta": 0.00012750529970739777,
+  "failed_gates": [
+    "global_calibration_gap_not_higher",
+    "max_fold_delta"
+  ],
+  "candidates": [
+    {
+      "candidate": "global_temperature",
+      "eligible": false,
+      "global_brier": 0.24801462367286894,
+      "game_type_f_brier": 0.24750112157281193,
+      "worst_fold_delta": 0.0004254895378657808
+    },
+    {
+      "candidate": "global_logit_affine",
+      "eligible": false,
+      "global_brier": 0.24801883683881576,
+      "game_type_f_brier": 0.24754665945114063,
+      "worst_fold_delta": 0.00044442584115214623
+    },
+    {
+      "candidate": "game_type_temperature",
+      "eligible": false,
+      "global_brier": 0.24789890676984772,
+      "game_type_f_brier": 0.2474564827036286,
+      "worst_fold_delta": 0.00012750529970739777
+    }
+  ],
+  "artifact_sha256": {
+    "predictions": "f6d900a8d4809d568a0844628fd80ea2bec5afe3c4f9be0a052505c1baee8602",
+    "manifest": "24de9929d44f50d9bfef091c9ae372e655690cf77e48fa991605e4696a50d3e7",
+    "grid": "db9318936568ff6b9b45b8db2adb3a7e5aeb90e96a59479f367d840f73fc61a4"
+  },
+  "source_run_id": "run_20260809T141427Z_3352d5030d2e427bbdd5f0f9c21ef367",
+  "next_decision": "Keep the calibration family open; redesign a predeclared segment-aware candidate before another full run."
+}

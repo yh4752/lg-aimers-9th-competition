@@ -121,3 +121,39 @@ def test_immutable_reports_match_original_bytes_and_status() -> None:
     for path, (expected_hash, expected_status) in IMMUTABLE_REPORTS.items():
         assert sha256(path) == expected_hash, path
         assert load_json(path)["status"] == expected_status, path
+
+
+def test_calibration_rejection_records_open_family() -> None:
+    report = load_json("reports/rejections/calibration_blending_rejection.json")
+    assert report["status"] == "rejected"
+    assert report["candidate_id"] == "calibration_blending_exact_variants"
+    assert report["family_closed"] is False
+    assert report["best_candidate"] == "game_type_temperature"
+    assert report["best_global_brier"] == 0.24789890676984772
+    assert report["failed_gates"] == [
+        "global_calibration_gap_not_higher",
+        "max_fold_delta",
+    ]
+
+
+def test_xgboost_v3_exploratory_acceptance_is_not_public_score() -> None:
+    report = load_json("reports/acceptances/xgboost_v3_exploratory_acceptance.json")
+    assert report["status"] == "accepted_for_exploratory_submission"
+    assert report["run_id"] == "f224a534242a41fea3b88218086e795c"
+    assert report["mean_temporal_brier"] == 0.24701737756648098
+    assert report["final_2024_brier"] == 0.248274358430683
+    assert report["public_score"] is None
+
+
+def test_xgboost_rescue_is_technically_verified_not_submitted() -> None:
+    report = load_json(
+        "reports/acceptances/xgboost_original_preproc_rescue_acceptance.json"
+    )
+    assert report["status"] == "verified_ready"
+    assert report["run_id"] == "7c3820cb6b904193b9cf337ad602dff1"
+    assert report["selected_candidate"] == "lossguide_l31"
+    assert report["final_2024_brier"] == 0.24826687414041645
+    assert report["archive_sha256"] == (
+        "075e38e355462953543da4532b658568898a6458c6d30e604d5fcbb6b4772006"
+    )
+    assert report["public_score"] is None

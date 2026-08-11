@@ -1,0 +1,25 @@
+{
+  "status": "accepted_for_exploratory_submission",
+  "candidate_id": "xgboost_score_push_v3",
+  "run_id": "f224a534242a41fea3b88218086e795c",
+  "protocol": "four_historical_temporal_folds_then_2024_holdout",
+  "selected_candidate": "history_only__recent_medium__lossguide_l31__seed_mean__identity",
+  "temporal_folds": 4,
+  "mean_temporal_brier": 0.24701737756648098,
+  "mean_delta_brier": -0.00001141918221812116,
+  "worst_delta_brier": 0.00003995179808186089,
+  "fold_wins": 2,
+  "final_2024_brier": 0.248274358430683,
+  "final_2024_rows": 253507,
+  "final_2024_prediction_sha256": "382ad7eb8e9e29b05a608e52bcc81bff2cbaf610ac885fa5a1c2d30528b60710",
+  "selection_receipt_sha256": "7800225000e56956764258d6373de378f12c15f9e956eab3ba87be32cd5a6c0d",
+  "notebook_receipt_artifact_sha256": {
+    "decision_report.json": "1962804f23d45b486752cbc15261e08aa3a431391bc44fac8003b650bc870e62",
+    "final_2024.json": "2d860a64c91fb159967b92aa07fee26cdf837c5596bbced10647ee10b6bb89fc",
+    "oof_predictions.csv": "1aa4c740881157dc5a97f5a556e7db61d373f1274cfbc14a467da0381cc1f603",
+    "selected_config.json": "23865379fa29ec14e3aaa0838f80f09d97318e75dc61aa0138c3d0c40eff5fdb"
+  },
+  "public_score": null,
+  "source_drive_folder": "https://drive.google.com/drive/folders/1XtxD5BvVv0kfFb2GNBxgSIyLd8xIb3z",
+  "next_decision": "Review a hash-bound exploratory package separately; this evidence is not a Public score."
+}
