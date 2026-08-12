@@ -64,7 +64,7 @@ def test_handoff_uses_child_runtime_and_existing_colab_secret() -> None:
     text = HANDOFF.read_text(encoding="utf-8")
 
     assert 'userdata.get("GITHUB_TOKEN")' in text
-    assert 'REQUIRED_CODE_COMMIT = "2c796dd' in text
+    assert 'REQUIRED_CODE_COMMIT = "a38333c' in text
     assert 'PYTHONPATH' in text
     assert 'subprocess.Popen' in text
     assert 'pip", "install", "--target"' in text
