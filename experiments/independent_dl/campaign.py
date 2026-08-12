@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 import traceback
 from types import MappingProxyType
+from types import SimpleNamespace
 from typing import Mapping, Protocol
 
 from .contracts import CampaignSpec, CandidateSpec
@@ -56,11 +57,15 @@ class OfficialCampaignRuntime:
         cache_root: str | Path,
         fit_function: object | None = None,
         adapter_factory: object | None = None,
+        frontier_fit_function: object | None = None,
+        hardware_inspector: object | None = None,
     ) -> None:
         self.data_dir = Path(data_dir).resolve()
         self.cache_root = Path(cache_root).resolve()
         self._fit_function = fit_function
         self._adapter_factory = adapter_factory
+        self._frontier_fit_function = frontier_fit_function
+        self._hardware_inspector = hardware_inspector
         self._train = None
         self._history = None
 
@@ -129,20 +134,47 @@ class OfficialCampaignRuntime:
                 candidate.train_end_year,
                 candidate.valid_year,
             )
-            request = TrainRequest(
-                candidate_id=candidate.candidate_id,
-                family=candidate.family,
-                seed=candidate.seed,
-                epochs=candidate.epochs,
-                model_config=candidate.model,
-                training_config=candidate.training,
-                train=cache.train,
-                valid=cache.valid,
-            )
-            adapter_factory = self._adapter_factory or self._default_adapter
-            fit_function = self._fit_function or fit_candidate
-            adapter = adapter_factory(candidate.family)
-            result = fit_function(request, adapter, output_dir)
+            if candidate.family == "tabicl_v2":
+                from .models.tabicl_v2 import fit_predict_tabicl_v2
+                from .models.common import import_runtime_module
+                from .training import inspect_cuda_hardware
+
+                frontier_fit = self._frontier_fit_function or fit_predict_tabicl_v2
+                if self._hardware_inspector is None:
+                    torch = import_runtime_module("torch")
+                    hardware = inspect_cuda_hardware(torch)
+                else:
+                    hardware = self._hardware_inspector()
+                device = "cuda" if int(hardware["device_count"]) else "cpu"
+                frontier_result = frontier_fit(
+                    cache.train,
+                    cache.valid,
+                    candidate.model,
+                    output_dir,
+                    seed=candidate.seed,
+                    device=device,
+                )
+                result = SimpleNamespace(
+                    predictions=frontier_result.predictions,
+                    best_epoch=0,
+                    checkpoint=frontier_result.metadata_path,
+                    hardware=hardware,
+                )
+            else:
+                request = TrainRequest(
+                    candidate_id=candidate.candidate_id,
+                    family=candidate.family,
+                    seed=candidate.seed,
+                    epochs=candidate.epochs,
+                    model_config=candidate.model,
+                    training_config=candidate.training,
+                    train=cache.train,
+                    valid=cache.valid,
+                )
+                adapter_factory = self._adapter_factory or self._default_adapter
+                fit_function = self._fit_function or fit_candidate
+                adapter = adapter_factory(candidate.family)
+                result = fit_function(request, adapter, output_dir)
             probability = np.asarray(result.predictions, dtype="float64")
             target = np.asarray(cache.valid.y, dtype="float64")
             if probability.shape != target.shape:
@@ -165,22 +197,25 @@ class OfficialCampaignRuntime:
             prediction_temporary = predictions_path.with_suffix(".csv.tmp")
             prediction_frame.to_csv(prediction_temporary, index=False)
             os.replace(prediction_temporary, predictions_path)
+            metrics_payload = {
+                "candidate_id": candidate.candidate_id,
+                "family": candidate.family,
+                "feature_view": candidate.feature_view,
+                "stage": candidate.stage,
+                "train_end_year": candidate.train_end_year,
+                "valid_year": candidate.valid_year,
+                "seed": candidate.seed,
+                "n": len(prediction_frame),
+                "brier": brier,
+                "best_epoch": int(result.best_epoch),
+                "checkpoint": str(Path(result.checkpoint).resolve()),
+                "hardware": dict(result.hardware),
+            }
+            if candidate.stage == "research_only":
+                metrics_payload["submission_eligibility"] = "research_only"
             _atomic_json(
                 metrics_path,
-                {
-                    "candidate_id": candidate.candidate_id,
-                    "family": candidate.family,
-                    "feature_view": candidate.feature_view,
-                    "stage": candidate.stage,
-                    "train_end_year": candidate.train_end_year,
-                    "valid_year": candidate.valid_year,
-                    "seed": candidate.seed,
-                    "n": len(prediction_frame),
-                    "brier": brier,
-                    "best_epoch": int(result.best_epoch),
-                    "checkpoint": str(Path(result.checkpoint).resolve()),
-                    "hardware": dict(result.hardware),
-                },
+                metrics_payload,
             )
             return CandidateRunResult(
                 metrics_path=metrics_path,

@@ -226,6 +226,73 @@ def test_official_runtime_writes_fold_bound_prediction_artifacts(tmp_path: Path)
     assert metrics["hardware"]["training_device_indices"] == [0]
 
 
+def test_official_runtime_routes_tabicl_v2_without_torch_trainer(tmp_path: Path) -> None:
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    pd.DataFrame(
+        {
+            "row_id": ["tr-1", "tr-2", "va-1", "va-2"],
+            "season": [2023, 2023, 2024, 2024],
+            "game_type": ["R", "F", "R", "F"],
+            "feature": [0.0, 1.0, 2.0, 3.0],
+            "control_success": [0, 1, 0, 1],
+        }
+    ).to_csv(data_dir / "train.csv", index=False)
+    pd.DataFrame({"season": pd.Series(dtype="int64")}).to_csv(
+        data_dir / "trackman_history.csv", index=False
+    )
+    calls = []
+
+    def fake_frontier(train, valid, model_config, output_dir, *, seed, device):
+        from experiments.independent_dl.models.tabicl_v2 import TabICLv2Result
+
+        calls.append((train, valid, model_config, seed, device))
+        metadata = Path(output_dir) / "tabicl_v2_metadata.json"
+        metadata.parent.mkdir(parents=True, exist_ok=True)
+        metadata.write_text("{}", encoding="utf-8")
+        return TabICLv2Result(
+            predictions=np.array([0.45, 0.55]), metadata_path=metadata
+        )
+
+    candidate = CandidateSpec(
+        candidate_id="tabicl_v2__raw_typed__frontier32__s42",
+        family="tabicl_v2",
+        feature_view="raw_typed",
+        seed=42,
+        epochs=1,
+        model={
+            "architecture": "tabicl_v2",
+            "n_estimators": 32,
+            "kv_cache": True,
+            "offload_mode": "auto",
+            "checkpoint_version": "tabicl-classifier-v2-20260212.ckpt",
+        },
+        training={},
+        train_end_year=2023,
+        valid_year=2024,
+        stage="research_only",
+    )
+    runtime = OfficialCampaignRuntime(
+        data_dir,
+        cache_root=tmp_path / "cache",
+        frontier_fit_function=fake_frontier,
+        hardware_inspector=lambda: {
+            "device_count": 1,
+            "devices": ({"index": 0, "name": "fake", "vram_bytes": 1024},),
+            "training_mode": "single_gpu",
+            "training_device_indices": (0,),
+        },
+    )
+
+    result = runtime.run_candidate(candidate, tmp_path / "candidate")
+
+    assert len(calls) == 1
+    assert calls[0][3:] == (42, "cuda")
+    metrics = json.loads(result.metrics_path.read_text(encoding="utf-8"))
+    assert metrics["stage"] == "research_only"
+    assert metrics["submission_eligibility"] == "research_only"
+
+
 def test_campaign_cli_exposes_run_status_and_summarize() -> None:
     completed = subprocess.run(
         [

@@ -51,6 +51,7 @@ def test_runtime_requirements_pin_only_the_approved_packages() -> None:
         "tabm==0.0.3",
         "rtdl-revisiting-models==0.0.2",
         "rtdl-num-embeddings==0.0.12",
+        "tabicl==2.1.1",
     ]
     assert all(not line.startswith("torch") for line in lines)
 
