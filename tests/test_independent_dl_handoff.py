@@ -8,24 +8,26 @@ HANDOFF = ROOT / "experiments/independent_dl/COLAB.md"
 REQUIREMENTS = ROOT / "experiments/independent_dl/requirements-colab.txt"
 
 
-def test_colab_handoff_is_one_cell_and_does_not_package_submission() -> None:
+def test_colab_handoff_explains_split_family_execution_and_does_not_package() -> None:
     text = HANDOFF.read_text(encoding="utf-8")
 
-    assert text.count("```python") == 1
-    assert text.count("```") == 2
+    assert text.count("```python") >= 8
     for phrase in (
         "목적",
         "필수 입력",
         "예상 시간",
         "재실행",
-        "성공 시",
-        "오류 시",
-        "Colab Pro",
-        "가용성",
+        "정상 완료",
+        "오류 전달",
         "VRAM",
         "다음 후보",
-        "기존 checkpoint 재개",
-        "INDEPENDENT_DL_CAMPAIGN_CHECKPOINTED",
+        "epoch checkpoint",
+        "후보 하나",
+        "--max-candidates",
+        "P3",
+        "P4",
+        "boundary expansion",
+        "confirmation",
         "campaign_manifest.json",
         "campaign_summary.json",
     ):
@@ -64,11 +66,12 @@ def test_handoff_uses_child_runtime_and_existing_colab_secret() -> None:
     text = HANDOFF.read_text(encoding="utf-8")
 
     assert 'userdata.get("GITHUB_TOKEN")' in text
-    assert 'REQUIRED_CODE_COMMIT = "dd4c213' in text
+    assert 'REQUIRED_CODE_COMMIT = "a8f0525' in text
     assert 'PYTHONPATH' in text
     assert 'subprocess.Popen' in text
     assert 'pip", "install", "--target"' in text
-    assert '"run",' in text
+    for family in ("tabm", "mlp_resnet", "ft_transformer", "tabr", "tabicl_v2"):
+        assert f'run_one_family("{family}")' in text
     assert 'force_remount=True' not in text
     assert "assert 'T4' in name" not in text
     assert 'torch.cuda.device_count()' in text

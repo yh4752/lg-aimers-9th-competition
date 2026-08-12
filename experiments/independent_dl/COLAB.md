@@ -1,27 +1,10 @@
-# 독립 DL 프런티어 캠페인 Colab Pro 실행
+# 독립 DL 캠페인 — 무료 Colab 분할 실행
 
-## 실행 안내
+한 번에 모델 후보 하나만 실행하고 Drive checkpoint에 저장합니다. 코드 변경 범위만 작게 유지했으며 P1~P4, 네 입력 표현, boundary expansion, confirmation fold·seed의 넓고 깊은 탐색 범위는 그대로입니다. 원하는 모델 계열 셀을 골라 실행할 수 있습니다.
 
-- 목적: 전체 `2023→2024` 검증에서 TabM 입력 표현, 대형 ResNet·FT-Transformer,
-  TabICLv2와 수정된 TabR를 명시된 순서로 생성·재개한다. Smoke 결과는 성능 근거가
-  아니다.
-- 필수 입력: Colab 보안 비밀 `GITHUB_TOKEN`, Drive의 `train.csv`와
-  `trackman_history.csv`, CUDA GPU 런타임이다.
-- 예상 시간: 환경 준비는 수 분, 각 본 후보는 GPU와 모델에 따라 수십 분에서 여러
-  시간이 걸릴 수 있으며 전체 캠페인은 여러 세션이 필요하다.
-- Colab Pro: 더 빠른 GPU와 고용량 메모리는 가용성에 따라 달라진다. 아래 셀은
-  특정 GPU를 요구하지 않고 실제 장치 수, 이름과 VRAM을 출력한다.
-- 재실행: 같은 `CAMPAIGN_OUTPUT_DIR`로 셀 전체를 다시 실행하면 기존 checkpoint 재개
-  여부와 다음 후보를 먼저 표시하고, 해시가 유효한 완료 후보를 건너뛴다.
-- 성공 시: `INDEPENDENT_DL_CAMPAIGN_CHECKPOINTED`, Drive 결과 루트,
-  `campaign_manifest.json`, `candidate_results.jsonl`과 존재하는
-  `campaign_summary.json` 경로가 출력된다.
-- 오류 시: 첫 번째 원본 traceback부터 마지막 오류까지 생략하지 않고 보내면 된다.
-- 제출: 이 셀은 제출 CSV나 ZIP을 만들지 않는다. TabICLv2는 대회 사용 가능성이
-  별도로 확인될 때까지 `research_only`다.
+## 공통 준비
 
-아래는 하나의 완결된 셀이다. 사용자가 바꿀 값은 `DATA_DIR`와
-`CAMPAIGN_OUTPUT_DIR`뿐이다.
+Drive 연결, 비공개 저장소의 고정 커밋 준비, 패키지 설치, 공식 데이터와 GPU 확인만 수행합니다. 학습은 시작하지 않습니다. 새 런타임에서는 이 셀을 먼저 한 번 실행하세요. 정상 완료 문구는 `INDEPENDENT_DL_SETUP_READY`입니다.
 
 ```python
 from __future__ import annotations
@@ -46,7 +29,7 @@ CAMPAIGN_OUTPUT_DIR = Path(
 
 REPO_URL = "https://github.com/yh4752/lg-aimers-9th-competition.git"
 REPO_DIR = Path("/content/lg-aimers-9th-competition")
-REQUIRED_CODE_COMMIT = "dd4c213083add03a1606fdca17568256c8aa9f4c"
+REQUIRED_CODE_COMMIT = "a8f0525f19010e0a0f3aff3b6d0051aa1679857a"
 RUNTIME_DIR = Path("/content/independent_dl_runtime_v2")
 
 
@@ -185,75 +168,192 @@ manifest = CAMPAIGN_OUTPUT_DIR / "campaign_manifest.json"
 results_jsonl = CAMPAIGN_OUTPUT_DIR / "candidate_results.jsonl"
 summary = CAMPAIGN_OUTPUT_DIR / "campaign_summary.json"
 
-if manifest.is_file():
-    payload = json.loads(manifest.read_text(encoding="utf-8"))
-    entries = payload.get("candidates", {})
-    config_payload = json.loads(config.read_text(encoding="utf-8"))
-    priority_ids = [
-        candidate_id
-        for wave in config_payload["execution_waves"]
-        if isinstance(wave["candidate_ids"], list)
-        for candidate_id in wave["candidate_ids"]
-    ]
-    next_candidate = next(
-        (
-            candidate_id
-            for candidate_id in priority_ids
-            if entries.get(candidate_id, {}).get("state") == "pending"
-        ),
-        "우선 파동 완료 후 remaining_grid에서 결정",
-    )
-    print("실행 상태: 기존 checkpoint 재개")
-    print("현재 등록 기준 다음 후보:", next_candidate)
-else:
-    print("실행 상태: 새 캠페인")
-    print("다음 후보: 설정의 첫 미완료 후보")
 
-command = [
-    sys.executable,
-    "-m",
-    "experiments.independent_dl.run_campaign",
-    "run",
-    "--config",
-    str(config),
-    "--data-dir",
-    str(DATA_DIR),
-    "--output-dir",
-    str(CAMPAIGN_OUTPUT_DIR),
-]
-process = subprocess.Popen(
-    command,
-    cwd=REPO_DIR,
-    env=child_env,
-    text=True,
-    stdout=subprocess.PIPE,
-    stderr=subprocess.STDOUT,
-    bufsize=1,
-)
-assert process.stdout is not None
-for line in process.stdout:
-    print(line, end="")
-returncode = process.wait()
-if returncode != 0:
-    raise RuntimeError(
-        f"독립 DL 캠페인이 실패했습니다(returncode={returncode}). "
-        "위의 첫 원본 traceback부터 모두 보내주세요."
-    )
+CONFIG = config
+MANIFEST = manifest
+RESULTS_JSONL = results_jsonl
+SUMMARY = summary
+FAMILIES = ("tabm", "mlp_resnet", "ft_transformer", "tabr", "tabicl_v2")
 
-if not manifest.is_file():
-    raise RuntimeError(f"campaign_manifest.json이 생성되지 않았습니다: {manifest}")
-payload = json.loads(manifest.read_text(encoding="utf-8"))
-completed = [
-    candidate_id
-    for candidate_id, entry in payload["candidates"].items()
-    if entry["state"] == "completed"
-]
-print("INDEPENDENT_DL_CAMPAIGN_CHECKPOINTED")
+
+def _stream_campaign(command):
+    process = subprocess.Popen(
+        [str(item) for item in command],
+        cwd=REPO_DIR,
+        env=child_env,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        bufsize=1,
+    )
+    assert process.stdout is not None
+    for line in process.stdout:
+        print(line, end="")
+    returncode = process.wait()
+    if returncode != 0:
+        raise RuntimeError(
+            f"독립 DL 후보 실행이 실패했습니다(returncode={returncode}). "
+            "위의 첫 원본 traceback부터 모두 보내주세요."
+        )
+
+
+def show_campaign_status():
+    if not MANIFEST.is_file():
+        print("아직 campaign_manifest.json이 없습니다.")
+        print("원하는 모델 계열 셀을 실행하면 첫 후보와 manifest가 생성됩니다.")
+        return None
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "experiments.independent_dl.run_campaign",
+            "status",
+            "--output-dir",
+            str(CAMPAIGN_OUTPUT_DIR),
+        ],
+        cwd=REPO_DIR,
+        env=child_env,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    if completed.returncode != 0:
+        print(completed.stderr)
+        raise RuntimeError("캠페인 상태 확인에 실패했습니다. 위 오류를 보내주세요.")
+    payload = json.loads(completed.stdout)
+    print("계열별 현재 상태")
+    for family, state in payload["family_status"].items():
+        print(
+            f"- {family}: 완료={len(state['completed'])}, 실패={len(state['failed'])}, "
+            f"남음={state['remaining_count']}, 다음={state['next_candidate']}"
+        )
+    print("P3·P4, boundary expansion, confirmation 후보도 남은 수에 포함됩니다.")
+    return payload
+
+
+def run_one_family(family: str):
+    if family not in FAMILIES:
+        raise ValueError(f"지원하지 않는 모델 계열입니다: {family}")
+    print(f"{family} 계열에서 다음 미완료 후보 하나를 실행합니다.")
+    _stream_campaign(
+        [
+            sys.executable,
+            "-m",
+            "experiments.independent_dl.run_campaign",
+            "run",
+            "--config",
+            str(CONFIG),
+            "--data-dir",
+            str(DATA_DIR),
+            "--output-dir",
+            str(CAMPAIGN_OUTPUT_DIR),
+            "--family",
+            family,
+            "--max-candidates",
+            "1",
+        ]
+    )
+    if not MANIFEST.is_file():
+        raise RuntimeError(f"campaign_manifest.json이 생성되지 않았습니다: {MANIFEST}")
+    print(f"INDEPENDENT_DL_CANDIDATE_CHECKPOINTED family={family}")
+    print("결과 루트:", CAMPAIGN_OUTPUT_DIR)
+    print("Manifest:", MANIFEST)
+    print("Candidate results:", RESULTS_JSONL if RESULTS_JSONL.is_file() else "아직 없음")
+    show_campaign_status()
+
+
+print("INDEPENDENT_DL_SETUP_READY")
 print("결과 루트:", CAMPAIGN_OUTPUT_DIR)
-print("Manifest:", manifest)
-print("Candidate results:", results_jsonl if results_jsonl.is_file() else "아직 없음")
-print("Summary:", summary if summary.is_file() else "아직 없음")
-print("완료 후보 수:", len(completed))
-print("최근 완료 후보:", completed[-1] if completed else "아직 없음")
-print("성공 시 위 경로와 manifest·results·summary 파일을 보내주세요.")
+print("다음으로 '현재 상태 확인' 셀을 실행하세요.")
+```
+
+## 현재 상태 확인
+
+GPU 학습 없이 기존 Drive manifest를 읽어 계열별 완료·실패·남은 후보와 다음 후보를 표시합니다. P3·P4, boundary expansion과 confirmation 후보도 전체 잔여 수에서 숨기지 않습니다. 새 캠페인이라 manifest가 없으면 원하는 모델 실행 셀로 이동하면 됩니다.
+
+```python
+show_campaign_status()
+```
+
+## TabM 후보 1개
+
+- **목적:** `tabm` 계열에서 캠페인 우선순위상 다음 미완료 후보 하나만 전체 2023→2024 데이터로 실행합니다.
+- **필수 입력:** 위의 `공통 준비` 셀이 `INDEPENDENT_DL_SETUP_READY`로 끝나야 하며 Drive 데이터와 결과 폴더가 연결되어 있어야 합니다.
+- **예상 시간:** 대략 수십 분에서 여러 시간이 걸릴 수 있습니다. GPU 종류, feature view, P3·P4 용량과 checkpoint 위치에 따라 달라집니다.
+- **재실행:** 완료 후보는 건너뛰며, 중단된 후보는 Drive의 epoch checkpoint부터 재개합니다. 같은 셀을 다시 실행하면 해당 계열의 다음 후보 하나로 이동합니다.
+- **정상 완료:** `INDEPENDENT_DL_CANDIDATE_CHECKPOINTED family=tabm`와 결과 경로가 출력됩니다.
+- **오류 전달:** 첫 번째 원본 traceback부터 마지막 오류 문구까지 생략하지 말고 보내주세요.
+- **제출:** 이 셀은 성능 evidence만 만들며 제출 CSV나 ZIP을 생성하지 않습니다.
+
+```python
+run_one_family("tabm")
+```
+
+## MLP/ResNet 후보 1개
+
+- **목적:** `mlp_resnet` 계열에서 캠페인 우선순위상 다음 미완료 후보 하나만 전체 2023→2024 데이터로 실행합니다.
+- **필수 입력:** 위의 `공통 준비` 셀이 `INDEPENDENT_DL_SETUP_READY`로 끝나야 하며 Drive 데이터와 결과 폴더가 연결되어 있어야 합니다.
+- **예상 시간:** 대략 1~수 시간이 걸릴 수 있으며 P4는 더 오래 걸릴 수 있습니다. GPU 종류, feature view, P3·P4 용량과 checkpoint 위치에 따라 달라집니다.
+- **재실행:** 완료 후보는 건너뛰며, 중단된 후보는 Drive의 epoch checkpoint부터 재개합니다. 같은 셀을 다시 실행하면 해당 계열의 다음 후보 하나로 이동합니다.
+- **정상 완료:** `INDEPENDENT_DL_CANDIDATE_CHECKPOINTED family=mlp_resnet`와 결과 경로가 출력됩니다.
+- **오류 전달:** 첫 번째 원본 traceback부터 마지막 오류 문구까지 생략하지 말고 보내주세요.
+- **제출:** 이 셀은 성능 evidence만 만들며 제출 CSV나 ZIP을 생성하지 않습니다.
+
+```python
+run_one_family("mlp_resnet")
+```
+
+## FT-Transformer 후보 1개
+
+- **목적:** `ft_transformer` 계열에서 캠페인 우선순위상 다음 미완료 후보 하나만 전체 2023→2024 데이터로 실행합니다.
+- **필수 입력:** 위의 `공통 준비` 셀이 `INDEPENDENT_DL_SETUP_READY`로 끝나야 하며 Drive 데이터와 결과 폴더가 연결되어 있어야 합니다.
+- **예상 시간:** 대략 수 시간에서 한 세션 가까이 걸릴 수 있습니다. GPU 종류, feature view, P3·P4 용량과 checkpoint 위치에 따라 달라집니다.
+- **재실행:** 완료 후보는 건너뛰며, 중단된 후보는 Drive의 epoch checkpoint부터 재개합니다. 같은 셀을 다시 실행하면 해당 계열의 다음 후보 하나로 이동합니다.
+- **정상 완료:** `INDEPENDENT_DL_CANDIDATE_CHECKPOINTED family=ft_transformer`와 결과 경로가 출력됩니다.
+- **오류 전달:** 첫 번째 원본 traceback부터 마지막 오류 문구까지 생략하지 말고 보내주세요.
+- **제출:** 이 셀은 성능 evidence만 만들며 제출 CSV나 ZIP을 생성하지 않습니다.
+
+```python
+run_one_family("ft_transformer")
+```
+
+## TabR 후보 1개
+
+- **목적:** `tabr` 계열에서 캠페인 우선순위상 다음 미완료 후보 하나만 전체 2023→2024 데이터로 실행합니다.
+- **필수 입력:** 위의 `공통 준비` 셀이 `INDEPENDENT_DL_SETUP_READY`로 끝나야 하며 Drive 데이터와 결과 폴더가 연결되어 있어야 합니다.
+- **예상 시간:** retrieval 비용 때문에 수 시간 이상 또는 세션을 넘길 수 있습니다. GPU 종류, feature view, P3·P4 용량과 checkpoint 위치에 따라 달라집니다.
+- **재실행:** 완료 후보는 건너뛰며, 중단된 후보는 Drive의 epoch checkpoint부터 재개합니다. 같은 셀을 다시 실행하면 해당 계열의 다음 후보 하나로 이동합니다.
+- **정상 완료:** `INDEPENDENT_DL_CANDIDATE_CHECKPOINTED family=tabr`와 결과 경로가 출력됩니다.
+- **오류 전달:** 첫 번째 원본 traceback부터 마지막 오류 문구까지 생략하지 말고 보내주세요.
+- **제출:** 이 셀은 성능 evidence만 만들며 제출 CSV나 ZIP을 생성하지 않습니다.
+
+```python
+run_one_family("tabr")
+```
+
+## TabICLv2 후보 1개
+
+- **목적:** `tabicl_v2` 계열에서 캠페인 우선순위상 다음 미완료 후보 하나만 전체 2023→2024 데이터로 실행합니다.
+- **필수 입력:** 위의 `공통 준비` 셀이 `INDEPENDENT_DL_SETUP_READY`로 끝나야 하며 Drive 데이터와 결과 폴더가 연결되어 있어야 합니다.
+- **예상 시간:** T4 메모리나 세션 한도를 넘길 수 있습니다. GPU 종류, feature view, P3·P4 용량과 checkpoint 위치에 따라 달라집니다.
+- **재실행:** 완료 후보는 건너뛰며, 중단된 후보는 Drive의 epoch checkpoint부터 재개합니다. 같은 셀을 다시 실행하면 해당 계열의 다음 후보 하나로 이동합니다.
+- **정상 완료:** `INDEPENDENT_DL_CANDIDATE_CHECKPOINTED family=tabicl_v2`와 결과 경로가 출력됩니다.
+- **오류 전달:** 첫 번째 원본 traceback부터 마지막 오류 문구까지 생략하지 말고 보내주세요.
+- **제출:** 이 셀은 성능 evidence만 만들며 제출 CSV나 ZIP을 생성하지 않습니다.
+- **연구 상태:** TabICLv2는 대회 사용 가능성 확인 전까지 `research_only`이며 자동 채택하지 않습니다.
+
+```python
+run_one_family("tabicl_v2")
+```
+
+## 결과 요약
+
+GPU 학습 없이 현재 계열별 상태와 `campaign_summary.json`, `candidate_results.jsonl` 경로를 확인합니다. 아직 모든 후보가 끝나지 않았으면 P3·P4, boundary expansion, confirmation까지 남은 수가 표시됩니다. 이 셀도 제출 파일을 만들지 않습니다.
+
+```python
+status_payload = show_campaign_status()
+print("Manifest:", MANIFEST if MANIFEST.is_file() else "아직 없음")
+print("Candidate results:", RESULTS_JSONL if RESULTS_JSONL.is_file() else "아직 없음")
+print("Summary:", SUMMARY if SUMMARY.is_file() else "아직 없음")
+print("위 상태 출력과 생성된 경로를 보내주세요.")
 ```
