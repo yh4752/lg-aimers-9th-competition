@@ -39,7 +39,7 @@ def test_wave_a_expands_eight_anchors_nineteen_settings_and_five_folds() -> None
 def test_contract_pins_the_existing_campaign_bytes(tmp_path: Path) -> None:
     shutil.copy2(SOURCE_CONFIG, tmp_path / SOURCE_CONFIG.name)
     config = CONFIG.read_text(encoding="utf-8").replace(
-        "bd8116773b3f77255315262277461cd27764b9fc37d73a5e7c1f72b2a7f98b53",
+        "a3a7f82b6d20d59764f0c7e2964a3c2b9489b452ebd59f5a9c137cf25e6d5c55",
         "0" * 64,
     )
     changed = tmp_path / CONFIG.name

@@ -3,7 +3,7 @@
   "campaign_id": "preprocessing_campaign_v1",
   "protocol": "five_fold_eda_informed_preprocessing_v1",
   "source_campaign_config": "campaign_v1.json",
-  "source_campaign_sha256": "bd8116773b3f77255315262277461cd27764b9fc37d73a5e7c1f72b2a7f98b53",
+  "source_campaign_sha256": "a3a7f82b6d20d59764f0c7e2964a3c2b9489b452ebd59f5a9c137cf25e6d5c55",
   "folds": [[2019, 2020], [2020, 2021], [2021, 2022], [2022, 2023], [2023, 2024]],
   "seeds": [42, 2026, 3407],
   "anchors": [
