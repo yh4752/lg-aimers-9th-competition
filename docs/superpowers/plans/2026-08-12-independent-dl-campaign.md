@@ -263,6 +263,7 @@ class FeatureState:
     numeric_std: tuple[float, ...]
     engineered_payload: Mapping[str, object]
     trackman_result: TrackmanBuildResult | None
+    trackman_lookup_sha256: str | None
 
 
 @dataclass(frozen=True)
@@ -290,7 +291,7 @@ Fit category maps, means, standard deviations, frequencies, Trackman matching, a
 
 - [ ] **Step 4: Implement cache persistence**
 
-Write `x_num.npy`, `x_cat.npy`, `row_id.npy`, `season.npy`, `game_type.npy`, optional `y.npy`, `state.json`, and `identity.json` below `{cache_root}/{fold}/{view}/`. Load arrays with `numpy.load(..., mmap_mode="r")`. Identity must contain lowercase SHA-256 for train row IDs, validation row IDs, cutoff, feature code, state payload, and exact schema. Write to a sibling temporary directory and publish with `os.replace`; no hard links.
+Write `x_num.npy`, `x_cat.npy`, `row_id.npy`, `season.npy`, `game_type.npy`, optional `y.npy`, `state.json`, and `identity.json` below `{cache_root}/{fold}/{view}/`. For `trackman_augmented`, write the lookup separately as `trackman_lookup.csv`; `state.json` contains only its cutoff, schema, and lowercase SHA-256, never the DataFrame itself. Reconstruct the in-memory `TrackmanBuildResult` from that bound lookup when a later transform needs it. Load arrays with `numpy.load(..., mmap_mode="r")`. Identity must contain lowercase SHA-256 for train row IDs, validation row IDs, cutoff, feature code, state payload, Trackman lookup when present, and exact schema. Write to a sibling temporary directory and publish with `os.replace`; no hard links.
 
 - [ ] **Step 5: Run the focused feature tests**
 
