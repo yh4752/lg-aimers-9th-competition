@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 
+from experiments.independent_dl.campaign import _config_sha256
 from experiments.independent_dl.contracts import CampaignContractError, load_campaign
 
 
@@ -11,7 +12,29 @@ ROOT = Path(__file__).resolve().parents[1]
 CONFIG = ROOT / "experiments/independent_dl/configs/campaign_v1.json"
 
 
-def test_campaign_expands_four_families_four_views_and_64_candidates() -> None:
+EXPECTED_FRONTIER_PRIORITY = (
+    "tabm__raw_typed__p1__s42",
+    "tabm__raw_typed__p2__s42",
+    "tabm__engineered__p2__s42",
+    "tabm__entity_context__p2__s42",
+    "tabm__trackman_augmented__p2__s42",
+    "tabm__raw_typed__p3__s42",
+    "tabm__engineered__p3__s42",
+    "tabm__entity_context__p3__s42",
+    "tabm__trackman_augmented__p3__s42",
+    "mlp_resnet__raw_typed__p3__s42",
+    "mlp_resnet__engineered__p3__s42",
+    "mlp_resnet__entity_context__p3__s42",
+    "mlp_resnet__trackman_augmented__p3__s42",
+    "ft_transformer__raw_typed__p3__s42",
+    "ft_transformer__engineered__p3__s42",
+    "ft_transformer__entity_context__p3__s42",
+    "ft_transformer__trackman_augmented__p3__s42",
+    "tabicl_v2__raw_typed__frontier32__s42",
+)
+
+
+def test_campaign_expands_trainable_grid_and_frontier_candidate() -> None:
     campaign = load_campaign(CONFIG)
 
     assert campaign.campaign_id == "independent_dl_campaign_v1"
@@ -20,6 +43,7 @@ def test_campaign_expands_four_families_four_views_and_64_candidates() -> None:
         "mlp_resnet",
         "ft_transformer",
         "tabr",
+        "tabicl_v2",
     }
     assert {candidate.feature_view for candidate in campaign.candidates} == {
         "raw_typed",
@@ -27,8 +51,29 @@ def test_campaign_expands_four_families_four_views_and_64_candidates() -> None:
         "entity_context",
         "trackman_augmented",
     }
-    assert len(campaign.candidates) == 64
-    assert len({candidate.candidate_id for candidate in campaign.candidates}) == 64
+    assert len(campaign.candidates) == 65
+    assert len({candidate.candidate_id for candidate in campaign.candidates}) == 65
+
+
+def test_campaign_uses_frontier_priority_before_remaining_grid() -> None:
+    campaign = load_campaign(CONFIG)
+
+    assert tuple(
+        candidate.candidate_id for candidate in campaign.candidates[:18]
+    ) == EXPECTED_FRONTIER_PRIORITY
+    assert campaign.candidates[17].stage == "research_only"
+
+
+def test_existing_candidate_hashes_survive_execution_wave_upgrade() -> None:
+    campaign = load_campaign(CONFIG)
+    by_id = {candidate.candidate_id: candidate for candidate in campaign.candidates}
+
+    assert _config_sha256(by_id["tabm__raw_typed__p1__s42"]) == (
+        "57c86f873a4eadbe69214f28259c0b5f3feb27dcedbdccb487b9d87c28771801"
+    )
+    assert _config_sha256(by_id["tabm__raw_typed__p2__s42"]) == (
+        "49043e2018df2af03469f0606908806f3a82174abb32a7e823b6b6e8d7ddab34"
+    )
 
 
 def test_campaign_contains_full_scale_and_boundary_expansion_contracts() -> None:
@@ -51,18 +96,19 @@ def test_campaign_contains_full_scale_and_boundary_expansion_contracts() -> None
 
 def test_campaign_keeps_performance_first_training_profiles() -> None:
     campaign = load_campaign(CONFIG)
+    trainable = [item for item in campaign.candidates if item.family != "tabicl_v2"]
 
-    assert {candidate.training["scheduler"] for candidate in campaign.candidates} == {
+    assert {candidate.training["scheduler"] for candidate in trainable} == {
         "cosine",
         "plateau",
         "one_cycle",
         "cosine_warmup",
     }
-    assert {candidate.training["effective_batch_size"] for candidate in campaign.candidates} == {
+    assert {candidate.training["effective_batch_size"] for candidate in trainable} == {
         4096
     }
-    assert {candidate.training["amp"] for candidate in campaign.candidates} == {True}
-    assert {candidate.training["patience"] for candidate in campaign.candidates} == {
+    assert {candidate.training["amp"] for candidate in trainable} == {True}
+    assert {candidate.training["patience"] for candidate in trainable} == {
         30,
         40,
         60,

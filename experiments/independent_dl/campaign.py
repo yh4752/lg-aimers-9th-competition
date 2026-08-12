@@ -355,11 +355,28 @@ def _register_candidate(manifest: dict[str, object], candidate: CandidateSpec) -
         entries[candidate.candidate_id] = _new_entry(candidate)
 
 
-def _registered_candidates(manifest: Mapping[str, object]) -> tuple[CandidateSpec, ...]:
-    return tuple(
-        _candidate_from_payload(entry["candidate"])
-        for entry in manifest["candidates"].values()
+def _registered_candidates(
+    manifest: Mapping[str, object], campaign: CampaignSpec | None = None
+) -> tuple[CandidateSpec, ...]:
+    entries = manifest["candidates"]
+    registered = {
+        candidate_id: _candidate_from_payload(entry["candidate"])
+        for candidate_id, entry in entries.items()
+    }
+    if campaign is None:
+        return tuple(registered.values())
+    priority = [
+        registered[candidate.candidate_id]
+        for candidate in campaign.candidates
+        if candidate.candidate_id in registered
+    ]
+    priority_ids = {candidate.candidate_id for candidate in priority}
+    priority.extend(
+        candidate
+        for candidate_id, candidate in registered.items()
+        if candidate_id not in priority_ids
     )
+    return tuple(priority)
 
 
 def _terminal(entry: Mapping[str, object]) -> bool:
@@ -495,7 +512,7 @@ def run_campaign(
     _save_manifest(manifest_path, manifest)
 
     while True:
-        for candidate in _registered_candidates(manifest):
+        for candidate in _registered_candidates(manifest, campaign):
             entry = entries[candidate.candidate_id]
             if entry["state"] != "pending":
                 continue
@@ -551,7 +568,7 @@ def run_campaign(
                 flush=True,
             )
 
-        registered = _registered_candidates(manifest)
+        registered = _registered_candidates(manifest, campaign)
         if not manifest["boundary_expansion_registered"]:
             initial_entries = [
                 entries[item.candidate_id]
@@ -578,7 +595,7 @@ def run_campaign(
         if not any(entry["state"] == "pending" for entry in entries.values()):
             break
 
-    registered = _registered_candidates(manifest)
+    registered = _registered_candidates(manifest, campaign)
     completed = tuple(
         item.candidate_id
         for item in registered

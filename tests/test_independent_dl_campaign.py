@@ -13,6 +13,7 @@ from experiments.independent_dl.campaign import (
     CandidateExecutionError,
     CandidateRunResult,
     OfficialCampaignRuntime,
+    _new_manifest,
     run_campaign,
 )
 from experiments.independent_dl.contracts import CandidateSpec, CampaignSpec
@@ -105,6 +106,29 @@ def test_campaign_resumes_without_repeating_completed_candidate(tmp_path: Path) 
 
     assert "candidate_0001" not in second_runtime.started
     assert summary.completed == ("candidate_0001", "candidate_0002")
+
+
+def test_existing_manifest_order_does_not_override_campaign_priority(
+    tmp_path: Path,
+) -> None:
+    first = _candidate("priority_first", width=512)
+    second = _candidate("priority_second", width=256)
+    campaign = _campaign((first, second))
+    manifest = _new_manifest(campaign)
+    manifest["candidates"] = {
+        "priority_second": manifest["candidates"]["priority_second"],
+        "priority_first": manifest["candidates"]["priority_first"],
+    }
+    tmp_path.mkdir(exist_ok=True)
+    (tmp_path / "campaign_manifest.json").write_text(
+        json.dumps(manifest), encoding="utf-8"
+    )
+    runtime = _FakeRuntime(interrupt_on="priority_first")
+
+    with pytest.raises(RuntimeError, match="fake interruption"):
+        run_campaign(campaign, tmp_path, runtime)
+
+    assert runtime.started == ["priority_first"]
 
 
 def test_changed_completed_artifact_is_run_again(tmp_path: Path) -> None:

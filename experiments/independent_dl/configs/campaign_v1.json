@@ -1,10 +1,70 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "campaign_id": "independent_dl_campaign_v1",
   "protocol": "yearly_transition_independent_dl_v1",
   "exploration_fold": [2023, 2024],
   "oof_folds": [[2021, 2022], [2022, 2023], [2023, 2024]],
   "feature_views": ["raw_typed", "engineered", "entity_context", "trackman_augmented"],
+  "execution_waves": [
+    {
+      "wave_id": "recorded_tabm_raw",
+      "candidate_ids": [
+        "tabm__raw_typed__p1__s42",
+        "tabm__raw_typed__p2__s42"
+      ]
+    },
+    {
+      "wave_id": "tabm_representation_cross",
+      "candidate_ids": [
+        "tabm__engineered__p2__s42",
+        "tabm__entity_context__p2__s42",
+        "tabm__trackman_augmented__p2__s42",
+        "tabm__raw_typed__p3__s42",
+        "tabm__engineered__p3__s42",
+        "tabm__entity_context__p3__s42",
+        "tabm__trackman_augmented__p3__s42"
+      ]
+    },
+    {
+      "wave_id": "cross_family_large",
+      "candidate_ids": [
+        "mlp_resnet__raw_typed__p3__s42",
+        "mlp_resnet__engineered__p3__s42",
+        "mlp_resnet__entity_context__p3__s42",
+        "mlp_resnet__trackman_augmented__p3__s42",
+        "ft_transformer__raw_typed__p3__s42",
+        "ft_transformer__engineered__p3__s42",
+        "ft_transformer__entity_context__p3__s42",
+        "ft_transformer__trackman_augmented__p3__s42"
+      ]
+    },
+    {
+      "wave_id": "frontier_foundation",
+      "candidate_ids": ["tabicl_v2__raw_typed__frontier32__s42"]
+    },
+    {
+      "wave_id": "remaining_grid",
+      "candidate_ids": "remaining_grid"
+    }
+  ],
+  "frontier_candidates": [
+    {
+      "candidate_id": "tabicl_v2__raw_typed__frontier32__s42",
+      "family": "tabicl_v2",
+      "feature_view": "raw_typed",
+      "seed": 42,
+      "epochs": 1,
+      "stage": "research_only",
+      "model": {
+        "architecture": "tabicl_v2",
+        "n_estimators": 32,
+        "kv_cache": true,
+        "offload_mode": "auto",
+        "checkpoint_version": "tabicl-classifier-v2-20260212.ckpt"
+      },
+      "training": {}
+    }
+  ],
   "exploration_seed": 42,
   "confirmation_seeds": [2026, 3407],
   "blend_weights": [0.05, 0.1, 0.15, 0.2, 0.25, 0.3, 0.35, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 0.95],

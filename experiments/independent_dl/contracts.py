@@ -51,6 +51,8 @@ _TOP_LEVEL_KEYS = {
     "exploration_fold",
     "oof_folds",
     "feature_views",
+    "execution_waves",
+    "frontier_candidates",
     "exploration_seed",
     "confirmation_seeds",
     "blend_weights",
@@ -199,7 +201,86 @@ def _expand_candidates(payload: dict[str, object]) -> tuple[CandidateSpec, ...]:
                 )
     if len({candidate.candidate_id for candidate in candidates}) != 64:
         raise CampaignContractError("candidate IDs are not unique")
-    return tuple(candidates)
+    frontier_value = payload["frontier_candidates"]
+    if not isinstance(frontier_value, list) or not frontier_value:
+        raise CampaignContractError("frontier_candidates must be a non-empty list")
+    for index, candidate_value in enumerate(frontier_value):
+        candidate = _mapping(candidate_value, f"frontier_candidates[{index}]")
+        if set(candidate) != {
+            "candidate_id",
+            "family",
+            "feature_view",
+            "seed",
+            "epochs",
+            "stage",
+            "model",
+            "training",
+        }:
+            raise CampaignContractError("frontier candidate keys are invalid")
+        if candidate["family"] != "tabicl_v2":
+            raise CampaignContractError("frontier candidate family is invalid")
+        if candidate["feature_view"] not in _FEATURE_VIEWS:
+            raise CampaignContractError("frontier candidate feature view is invalid")
+        if candidate["stage"] != "research_only":
+            raise CampaignContractError("frontier candidate must be research_only")
+        candidate_id = candidate["candidate_id"]
+        if not isinstance(candidate_id, str) or not candidate_id:
+            raise CampaignContractError("frontier candidate_id is invalid")
+        candidates.append(
+            CandidateSpec(
+                candidate_id=candidate_id,
+                family="tabicl_v2",
+                feature_view=str(candidate["feature_view"]),
+                seed=_integer(candidate["seed"], "frontier seed", minimum=0),
+                epochs=_integer(candidate["epochs"], "frontier epochs", minimum=1),
+                model=_freeze_mapping(
+                    _mapping(candidate["model"], "frontier candidate model")
+                ),
+                training=_freeze_mapping(
+                    _mapping(candidate["training"], "frontier candidate training")
+                ),
+                train_end_year=train_end_year,
+                valid_year=valid_year,
+                stage="research_only",
+            )
+        )
+    by_id = {candidate.candidate_id: candidate for candidate in candidates}
+    if len(by_id) != len(candidates):
+        raise CampaignContractError("candidate IDs are not unique")
+    waves_value = payload["execution_waves"]
+    if not isinstance(waves_value, list) or not waves_value:
+        raise CampaignContractError("execution_waves must be a non-empty list")
+    ordered_ids: list[str] = []
+    saw_remaining = False
+    for index, wave_value in enumerate(waves_value):
+        wave = _mapping(wave_value, f"execution_waves[{index}]")
+        if set(wave) != {"wave_id", "candidate_ids"}:
+            raise CampaignContractError("execution wave keys are invalid")
+        wave_id = wave["wave_id"]
+        if not isinstance(wave_id, str) or not wave_id:
+            raise CampaignContractError("execution wave_id is invalid")
+        ids = wave["candidate_ids"]
+        if ids == "remaining_grid":
+            if saw_remaining or index != len(waves_value) - 1:
+                raise CampaignContractError("remaining_grid must be the final wave")
+            saw_remaining = True
+            ordered_ids.extend(
+                candidate.candidate_id
+                for candidate in candidates
+                if candidate.candidate_id not in ordered_ids
+            )
+            continue
+        if not isinstance(ids, list) or not ids:
+            raise CampaignContractError("execution candidate_ids are invalid")
+        for candidate_id in ids:
+            if not isinstance(candidate_id, str) or candidate_id not in by_id:
+                raise CampaignContractError("execution wave contains unknown candidate")
+            if candidate_id in ordered_ids:
+                raise CampaignContractError("execution wave contains duplicate candidate")
+            ordered_ids.append(candidate_id)
+    if not saw_remaining or len(ordered_ids) != len(candidates):
+        raise CampaignContractError("execution waves do not cover every candidate")
+    return tuple(by_id[candidate_id] for candidate_id in ordered_ids)
 
 
 def load_campaign(path: str | Path) -> CampaignSpec:
@@ -219,7 +300,7 @@ def load_campaign(path: str | Path) -> CampaignSpec:
     payload = _mapping(value, "campaign")
     if set(payload) != _TOP_LEVEL_KEYS:
         raise CampaignContractError("campaign top-level keys are invalid")
-    if payload["schema_version"] != 1:
+    if payload["schema_version"] != 2:
         raise CampaignContractError("unsupported campaign schema_version")
     if payload["campaign_id"] != "independent_dl_campaign_v1":
         raise CampaignContractError("campaign_id is invalid")
