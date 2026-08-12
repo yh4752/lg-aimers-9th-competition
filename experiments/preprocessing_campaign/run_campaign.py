@@ -179,6 +179,10 @@ def _promote_a(campaign, root: Path) -> dict[str, object]:
         ],
         ignore_index=True,
     )
+    predictions["squared_error"] = (
+        pd.to_numeric(predictions["probability"], errors="raise")
+        - pd.to_numeric(predictions["target"], errors="raise")
+    ) ** 2
     metrics = build_metric_rows(predictions)
     fold_metrics = root / "fold_metrics.csv"
     metrics.to_csv(fold_metrics.with_suffix(".csv.tmp"), index=False)
@@ -223,7 +227,42 @@ def _promote_a(campaign, root: Path) -> dict[str, object]:
                 < 0
                 for column in ("pitcher_oov_brier", "batter_oov_brier")
             )
-            rankings.append((weighted, -improved, setting.setting_id, oov_improved))
+            row_candidate = predictions.loc[
+                predictions["anchor_id"].eq(anchor_id)
+                & predictions["preprocessing_id"].eq(setting.setting_id)
+            ]
+            row_baseline = predictions.loc[
+                predictions["anchor_id"].eq(anchor_id)
+                & predictions["preprocessing_id"].eq("dl_standard")
+            ]
+            segment_pairs = row_candidate.merge(
+                row_baseline,
+                on=["row_id", "fold", "season", "game_type", "anchor_id", "seed"],
+                suffixes=("_candidate", "_baseline"),
+                validate="one_to_one",
+            )
+            segment_pairs["delta"] = (
+                segment_pairs["squared_error_candidate"]
+                - segment_pairs["squared_error_baseline"]
+            )
+            game_type_improved = any(
+                float(group["delta"].mean()) < 0
+                and int(
+                    (
+                        group.groupby("fold", observed=True)["delta"].mean() < 0
+                    ).sum()
+                )
+                >= 3
+                for _, group in segment_pairs.groupby("game_type", observed=True)
+            )
+            rankings.append(
+                (
+                    weighted,
+                    -improved,
+                    setting.setting_id,
+                    oov_improved or game_type_improved,
+                )
+            )
         rankings.sort()
         chosen = {
             setting_id
