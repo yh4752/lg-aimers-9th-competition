@@ -29,6 +29,78 @@ class _TorchTabRRuntime:
         self.context = context
         self.retrieval = retrieval
         self.candidate_chunk_size = 8192
+        self._cached_keys: object | None = None
+
+    def refresh_keys(self, model: object, device: str) -> None:
+        torch = import_runtime_module("torch")
+        was_training = bool(model.training)
+        model.eval()
+        keys: list[object] = []
+        with torch.no_grad():
+            for start in range(0, len(self.context.row_id), self.candidate_chunk_size):
+                stop = min(start + self.candidate_chunk_size, len(self.context.row_id))
+                candidate_num = torch.as_tensor(
+                    np.asarray(self.context.x_num[start:stop]),
+                    dtype=torch.float32,
+                    device=device,
+                )
+                candidate_cat = torch.as_tensor(
+                    np.asarray(self.context.x_cat[start:stop]),
+                    dtype=torch.long,
+                    device=device,
+                )
+                _, candidate_keys = model.encode(candidate_num, candidate_cat)
+                keys.append(candidate_keys.detach().to(dtype=torch.float32, device="cpu"))
+        model.train(was_training)
+        self._cached_keys = torch.cat(keys, dim=0).contiguous()
+
+    def search(
+        self,
+        model: object,
+        x_num: object,
+        x_cat: object,
+        *,
+        row_indices: object | None,
+    ) -> object:
+        _, query_keys = model.encode(x_num, x_cat)
+        return self._search_keys(query_keys, row_indices=row_indices)
+
+    def _search_keys(self, query_keys: object, *, row_indices: object | None) -> object:
+        torch = import_runtime_module("torch")
+        if self._cached_keys is None:
+            raise RuntimeError("TabR retrieval keys require refresh before search")
+        device = query_keys.device
+        top_scores = None
+        top_indices = None
+        with torch.no_grad():
+            for start in range(0, len(self.context.row_id), self.candidate_chunk_size):
+                stop = min(start + self.candidate_chunk_size, len(self.context.row_id))
+                candidate_keys = self._cached_keys[start:stop].to(device=device)
+                scores = (
+                    -query_keys.square().sum(-1, keepdim=True)
+                    + 2.0 * (query_keys @ candidate_keys.T)
+                    - candidate_keys.square().sum(-1).unsqueeze(0)
+                )
+                candidate_indices = torch.arange(start, stop, device=device)
+                if row_indices is not None:
+                    scores = scores.masked_fill(
+                        candidate_indices.unsqueeze(0).eq(row_indices.unsqueeze(1)),
+                        float("-inf"),
+                    )
+                expanded_indices = candidate_indices.unsqueeze(0).expand(
+                    len(query_keys), -1
+                )
+                if top_scores is not None:
+                    scores = torch.cat([top_scores, scores], dim=1)
+                    expanded_indices = torch.cat([top_indices, expanded_indices], dim=1)
+                keep = min(self.retrieval, scores.shape[1])
+                top_scores, positions = torch.topk(
+                    scores, k=keep, dim=1, largest=True, sorted=True
+                )
+                top_indices = expanded_indices.gather(1, positions)
+        if top_indices is None or top_indices.shape[1] != self.retrieval:
+            raise RuntimeError("TabR search did not produce the requested contexts")
+        return top_indices
 
     def probabilities(self, model: object, x_num: object, x_cat: object) -> object:
         return self._forward(model, x_num, x_cat, row_indices=None).sigmoid()
@@ -58,48 +130,7 @@ class _TorchTabRRuntime:
         torch = import_runtime_module("torch")
         device = x_num.device
         query_x, query_k = model.encode(x_num, x_cat)
-        top_scores = None
-        top_indices = None
-        with torch.no_grad():
-            for start in range(0, len(self.context.row_id), self.candidate_chunk_size):
-                stop = min(start + self.candidate_chunk_size, len(self.context.row_id))
-                candidate_num = torch.as_tensor(
-                    np.asarray(self.context.x_num[start:stop]),
-                    dtype=torch.float32,
-                    device=device,
-                )
-                candidate_cat = torch.as_tensor(
-                    np.asarray(self.context.x_cat[start:stop]),
-                    dtype=torch.long,
-                    device=device,
-                )
-                _, candidate_k = model.encode(candidate_num, candidate_cat)
-                scores = (
-                    -query_k.square().sum(-1, keepdim=True)
-                    + 2.0 * (query_k @ candidate_k.T)
-                    - candidate_k.square().sum(-1).unsqueeze(0)
-                )
-                candidate_indices = torch.arange(start, stop, device=device)
-                if row_indices is not None:
-                    scores = scores.masked_fill(
-                        candidate_indices.unsqueeze(0).eq(row_indices.unsqueeze(1)),
-                        float("-inf"),
-                    )
-                expanded_indices = candidate_indices.unsqueeze(0).expand(
-                    len(query_k), -1
-                )
-                if top_scores is not None:
-                    scores = torch.cat([top_scores, scores], dim=1)
-                    expanded_indices = torch.cat(
-                        [top_indices, expanded_indices], dim=1
-                    )
-                keep = min(self.retrieval, scores.shape[1])
-                top_scores, positions = torch.topk(
-                    scores, k=keep, dim=1, largest=True, sorted=False
-                )
-                top_indices = expanded_indices.gather(1, positions)
-        if top_indices is None or top_indices.shape[1] != self.retrieval:
-            raise RuntimeError("TabR search did not produce the requested contexts")
+        top_indices = self._search_keys(query_k, row_indices=row_indices)
 
         flat_indices = top_indices.detach().cpu().numpy().reshape(-1)
         context_num = torch.as_tensor(
@@ -262,6 +293,11 @@ class TabRAdapter:
         if self._runtime is None:
             raise TabRContractError("TabR runtime is not prepared")
         return self._runtime.probabilities(model, x_num, x_cat)
+
+    def refresh_retrieval_cache(self, model: object, device: str) -> None:
+        if self._runtime is None:
+            raise TabRContractError("TabR runtime is not prepared")
+        self._runtime.refresh_keys(model, device)
 
     def optimizer(
         self, model: object, training_config: Mapping[str, object]

@@ -96,6 +96,12 @@ def prepare_adapter_context(adapter: object, train: FeatureBatch) -> None:
         fit_context(train)
 
 
+def refresh_retrieval_cache(adapter: object, model: object, device: str) -> None:
+    refresh = getattr(adapter, "refresh_retrieval_cache", None)
+    if refresh is not None:
+        refresh(model, device)
+
+
 def call_adapter_loss(
     adapter: ModelAdapter,
     model: object,
@@ -333,6 +339,7 @@ class TorchTrainingBackend:
             torch.set_rng_state(payload["torch_rng"])
             torch.cuda.set_rng_state_all(payload["cuda_rng"])
 
+        refresh_retrieval_cache(adapter, model, device)
         patience = int(request.training_config["patience"])
         stale_epochs = 0 if best_epoch < 0 else max(0, resume_epoch - 1 - best_epoch)
         last_epoch = resume_epoch - 1
@@ -383,6 +390,7 @@ class TorchTrainingBackend:
                 if scheduler_mode == "update":
                     scheduler.step()
 
+            refresh_retrieval_cache(adapter, model, device)
             predictions = self._predict(
                 torch,
                 request.valid,
@@ -439,6 +447,7 @@ class TorchTrainingBackend:
             raise RuntimeError("training did not produce a valid checkpoint")
         best_payload = torch.load(best_path, map_location=device, weights_only=True)
         model.load_state_dict(best_payload["model"])
+        refresh_retrieval_cache(adapter, model, device)
         predictions = self._predict(
             torch,
             request.valid,

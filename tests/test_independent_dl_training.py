@@ -21,6 +21,7 @@ from experiments.independent_dl.training import (
     fit_candidate,
     inspect_cuda_hardware,
     prepare_adapter_context,
+    refresh_retrieval_cache,
 )
 
 
@@ -280,6 +281,19 @@ def test_training_prepares_optional_retrieval_context() -> None:
     prepare_adapter_context(adapter, batch)
 
     assert adapter.batch is batch
+
+
+def test_training_refreshes_optional_retrieval_cache() -> None:
+    class CacheAdapter:
+        def refresh_retrieval_cache(self, model, device):
+            self.call = (model, device)
+
+    adapter = CacheAdapter()
+    model = object()
+
+    refresh_retrieval_cache(adapter, model, "cuda")
+
+    assert adapter.call == (model, "cuda")
 
 
 def test_oom_retry_resumes_newly_completed_checkpoint(tmp_path: Path) -> None:
