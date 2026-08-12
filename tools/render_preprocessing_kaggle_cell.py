@@ -10,7 +10,7 @@ import subprocess
 
 
 ROOT = Path(__file__).resolve().parents[1]
-RUNTIME_COMMIT = "adef6cdfc4f0dbcf7cdde7548719b3012f43ec3e"
+RUNTIME_COMMIT = "276b54c7fa93aa041a6fcd4f389c2d6e8cea002c"
 OUTPUT = ROOT / "experiments/preprocessing_campaign/KAGGLE_CELL.py"
 
 
@@ -48,7 +48,7 @@ import traceback
 MAX_JOBS_PER_SESSION = 5
 INPUT_ROOT = Path("/kaggle/input")
 WORKING_ROOT = Path("/kaggle/working")
-REPO_DIR = WORKING_ROOT / "preprocessing_embedded_code_adef6cd"
+REPO_DIR = WORKING_ROOT / "preprocessing_embedded_code_276b54c"
 REQUIRED_CODE_COMMIT = "__COMMIT__"
 RUNTIME_DIR = WORKING_ROOT / "preprocessing_runtime_v1"
 CAMPAIGN_OUTPUT_DIR = WORKING_ROOT / "preprocessing_campaign_v1"
