@@ -558,7 +558,20 @@ def run_campaign(
     campaign: CampaignSpec,
     output_root: str | Path,
     runtime: CampaignRuntime,
+    *,
+    family: str | None = None,
+    max_candidates: int | None = None,
 ) -> CampaignSummary:
+    families = {candidate.family for candidate in campaign.candidates}
+    if family is not None and family not in families:
+        raise CampaignStateError(f"family is not registered: {family}")
+    if max_candidates is not None and (
+        isinstance(max_candidates, bool)
+        or not isinstance(max_candidates, int)
+        or max_candidates <= 0
+    ):
+        raise CampaignStateError("max_candidates must be a positive integer")
+
     root = Path(output_root).resolve()
     root.mkdir(parents=True, exist_ok=True)
     manifest_path = root / "campaign_manifest.json"
@@ -572,13 +585,18 @@ def run_campaign(
             entry["failure_reason"] = None
     _save_manifest(manifest_path, manifest)
 
+    attempted = 0
     while True:
+        limit_reached = False
         for candidate in _registered_candidates(manifest, campaign):
             entry = entries[candidate.candidate_id]
-            if entry["state"] != "pending":
+            if entry["state"] != "pending" or (
+                family is not None and candidate.family != family
+            ):
                 continue
             entry["state"] = "running"
             entry["attempts"] = int(entry["attempts"]) + 1
+            attempted += 1
             entry["updated_at"] = _utc_now()
             _save_manifest(manifest_path, manifest)
             candidate_dir = root / "candidates" / candidate.candidate_id
@@ -595,6 +613,9 @@ def run_campaign(
                 entry["updated_at"] = _utc_now()
                 _save_manifest(manifest_path, manifest)
                 print(f"[independent-dl] 후보 실패:\n{error}", flush=True)
+                if max_candidates is not None and attempted >= max_candidates:
+                    limit_reached = True
+                    break
                 continue
             except BaseException:
                 _save_manifest(manifest_path, manifest)
@@ -628,8 +649,12 @@ def run_campaign(
                 f"brier={float(result.best_brier):.12f}",
                 flush=True,
             )
+            if max_candidates is not None and attempted >= max_candidates:
+                limit_reached = True
+                break
 
         registered = _registered_candidates(manifest, campaign)
+        registered_more = False
         if not manifest["boundary_expansion_registered"]:
             initial_entries = [
                 entries[item.candidate_id]
@@ -639,7 +664,7 @@ def run_campaign(
             if all(_terminal(entry) for entry in initial_entries):
                 _register_boundary_expansions(campaign, manifest)
                 _save_manifest(manifest_path, manifest)
-                continue
+                registered_more = True
         if (
             manifest["boundary_expansion_registered"]
             and not manifest["confirmation_registered"]
@@ -652,9 +677,18 @@ def run_campaign(
             if all(_terminal(entry) for entry in exploration_entries):
                 _register_confirmations(campaign, manifest)
                 _save_manifest(manifest_path, manifest)
-                continue
-        if not any(entry["state"] == "pending" for entry in entries.values()):
+                registered_more = True
+        if limit_reached:
             break
+        selected_pending = any(
+            entry["state"] == "pending"
+            and (family is None or entries[candidate_id]["family"] == family)
+            for candidate_id, entry in entries.items()
+        )
+        if not selected_pending:
+            break
+        if registered_more:
+            continue
 
     registered = _registered_candidates(manifest, campaign)
     completed = tuple(

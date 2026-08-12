@@ -20,10 +20,12 @@ from experiments.independent_dl.contracts import CandidateSpec, CampaignSpec
 from experiments.independent_dl.training import TrainResult
 
 
-def _candidate(candidate_id: str, *, width: int) -> CandidateSpec:
+def _candidate(
+    candidate_id: str, *, width: int, family: str = "mlp_resnet"
+) -> CandidateSpec:
     return CandidateSpec(
         candidate_id=candidate_id,
-        family="mlp_resnet",
+        family=family,
         feature_view="raw_typed",
         seed=42,
         epochs=100,
@@ -49,14 +51,20 @@ def _candidate(candidate_id: str, *, width: int) -> CandidateSpec:
     )
 
 
-def _campaign(candidates: tuple[CandidateSpec, ...], *, expansion=()) -> CampaignSpec:
+def _campaign(
+    candidates: tuple[CandidateSpec, ...],
+    *,
+    expansion=(),
+    oof_folds=(),
+    confirmation_seeds=(),
+) -> CampaignSpec:
     return CampaignSpec(
         campaign_id="tiny",
         protocol="test",
         exploration_fold=(2023, 2024),
-        oof_folds=(),
+        oof_folds=tuple(oof_folds),
         feature_views=("raw_typed",),
-        confirmation_seeds=(),
+        confirmation_seeds=tuple(confirmation_seeds),
         blend_weights=(0.5,),
         boundary_expansion={
             "mlp_resnet": {"width": tuple(expansion)},
@@ -71,8 +79,14 @@ def _campaign(candidates: tuple[CandidateSpec, ...], *, expansion=()) -> Campaig
 
 
 class _FakeRuntime:
-    def __init__(self, *, interrupt_on: str | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        interrupt_on: str | None = None,
+        candidate_error_on: str | None = None,
+    ) -> None:
         self.interrupt_on = interrupt_on
+        self.candidate_error_on = candidate_error_on
         self.started: list[str] = []
 
     def run_candidate(
@@ -81,6 +95,8 @@ class _FakeRuntime:
         self.started.append(candidate.candidate_id)
         if candidate.candidate_id == self.interrupt_on:
             raise RuntimeError("fake interruption")
+        if candidate.candidate_id == self.candidate_error_on:
+            raise CandidateExecutionError("fake candidate failure")
         output_dir.mkdir(parents=True, exist_ok=True)
         metric = output_dir / "metrics.json"
         prediction = output_dir / "predictions.csv"
@@ -117,6 +133,112 @@ def test_campaign_resumes_without_repeating_completed_candidate(tmp_path: Path) 
         "candidate_0002",
     ]
     assert {row["state"] for row in rows} == {"completed"}
+
+
+def test_family_limit_runs_only_one_matching_candidate(tmp_path: Path) -> None:
+    campaign = _campaign(
+        (
+            _candidate("tabm_first", width=512, family="tabm"),
+            _candidate("resnet_first", width=512),
+            _candidate("tabm_second", width=256, family="tabm"),
+        )
+    )
+    runtime = _FakeRuntime()
+
+    summary = run_campaign(
+        campaign, tmp_path, runtime, family="tabm", max_candidates=1
+    )
+
+    assert runtime.started == ["tabm_first"]
+    assert {"tabm_second", "resnet_first"} <= set(summary.pending)
+
+
+def test_family_limit_resumes_with_next_candidate(tmp_path: Path) -> None:
+    campaign = _campaign(
+        (
+            _candidate("first", width=512, family="tabm"),
+            _candidate("second", width=256, family="tabm"),
+        )
+    )
+    run_campaign(
+        campaign, tmp_path, _FakeRuntime(), family="tabm", max_candidates=1
+    )
+    runtime = _FakeRuntime()
+
+    run_campaign(campaign, tmp_path, runtime, family="tabm", max_candidates=1)
+
+    assert runtime.started == ["second"]
+
+
+def test_failed_candidate_consumes_one_attempt(tmp_path: Path) -> None:
+    campaign = _campaign(
+        (
+            _candidate("failed", width=512, family="tabm"),
+            _candidate("next", width=256, family="tabm"),
+        )
+    )
+    first = _FakeRuntime(candidate_error_on="failed")
+    run_campaign(campaign, tmp_path, first, family="tabm", max_candidates=1)
+    assert first.started == ["failed"]
+
+    second = _FakeRuntime()
+    run_campaign(campaign, tmp_path, second, family="tabm", max_candidates=1)
+    assert second.started == ["next"]
+
+
+@pytest.mark.parametrize("limit", [0, -1, True])
+def test_nonpositive_or_boolean_limit_is_rejected(
+    tmp_path: Path, limit: object
+) -> None:
+    with pytest.raises(ValueError, match="max_candidates"):
+        run_campaign(
+            _campaign((_candidate("one", width=512),)),
+            tmp_path,
+            _FakeRuntime(),
+            max_candidates=limit,
+        )
+
+
+def test_unknown_family_is_rejected(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="family"):
+        run_campaign(
+            _campaign((_candidate("one", width=512),)),
+            tmp_path,
+            _FakeRuntime(),
+            family="unknown",
+            max_candidates=1,
+        )
+
+
+def test_limited_runs_still_register_expansion_and_confirmation(
+    tmp_path: Path,
+) -> None:
+    campaign = _campaign(
+        (_candidate("boundary", width=512),),
+        expansion=(768,),
+        oof_folds=((2022, 2023),),
+        confirmation_seeds=(2026,),
+    )
+
+    summary = None
+    for _ in range(20):
+        summary = run_campaign(
+            campaign,
+            tmp_path,
+            _FakeRuntime(),
+            family="mlp_resnet",
+            max_candidates=1,
+        )
+        if not summary.pending:
+            break
+    else:
+        pytest.fail("limited campaign did not terminate")
+
+    assert summary is not None
+    registered = {candidate.candidate_id for candidate in summary.registered}
+    assert any("expand_width_768" in candidate_id for candidate_id in registered)
+    assert any("confirm_f2022_2023" in candidate_id for candidate_id in registered)
+    assert any("s2026" in candidate_id for candidate_id in registered)
 
 
 def test_existing_manifest_order_does_not_override_campaign_priority(
