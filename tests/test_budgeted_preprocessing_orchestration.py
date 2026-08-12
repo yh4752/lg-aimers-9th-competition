@@ -11,6 +11,7 @@ from experiments.preprocessing_campaign.run_budgeted_campaign import (
     build_stage_jobs,
     finalize_stage_five,
     inspect_resume_bundles,
+    main,
 )
 
 
@@ -145,6 +146,45 @@ def test_stage_three_includes_dl_and_catboost_single_ablations() -> None:
         "id_frequency_and_oov",
         "hand_matchup",
     }
+    assert sum(job.max_seconds for job in jobs if job.family == "tabm") / 2 <= 4200
+    assert sum(job.max_seconds for job in jobs if job.family == "catboost") / 2 <= 1200
+
+
+def test_stage_four_worst_case_fits_before_archive_reserve() -> None:
+    campaign = load_budgeted_campaign(CONFIG)
+    selected = campaign.stage_jobs(1)[0]
+    descriptor = lambda name, component: {
+        "setting_id": name,
+        "preprocessing_profile": "dl_standard",
+        "components": [component],
+        "delta": -0.001,
+    }
+    state = {
+        "selected_model": {
+            "family": selected.family,
+            "profile_id": selected.profile_id,
+            "model": dict(selected.model),
+            "training": dict(selected.training),
+        },
+        "promoted_dl": [
+            descriptor("first", "hand_matchup"),
+            descriptor("second", "asof_count_log1p"),
+        ],
+        "promoted_catboost": [
+            descriptor("first", "hand_matchup"),
+            descriptor("second", "entity_frequency_and_oov"),
+        ],
+    }
+
+    jobs = build_stage_jobs(campaign, 4, state)
+
+    dl_jobs = [job for job in jobs if job.family != "catboost"]
+    cat_jobs = [job for job in jobs if job.family == "catboost"]
+    assert len(dl_jobs) == 4
+    assert len(cat_jobs) == 6
+    # Jobs are queued by family; with two GPUs these upper bounds total 5,400 s.
+    assert sum(job.max_seconds for job in dl_jobs) / 2 <= 3600
+    assert sum(job.max_seconds for job in cat_jobs) / 2 <= 1800
 
 
 def test_stage_five_never_requires_sixth_version_for_short_training() -> None:
@@ -155,3 +195,18 @@ def test_stage_five_never_requires_sixth_version_for_short_training() -> None:
 
     assert result.status == "inconclusive"
     assert result.campaign_terminal is True
+
+
+def test_status_dry_contract_reports_sealed_execution_shape(capsys) -> None:
+    returncode = main(["status", "--config", str(CONFIG), "--dry-contract"])
+
+    assert returncode == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload == {
+        "archive_reserve_seconds": 600,
+        "campaign_id": "budgeted_preprocessing_campaign_v1",
+        "gpu_workers": 2,
+        "session_seconds": 6300,
+        "stage_count": 5,
+        "stop_new_jobs_seconds": 900,
+    }

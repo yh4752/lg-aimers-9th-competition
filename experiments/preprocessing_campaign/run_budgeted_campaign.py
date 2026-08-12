@@ -212,7 +212,7 @@ def _stage_four_jobs(
             "preprocessing_profile": "dl_standard",
             "components": (),
         },
-        *dl_candidates,
+        *dl_candidates[:1],
     ]
     if len(dl_candidates) == 2:
         descriptors.append(
@@ -252,6 +252,7 @@ def _stage_four_jobs(
                 components=tuple(descriptor["components"]),
                 train_end_year=2022,
                 valid_year=2023,
+                max_seconds=1800,
             )
         )
     if len(dl_candidates) == 2:
@@ -267,6 +268,7 @@ def _stage_four_jobs(
                 setting_id=str(combo["setting_id"]),
                 preprocessing_profile=str(combo["preprocessing_profile"]),
                 components=tuple(combo["components"]),
+                max_seconds=1800,
             )
         )
     cat_base = _catboost_template(campaign)
@@ -276,7 +278,7 @@ def _stage_four_jobs(
             "preprocessing_profile": "tree_native",
             "components": (),
         },
-        *cat_candidates,
+        *cat_candidates[:1],
     ]
     if len(cat_candidates) == 2:
         cat_descriptors.append(
@@ -309,6 +311,7 @@ def _stage_four_jobs(
                     components=tuple(descriptor["components"]),
                     train_end_year=train_end,
                     valid_year=valid,
+                    max_seconds=600,
                     sample_mode=sample_mode,
                 )
             )
@@ -369,6 +372,7 @@ def build_stage_jobs(
                     stage_id=3,
                     setting_id=setting,
                     components=components,
+                    max_seconds=600,
                 )
                 for setting, components in candidates
             )
@@ -935,7 +939,9 @@ def _parser() -> argparse.ArgumentParser:
     worker.add_argument("--data-dir", default=os.environ.get("PREPROCESSING_DATA_DIR"))
     worker.add_argument("--cache-root", default=os.environ.get("PREPROCESSING_CACHE_ROOT"))
     status = subparsers.add_parser("status")
-    status.add_argument("--output-root", required=True)
+    status.add_argument("--output-root")
+    status.add_argument("--config")
+    status.add_argument("--dry-contract", action="store_true")
     return parser
 
 
@@ -964,6 +970,26 @@ def main(argv: Sequence[str] | None = None) -> int:
             deadline_unix=args.deadline_unix,
         )
         return 0
+    if args.dry_contract:
+        if not args.config:
+            raise ValueError("--config is required with --dry-contract")
+        campaign = load_budgeted_campaign(args.config)
+        print(
+            json.dumps(
+                {
+                    "archive_reserve_seconds": campaign.archive_reserve_seconds,
+                    "campaign_id": campaign.campaign_id,
+                    "gpu_workers": 2,
+                    "session_seconds": campaign.session_seconds,
+                    "stage_count": 5,
+                    "stop_new_jobs_seconds": campaign.stop_new_jobs_seconds,
+                },
+                sort_keys=True,
+            )
+        )
+        return 0
+    if not args.output_root:
+        raise ValueError("--output-root is required unless --dry-contract is used")
     root = Path(args.output_root)
     state_path = root / "stage_state.json"
     print(

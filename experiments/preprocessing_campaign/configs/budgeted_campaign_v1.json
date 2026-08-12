@@ -147,7 +147,7 @@
         "train_end_year": 2023,
         "valid_year": 2024,
         "seed": 42,
-        "max_seconds": 2700,
+        "max_seconds": 2100,
         "sample_mode": "proxy"
       },
       {
@@ -162,7 +162,7 @@
         "train_end_year": 2023,
         "valid_year": 2024,
         "seed": 42,
-        "max_seconds": 2700,
+        "max_seconds": 2100,
         "sample_mode": "proxy"
       },
       {
@@ -177,7 +177,7 @@
         "train_end_year": 2023,
         "valid_year": 2024,
         "seed": 42,
-        "max_seconds": 2700,
+        "max_seconds": 2100,
         "sample_mode": "proxy"
       },
       {
@@ -192,7 +192,7 @@
         "train_end_year": 2023,
         "valid_year": 2024,
         "seed": 42,
-        "max_seconds": 2700,
+        "max_seconds": 2100,
         "sample_mode": "proxy"
       }
     ],
