@@ -1,0 +1,50 @@
+{
+  "schema_version": 1,
+  "campaign_id": "independent_dl_campaign_v1",
+  "protocol": "yearly_transition_independent_dl_v1",
+  "exploration_fold": [2023, 2024],
+  "oof_folds": [[2021, 2022], [2022, 2023], [2023, 2024]],
+  "feature_views": ["raw_typed", "engineered", "entity_context", "trackman_augmented"],
+  "exploration_seed": 42,
+  "confirmation_seeds": [2026, 3407],
+  "blend_weights": [0.05, 0.1, 0.15, 0.2, 0.25, 0.3, 0.35, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 0.95],
+  "training_profiles": {
+    "level_1": {"optimizer": "adamw", "scheduler": "cosine", "learning_rate": 0.001, "weight_decay": 0.00001, "effective_batch_size": 4096, "micro_batch_size": 1024, "amp": true, "patience": 30},
+    "level_2": {"optimizer": "adamw", "scheduler": "plateau", "learning_rate": 0.0006, "weight_decay": 0.0001, "effective_batch_size": 4096, "micro_batch_size": 512, "amp": true, "patience": 40},
+    "level_3": {"optimizer": "adamw", "scheduler": "one_cycle", "learning_rate": 0.0003, "weight_decay": 0.001, "effective_batch_size": 4096, "micro_batch_size": 256, "amp": true, "patience": 60},
+    "level_4": {"optimizer": "adamw", "scheduler": "cosine_warmup", "learning_rate": 0.00015, "weight_decay": 0.0001, "effective_batch_size": 4096, "micro_batch_size": 128, "amp": true, "patience": 80}
+  },
+  "capacity_profiles": {
+    "tabm": [
+      {"profile_id": "p1", "training_profile": "level_1", "epochs": 100, "model": {"architecture": "tabm", "k": 16, "width": 256, "blocks": 3, "dropout": 0.05, "num_embedding": "linear_relu"}},
+      {"profile_id": "p2", "training_profile": "level_2", "epochs": 160, "model": {"architecture": "tabm", "k": 32, "width": 512, "blocks": 4, "dropout": 0.1, "num_embedding": "piecewise_linear"}},
+      {"profile_id": "p3", "training_profile": "level_3", "epochs": 240, "model": {"architecture": "tabm", "k": 64, "width": 768, "blocks": 6, "dropout": 0.15, "num_embedding": "periodic"}},
+      {"profile_id": "p4", "training_profile": "level_4", "epochs": 400, "model": {"architecture": "tabm_mini", "k": 64, "width": 1024, "blocks": 8, "dropout": 0.1, "num_embedding": "periodic"}}
+    ],
+    "mlp_resnet": [
+      {"profile_id": "p1", "training_profile": "level_1", "epochs": 100, "model": {"architecture": "mlp", "width": 512, "blocks": 4, "dropout": 0.1, "embedding_dim": 32}},
+      {"profile_id": "p2", "training_profile": "level_2", "epochs": 160, "model": {"architecture": "resnet", "width": 1024, "blocks": 8, "dropout": 0.15, "embedding_dim": 48}},
+      {"profile_id": "p3", "training_profile": "level_3", "epochs": 240, "model": {"architecture": "mlp", "width": 1536, "blocks": 12, "dropout": 0.2, "embedding_dim": 64}},
+      {"profile_id": "p4", "training_profile": "level_4", "epochs": 400, "model": {"architecture": "resnet", "width": 2048, "blocks": 16, "dropout": 0.1, "embedding_dim": 96}}
+    ],
+    "ft_transformer": [
+      {"profile_id": "p1", "training_profile": "level_1", "epochs": 100, "model": {"architecture": "ft_transformer", "dim": 128, "layers": 3, "heads": 8, "attention_dropout": 0.1, "ffn_dropout": 0.1}},
+      {"profile_id": "p2", "training_profile": "level_2", "epochs": 160, "model": {"architecture": "ft_transformer", "dim": 256, "layers": 6, "heads": 8, "attention_dropout": 0.15, "ffn_dropout": 0.1}},
+      {"profile_id": "p3", "training_profile": "level_3", "epochs": 240, "model": {"architecture": "ft_transformer", "dim": 384, "layers": 9, "heads": 12, "attention_dropout": 0.2, "ffn_dropout": 0.15}},
+      {"profile_id": "p4", "training_profile": "level_4", "epochs": 400, "model": {"architecture": "ft_transformer", "dim": 512, "layers": 12, "heads": 16, "attention_dropout": 0.1, "ffn_dropout": 0.1}}
+    ],
+    "tabr": [
+      {"profile_id": "p1", "training_profile": "level_1", "epochs": 100, "model": {"architecture": "tabr", "retrieval": 32, "width": 256, "blocks": 3, "dropout": 0.1}},
+      {"profile_id": "p2", "training_profile": "level_2", "epochs": 160, "model": {"architecture": "tabr", "retrieval": 64, "width": 512, "blocks": 4, "dropout": 0.15}},
+      {"profile_id": "p3", "training_profile": "level_3", "epochs": 240, "model": {"architecture": "tabr", "retrieval": 128, "width": 768, "blocks": 6, "dropout": 0.2}},
+      {"profile_id": "p4", "training_profile": "level_4", "epochs": 400, "model": {"architecture": "tabr", "retrieval": 256, "width": 1024, "blocks": 8, "dropout": 0.1}}
+    ]
+  },
+  "boundary_expansion": {
+    "tabm": {"k": [96, 128], "width": [1536, 2048], "blocks": [10, 12]},
+    "mlp_resnet": {"width": [3072, 4096], "blocks": [20, 24]},
+    "ft_transformer": {"dim": [640, 768], "layers": [16, 20]},
+    "tabr": {"retrieval": [384, 512], "width": [1536, 2048], "blocks": [10, 12]}
+  },
+  "survivor_policy": {"proximity_delta": 0.002, "max_error_correlation": 0.98, "top_k_per_family": 2}
+}
