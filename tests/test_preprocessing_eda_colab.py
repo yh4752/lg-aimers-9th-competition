@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ast
 import hashlib
+import json
 import math
 import re
 import unittest
@@ -10,6 +11,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 DOC = ROOT / "docs" / "PREPROCESSING_EDA_COLAB.md"
+NOTEBOOK = ROOT / "notebooks" / "PREPROCESSING_EDA_COLAB.ipynb"
 
 EXPECTED_CELL_IDS = [f"{index:02d}" for index in range(1, 9)]
 EXPECTED_OUTPUTS = {
@@ -67,6 +69,23 @@ def load_pure_helpers(cells: list[str]) -> dict[str, object]:
 
 
 class PreprocessingEdaColabContractTest(unittest.TestCase):
+    def test_notebook_matches_markdown_code_cells(self) -> None:
+        self.assertTrue(NOTEBOOK.is_file())
+        notebook = json.loads(NOTEBOOK.read_text(encoding="utf-8"))
+        self.assertEqual(notebook["nbformat"], 4)
+        self.assertEqual(notebook["metadata"]["kernelspec"]["name"], "python3")
+        self.assertIn("colab", notebook["metadata"])
+        code_cells = [
+            "".join(cell["source"]).rstrip("\n")
+            for cell in notebook["cells"]
+            if cell["cell_type"] == "code"
+        ]
+        self.assertEqual(code_cells, python_cells())
+        for cell in notebook["cells"]:
+            if cell["cell_type"] == "code":
+                self.assertEqual(cell["execution_count"], None)
+                self.assertEqual(cell["outputs"], [])
+
     def test_document_has_eight_ordered_python_cells(self) -> None:
         self.assertTrue(DOC.is_file())
         cells = python_cells()
