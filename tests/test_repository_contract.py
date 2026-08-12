@@ -227,6 +227,35 @@ def test_agents_default_to_broad_performance_exploration() -> None:
         assert phrase in agents
 
 
+def test_roadmap_keeps_dl_primary_without_discarding_ml() -> None:
+    agents = read_text("AGENTS.md")
+    roadmap = read_text("docs/ROADMAP.md")
+
+    for phrase in (
+        "다음 주력 연구는 독립 DL",
+        "ML 단독 미세 조정",
+        "독립 DL 준비나 실행을 지연시킬 수 없다",
+        "TabM residual",
+        "DL 계열 전체",
+        "CatBoost와 XGBoost",
+    ):
+        assert phrase in agents
+
+    stages = ("독립 DL 탐색", "DL 내부 앙상블", "ML+DL 앙상블")
+    positions = [roadmap.index(stage) for stage in stages]
+    assert positions == sorted(positions)
+    assert "보조 트랙" in roadmap
+    assert "유망 후보" in roadmap
+    assert "정렬된 OOF" in roadmap
+    for retained_context in (
+        "R25 TabM 잔차",
+        "R32 예측 분모 보정",
+        "검증 프로토콜이 다르므로",
+        "기존 세 변형의 평균 개선과 실패 gate",
+    ):
+        assert retained_context in roadmap
+
+
 def test_xgboost_public_result_is_visible_in_existing_documents() -> None:
     readme = read_text("README.md")
     ledger = read_text("reports/EXPERIMENT_LEDGER.md")
