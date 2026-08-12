@@ -124,7 +124,7 @@ class BudgetedRuntime:
         fold = self.prepare_fold(job)
         _, history = self._load()
         cache = materialize_preprocessed_fold_cache(
-            self.cache_root,
+            self.cache_root / job.family,
             fold.train,
             fold.valid,
             history,

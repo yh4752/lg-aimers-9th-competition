@@ -8,7 +8,6 @@ import json
 import os
 from pathlib import Path
 import queue
-import shutil
 import subprocess
 import sys
 import threading
@@ -138,7 +137,7 @@ def _default_process_factory(
     env: dict[str, str],
     deadline: float,
 ) -> WorkerProcess:
-    temporary_dir.mkdir(parents=True, exist_ok=False)
+    temporary_dir.mkdir(parents=True, exist_ok=True)
     job_path = temporary_dir / "job.json"
     _atomic_json(job_path, _job_payload(job))
     command = [
@@ -220,8 +219,18 @@ class BudgetedScheduler:
         jobs_root.mkdir(parents=True, exist_ok=True)
         manifest_path = root / "campaign_manifest.json"
         manifest = self._read_manifest(manifest_path)
-        pending_queue = list(jobs)
+        pending_queue: list[BudgetedJob] = []
         completed: list[str] = []
+        for job in jobs:
+            existing = manifest["jobs"].get(job.job_id)
+            if isinstance(existing, dict) and existing.get("state") == "completed":
+                if existing.get("job") != _job_payload(job):
+                    raise ArtifactValidationError(
+                        f"completed job identity differs: {job.job_id}"
+                    )
+                completed.append(job.job_id)
+            else:
+                pending_queue.append(job)
         failed: list[str] = []
         active: dict[int, _ActiveWorker] = {}
         last_heartbeat = self.clock()
@@ -236,8 +245,6 @@ class BudgetedScheduler:
                         break
                     job = pending_queue.pop(0)
                     temporary_dir = workers_root / job.job_id
-                    if temporary_dir.exists():
-                        shutil.rmtree(temporary_dir)
                     worker_deadline = min(
                         now + job.max_seconds,
                         deadline - self.archive_reserve_seconds,
