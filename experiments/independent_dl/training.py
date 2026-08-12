@@ -100,6 +100,7 @@ class BackendAttemptResult:
     hardware: Mapping[str, object] = field(default_factory=dict)
     completed_epochs: int = 0
     validation_curve: tuple[tuple[int, float], ...] = ()
+    validation_time_curve: tuple[tuple[int, float, float], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -116,6 +117,7 @@ class TrainResult:
     hardware: Mapping[str, object] = field(default_factory=dict)
     completed_epochs: int = 0
     validation_curve: tuple[tuple[int, float], ...] = ()
+    validation_time_curve: tuple[tuple[int, float, float], ...] = ()
 
 
 class TrainingBackend(Protocol):
@@ -304,6 +306,10 @@ def fit_candidate(
             (int(epoch), float(brier))
             for epoch, brier in attempt.validation_curve
         ),
+        validation_time_curve=tuple(
+            (int(epoch), float(elapsed), float(brier))
+            for epoch, elapsed, brier in attempt.validation_time_curve
+        ),
     )
 
 
@@ -398,6 +404,8 @@ class TorchTrainingBackend:
         best_brier = math.inf
         best_epoch = -1
         validation_curve: list[tuple[int, float]] = []
+        validation_time_curve: list[tuple[int, float, float]] = []
+        elapsed_before_resume = 0.0
         if resume_epoch:
             payload = torch.load(checkpoint_path, map_location=device, weights_only=False)
             model.load_state_dict(payload["model"])
@@ -410,6 +418,11 @@ class TorchTrainingBackend:
                 (int(item[0]), float(item[1]))
                 for item in payload.get("validation_curve", ())
             ]
+            validation_time_curve = [
+                (int(item[0]), float(item[1]), float(item[2]))
+                for item in payload.get("validation_time_curve", ())
+            ]
+            elapsed_before_resume = float(payload.get("elapsed_seconds", 0.0))
             random.setstate(payload["python_rng"])
             np.random.set_state(payload["numpy_rng"])
             torch.set_rng_state(payload["torch_rng"])
@@ -419,6 +432,7 @@ class TorchTrainingBackend:
         patience = int(request.training_config["patience"])
         stale_epochs = 0 if best_epoch < 0 else max(0, resume_epoch - 1 - best_epoch)
         deadline = _session_deadline()
+        attempt_started = time.monotonic()
         budget_reached = False
         for epoch in range(resume_epoch, request.epochs):
             if epoch > 0 and session_deadline_reached(deadline):
@@ -515,6 +529,8 @@ class TorchTrainingBackend:
             target = np.asarray(request.valid.y, dtype="float64")
             brier = float(np.mean(np.square(predictions - target)))
             validation_curve.append((epoch, brier))
+            elapsed_seconds = elapsed_before_resume + time.monotonic() - attempt_started
+            validation_time_curve.append((epoch, elapsed_seconds, brier))
             improved = brier < best_brier
             if improved:
                 best_brier = brier
@@ -536,6 +552,8 @@ class TorchTrainingBackend:
                 "best_epoch": best_epoch,
                 "best_brier": best_brier,
                 "validation_curve": validation_curve,
+                "validation_time_curve": validation_time_curve,
+                "elapsed_seconds": elapsed_seconds,
                 "model": model.state_dict(),
                 "optimizer": optimizer.state_dict(),
                 "scheduler": scheduler.state_dict(),
@@ -586,6 +604,7 @@ class TorchTrainingBackend:
             hardware=hardware,
             completed_epochs=len(validation_curve),
             validation_curve=tuple(validation_curve),
+            validation_time_curve=tuple(validation_time_curve),
         )
 
     @staticmethod

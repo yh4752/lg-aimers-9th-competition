@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from hashlib import sha256
 import json
 from pathlib import Path
@@ -44,6 +45,22 @@ class _FinishedProcess:
 
     def terminate(self) -> None:
         self.returncode = -15
+
+
+class _NeverFinishesProcess(_FinishedProcess):
+    def __init__(self) -> None:
+        super().__init__(returncode=0)
+        self.returncode = None
+
+    def poll(self):
+        return self.returncode
+
+
+class _NeverFinishesFactory:
+    def __call__(self, job, temporary_dir, env, deadline):
+        del job, env, deadline
+        temporary_dir.mkdir(parents=True, exist_ok=True)
+        return _NeverFinishesProcess()
 
 
 class _Factory:
@@ -225,3 +242,24 @@ def test_scheduler_rejects_changed_campaign_identity(tmp_path: Path) -> None:
 
     with pytest.raises(ArtifactValidationError, match="identity"):
         scheduler.run([_job("a")], tmp_path, deadline=10_000)
+
+
+def test_late_stage_catboost_timeout_is_terminal_inconclusive(tmp_path: Path) -> None:
+    clock_values = iter([1_000, 1_000, 1_000, 2_000, 2_000, 2_000])
+    job = replace(_job("cat"), stage_id=3, family="catboost", max_seconds=60)
+    scheduler = BudgetedScheduler(
+        clock=lambda: next(clock_values, 2_000),
+        process_factory=_NeverFinishesFactory(),
+        gpu_probe=lambda: 2,
+        poll_seconds=0,
+        worker_shutdown_grace_seconds=0,
+    )
+
+    summary = scheduler.run([job], tmp_path, deadline=10_000)
+
+    manifest = json.loads(
+        (tmp_path / "campaign_manifest.json").read_text(encoding="utf-8")
+    )
+    assert summary.completed == ("cat",)
+    assert manifest["jobs"]["cat"]["state"] == "inconclusive"
+    assert manifest["jobs"]["cat"]["reason"] == "catboost_time_budget_reached"

@@ -80,6 +80,7 @@ def _fixture_campaign(root: Path, *, completed_stage: int = 1) -> Path:
                 "completed_stage": completed_stage,
                 "selected_model": {"family": "tabm"},
                 "preprocessing_status": "inconclusive",
+                "catboost_preprocessing_status": {"hand_matchup": "model_specific"},
             }
         ),
         encoding="utf-8",
@@ -110,6 +111,13 @@ def test_stage_writes_separate_resume_and_small_review_bundles(
         manifest = json.loads(archive.read("artifact_manifest.json"))
         assert manifest["schema_version"] == 1
         assert all(len(item["sha256"]) == 64 for item in manifest["files"])
+        decision = pd.read_csv(archive.open("decision_table.csv"))
+        assert (
+            decision.loc[
+                decision["scope"].eq("catboost_final_preprocessing"), "status"
+            ].tolist()
+            == ["model_specific"]
+        )
     with ZipFile(result.resume) as archive:
         assert "campaign_manifest.json" in archive.namelist()
         assert "stage_state.json" in archive.namelist()

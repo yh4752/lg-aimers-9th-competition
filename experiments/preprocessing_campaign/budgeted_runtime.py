@@ -194,6 +194,9 @@ class BudgetedRuntime:
                 "completed_epochs": int(result.completed_epochs),
                 "validation_points": len(result.validation_curve),
                 "validation_curve": [list(item) for item in result.validation_curve],
+                "validation_time_curve": [
+                    list(item) for item in result.validation_time_curve
+                ],
                 "elapsed_seconds": elapsed,
                 "hardware": hardware,
             },

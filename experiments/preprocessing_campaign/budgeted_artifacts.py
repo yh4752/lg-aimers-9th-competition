@@ -123,17 +123,31 @@ def _learning_curves(
 ) -> pd.DataFrame:
     rows = []
     for job_id, metric, _ in records:
+        time_curve = metric.get("validation_time_curve", [])
+        if time_curve:
+            for raw in time_curve:
+                if isinstance(raw, (list, tuple)) and len(raw) == 3:
+                    rows.append(
+                        {
+                            "job_id": job_id,
+                            "epoch": int(raw[0]),
+                            "elapsed_seconds": float(raw[1]),
+                            "validation_brier": float(raw[2]),
+                        }
+                    )
+            continue
         for raw in metric.get("validation_curve", []):
             if isinstance(raw, (list, tuple)) and len(raw) == 2:
                 rows.append(
                     {
                         "job_id": job_id,
                         "epoch": int(raw[0]),
+                        "elapsed_seconds": None,
                         "validation_brier": float(raw[1]),
                     }
                 )
     return pd.DataFrame(
-        rows, columns=["job_id", "epoch", "validation_brier"]
+        rows, columns=["job_id", "epoch", "elapsed_seconds", "validation_brier"]
     ).sort_values(["job_id", "epoch"], kind="stable", ignore_index=True)
 
 
@@ -262,6 +276,17 @@ def _decision_table(state: Mapping[str, object]) -> pd.DataFrame:
                 "reason": state.get("stage_five_reason", "stage_4_stability"),
             }
         )
+    catboost_statuses = state.get("catboost_preprocessing_status")
+    if isinstance(catboost_statuses, dict):
+        for candidate, status in sorted(catboost_statuses.items()):
+            rows.append(
+                {
+                    "scope": "catboost_final_preprocessing",
+                    "candidate": candidate,
+                    "status": status,
+                    "reason": "stage_4_temporal_and_full_evidence",
+                }
+            )
     return pd.DataFrame(
         rows, columns=["scope", "candidate", "status", "reason"]
     )

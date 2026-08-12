@@ -240,12 +240,16 @@ class BudgetedScheduler:
         completed: list[str] = []
         for job in jobs:
             existing = manifest["jobs"].get(job.job_id)
-            if isinstance(existing, dict) and existing.get("state") == "completed":
+            if isinstance(existing, dict) and existing.get("state") in {
+                "completed",
+                "inconclusive",
+            }:
                 if existing.get("job") != _job_payload(job):
                     raise ArtifactValidationError(
                         f"completed job identity differs: {job.job_id}"
                     )
-                self._validate_published_entry(existing, root)
+                if existing.get("state") == "completed":
+                    self._validate_published_entry(existing, root)
                 completed.append(job.job_id)
             else:
                 pending_queue.append(job)
@@ -297,14 +301,37 @@ class BudgetedScheduler:
                     for line in worker.process.read_available():
                         print(f"WORKER[{gpu}:{worker.job.job_id}] {line}", flush=True)
                     returncode = worker.process.poll()
-                    if returncode is None and now >= worker.deadline:
+                    deadline_reached = returncode is None and now >= worker.deadline
+                    if deadline_reached:
                         worker.process.terminate()
                         returncode = worker.process.poll()
+                        if returncode is None:
+                            returncode = -15
                     if returncode is None:
                         continue
                     for line in worker.process.read_available():
                         print(f"WORKER[{gpu}:{worker.job.job_id}] {line}", flush=True)
-                    if returncode == 0:
+                    if deadline_reached and worker.job.family == "catboost":
+                        if worker.job.stage_id == 1:
+                            raise RuntimeError(
+                                "stage one CatBoost baseline devices are required within budget"
+                            )
+                        manifest["jobs"][worker.job.job_id] = {
+                            "state": "inconclusive",
+                            "reason": "catboost_time_budget_reached",
+                            "gpu": worker.gpu,
+                            "artifacts": [],
+                            "job": _job_payload(worker.job),
+                        }
+                        _atomic_json(manifest_path, manifest)
+                        completed.append(worker.job.job_id)
+                        print(
+                            "JOB_INCONCLUSIVE "
+                            f"job={worker.job.job_id} gpu={gpu} "
+                            "reason=catboost_time_budget_reached",
+                            flush=True,
+                        )
+                    elif returncode == 0:
                         entry = self._validate_and_publish(worker, jobs_root)
                         manifest["jobs"][worker.job.job_id] = entry
                         _atomic_json(manifest_path, manifest)

@@ -83,14 +83,22 @@ def _campaign_identity(config: Path, data_dir: Path) -> dict[str, str]:
     history = data_dir / "trackman_history.csv"
     if not train.is_file() or not history.is_file():
         raise ValueError("train.csv and trackman_history.csv are required")
-    code_paths = (
-        Path(__file__),
-        Path(__file__).with_name("budgeted_runtime.py"),
-        Path(__file__).with_name("budgeted_scheduler.py"),
-        Path(__file__).with_name("budgeted_decisions.py"),
-        Path(__file__).with_name("budgeted_artifacts.py"),
-        Path(__file__).parents[1] / "independent_dl" / "training.py",
-        Path(__file__).parents[1] / "independent_dl" / "preprocessing.py",
+    experiments_root = Path(__file__).parents[1]
+    code_paths = sorted(
+        [
+            *(
+                path
+                for package in (
+                    experiments_root / "independent_dl",
+                    experiments_root / "catboost_preprocessing",
+                    experiments_root / "preprocessing_campaign",
+                )
+                for path in package.rglob("*.py")
+                if not path.name.startswith("KAGGLE_")
+            ),
+            *(experiments_root / "preprocessing_campaign").glob("requirements-*.txt"),
+        ],
+        key=lambda path: path.as_posix(),
     )
     code_digest = sha256()
     for path in code_paths:
@@ -443,6 +451,22 @@ def _curve_best(metric: Mapping[str, object], common_epochs: int) -> float:
     return min(values)
 
 
+def _time_curve_best(
+    metric: Mapping[str, object], common_seconds: float
+) -> tuple[float, int]:
+    values = []
+    for item in metric.get("validation_time_curve", []):
+        if (
+            isinstance(item, (list, tuple))
+            and len(item) == 3
+            and float(item[1]) <= common_seconds
+        ):
+            values.append((float(item[2]), int(item[0])))
+    if not values:
+        raise DecisionError("validation time curve has no common elapsed-time point")
+    return min(values)
+
+
 def finalize_stage_five(
     *,
     baseline: Mapping[str, object],
@@ -494,6 +518,11 @@ def _metrics(root: Path, job_id: str) -> dict[str, object]:
     if not isinstance(payload, dict):
         raise StageNeedsReview(f"metrics are invalid for {job_id}")
     return payload
+
+
+def _metrics_or_none(root: Path, job_id: str) -> dict[str, object] | None:
+    path = root / "jobs" / job_id / "metrics.json"
+    return _metrics(root, job_id) if path.is_file() else None
 
 
 def _valid_dl_metric(metric: Mapping[str, object]) -> bool:
@@ -635,7 +664,7 @@ def evaluate_stage(
         if not _valid_catboost_metric(cat_metric):
             raise StageNeedsReview("CatBoost baseline lacks minimum valid evidence")
         rows = []
-        blends = []
+        candidate_jobs = []
         for job in jobs:
             metric = _metrics(campaign_root, job.job_id)
             if job.family == "catboost":
@@ -648,12 +677,41 @@ def evaluate_stage(
                     "hashes_valid": True,
                 }
             )
+            candidate_jobs.append(job)
+        try:
+            common_seconds = min(
+                float(row["validation_time_curve"][-1][1])
+                for row in rows
+                if _valid_dl_metric(row)
+            )
+            common_rows = []
+            common_best_epochs: dict[str, int] = {}
+            for row in rows:
+                if not _valid_dl_metric(row):
+                    common_rows.append(row)
+                    continue
+                common_brier, common_best_epoch = _time_curve_best(
+                    row, common_seconds
+                )
+                common_best_epochs[str(row["candidate_id"])] = common_best_epoch
+                common_rows.append(
+                    {**row, "brier": common_brier, "comparison_seconds": common_seconds}
+                )
+            rows = common_rows
+        except (DecisionError, KeyError, TypeError, ValueError) as error:
+            raise StageNeedsReview(
+                "DL elapsed-time comparison evidence is incomplete"
+            ) from error
+        blends = []
+        for job, row in zip(candidate_jobs, rows, strict=True):
+            best_epoch = int(row.get("best_epoch", -1))
+            comparable = best_epoch == common_best_epochs.get(job.job_id)
             blends.append(
                 {
                     "candidate_id": job.job_id,
                     "blend_gain": _blend_gain(
                         campaign_root, cat_job.job_id, job.job_id, campaign.blend_weights
-                    ),
+                    ) if comparable else 0.0,
                 }
             )
         try:
@@ -684,17 +742,19 @@ def evaluate_stage(
         )
         other_rows = [row for row in eligible_rows if row["family"] != "tabnet"]
         if _valid_dl_metric(tabnet_row) and common_epochs >= 10 and other_rows:
-            tabnet_common = _curve_best(tabnet_row, common_epochs)
+            tabnet_common, tabnet_common_epoch = _time_curve_best(
+                tabnet_row, common_seconds
+            )
             other_common = [
-                (_curve_best(row, common_epochs), row) for row in other_rows
+                (*_time_curve_best(row, common_seconds), row) for row in other_rows
             ]
-            best_other_brier, best_other_row = min(
-                other_common, key=lambda item: (item[0], str(item[1]["candidate_id"]))
+            best_other_brier, best_other_epoch, best_other_row = min(
+                other_common, key=lambda item: (item[0], str(item[2]["candidate_id"]))
             )
             comparable_tabnet = {**tabnet_row, "brier": tabnet_common}
             predictions_comparable = (
-                int(tabnet_row.get("best_epoch", -1)) < common_epochs
-                and int(best_other_row.get("best_epoch", -1)) < common_epochs
+                int(tabnet_row.get("best_epoch", -1)) == tabnet_common_epoch
+                and int(best_other_row.get("best_epoch", -1)) == best_other_epoch
             )
             oov_gain = (
                 -_oov_delta(
@@ -713,6 +773,7 @@ def evaluate_stage(
                 overall_delta=tabnet_common - best_other_brier,
             )
             state["tabnet_common_epochs"] = common_epochs
+            state["tabnet_common_seconds"] = common_seconds
             state["tabnet_common_brier"] = tabnet_common
             state["tabnet_reference_brier"] = best_other_brier
             state["tabnet_oov_gain"] = oov_gain
@@ -784,7 +845,10 @@ def evaluate_stage(
             for job in jobs:
                 if job.family != "catboost":
                     continue
-                delta = float(_metrics(campaign_root, job.job_id)["brier"]) - cat_brier
+                metric = _metrics_or_none(campaign_root, job.job_id)
+                if metric is None or not _valid_catboost_metric(metric):
+                    continue
+                delta = float(metric["brier"]) - cat_brier
                 if delta <= -0.0001:
                     promoted_cat.append(_descriptor(job, delta))
             state["promoted_catboost"] = sorted(
@@ -906,15 +970,15 @@ def evaluate_stage(
                 key: find_cat(setting, *key) for key in baseline_cat
             }
             metrics = {
-                key: _metrics(campaign_root, job.job_id)
+                key: _metrics_or_none(campaign_root, job.job_id)
                 for key, job in evidence.items()
             }
             baseline_metrics = {
-                key: _metrics(campaign_root, job.job_id)
+                key: _metrics_or_none(campaign_root, job.job_id)
                 for key, job in baseline_cat.items()
             }
             if not all(
-                _valid_catboost_metric(metric)
+                metric is not None and _valid_catboost_metric(metric)
                 for metric in [*metrics.values(), *baseline_metrics.values()]
             ):
                 cat_statuses[setting] = "inconclusive"
