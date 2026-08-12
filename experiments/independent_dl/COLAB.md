@@ -152,6 +152,7 @@ import json
 import sys
 import numpy
 import pandas
+import tabicl
 import torch
 
 if not torch.cuda.is_available():
@@ -171,6 +172,7 @@ print("PyTorch:", torch.__version__)
 print("CUDA:", torch.version.cuda)
 print("NumPy:", numpy.__version__)
 print("pandas:", pandas.__version__)
+print("TabICL:", getattr(tabicl, "__version__", "version unavailable"))
 print("GPU_COUNT:", torch.cuda.device_count())
 print("GPU/VRAM:", json.dumps(devices, ensure_ascii=False))
 print("실제 학습 모드: single_gpu, cuda:0")

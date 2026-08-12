@@ -30,6 +30,7 @@ class _TorchTabRRuntime:
         self.retrieval = retrieval
         self.candidate_chunk_size = 8192
         self._cached_keys: object | None = None
+        self._cached_model: object | None = None
 
     def refresh_keys(self, model: object, device: str) -> None:
         torch = import_runtime_module("torch")
@@ -53,6 +54,7 @@ class _TorchTabRRuntime:
                 keys.append(candidate_keys.detach().to(dtype=torch.float32, device="cpu"))
         model.train(was_training)
         self._cached_keys = torch.cat(keys, dim=0).contiguous()
+        self._cached_model = model
 
     def search(
         self,
@@ -62,6 +64,10 @@ class _TorchTabRRuntime:
         *,
         row_indices: object | None,
     ) -> object:
+        if self._cached_keys is None:
+            raise RuntimeError("TabR retrieval keys require refresh before search")
+        if model is not self._cached_model:
+            raise RuntimeError("TabR retrieval keys belong to another model")
         _, query_keys = model.encode(x_num, x_cat)
         return self._search_keys(query_keys, row_indices=row_indices)
 

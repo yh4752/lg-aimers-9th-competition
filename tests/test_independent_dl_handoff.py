@@ -73,6 +73,7 @@ def test_handoff_uses_child_runtime_and_existing_colab_secret() -> None:
     assert "assert 'T4' in name" not in text
     assert 'torch.cuda.device_count()' in text
     assert 'total_memory' in text
+    assert "import tabicl" in text
 
 
 def test_roadmap_marks_dl_code_ready_and_waiting_for_user_run() -> None:

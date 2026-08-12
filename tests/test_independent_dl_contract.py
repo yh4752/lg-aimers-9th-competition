@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -74,6 +75,16 @@ def test_existing_candidate_hashes_survive_execution_wave_upgrade() -> None:
     assert _config_sha256(by_id["tabm__raw_typed__p2__s42"]) == (
         "49043e2018df2af03469f0606908806f3a82174abb32a7e823b6b6e8d7ddab34"
     )
+
+
+def test_frontier_candidate_values_are_sealed(tmp_path: Path) -> None:
+    payload = json.loads(CONFIG.read_text(encoding="utf-8"))
+    payload["frontier_candidates"][0]["model"]["n_estimators"] = 16
+    path = tmp_path / "changed.json"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(CampaignContractError, match="frontier candidate model"):
+        load_campaign(path)
 
 
 def test_campaign_contains_full_scale_and_boundary_expansion_contracts() -> None:

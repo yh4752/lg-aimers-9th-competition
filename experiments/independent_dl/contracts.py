@@ -68,6 +68,13 @@ _FEATURE_VIEWS = (
     "entity_context",
     "trackman_augmented",
 )
+_TABICL_V2_MODEL = {
+    "architecture": "tabicl_v2",
+    "n_estimators": 32,
+    "kv_cache": True,
+    "offload_mode": "auto",
+    "checkpoint_version": "tabicl-classifier-v2-20260212.ckpt",
+}
 
 
 def _unique_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
@@ -226,6 +233,12 @@ def _expand_candidates(payload: dict[str, object]) -> tuple[CandidateSpec, ...]:
         candidate_id = candidate["candidate_id"]
         if not isinstance(candidate_id, str) or not candidate_id:
             raise CampaignContractError("frontier candidate_id is invalid")
+        model = _mapping(candidate["model"], "frontier candidate model")
+        training = _mapping(candidate["training"], "frontier candidate training")
+        if model != _TABICL_V2_MODEL:
+            raise CampaignContractError("frontier candidate model is invalid")
+        if training:
+            raise CampaignContractError("frontier candidate training must be empty")
         candidates.append(
             CandidateSpec(
                 candidate_id=candidate_id,
@@ -233,12 +246,8 @@ def _expand_candidates(payload: dict[str, object]) -> tuple[CandidateSpec, ...]:
                 feature_view=str(candidate["feature_view"]),
                 seed=_integer(candidate["seed"], "frontier seed", minimum=0),
                 epochs=_integer(candidate["epochs"], "frontier epochs", minimum=1),
-                model=_freeze_mapping(
-                    _mapping(candidate["model"], "frontier candidate model")
-                ),
-                training=_freeze_mapping(
-                    _mapping(candidate["training"], "frontier candidate training")
-                ),
+                model=_freeze_mapping(model),
+                training=_freeze_mapping(training),
                 train_end_year=train_end_year,
                 valid_year=valid_year,
                 stage="research_only",

@@ -139,3 +139,28 @@ def test_tabr_rejects_search_before_key_refresh() -> None:
         assert "refresh" in str(error).casefold()
     else:
         raise AssertionError("TabR search accepted a missing key cache")
+
+
+def test_tabr_rejects_keys_from_another_model_object() -> None:
+    context = FeatureBatch(
+        row_id=np.array(["r0", "r1", "r2"]),
+        season=np.array([2023, 2023, 2023], dtype="int64"),
+        game_type=np.array(["R", "R", "F"]),
+        x_num=np.array([[0.0], [1.0], [2.0]], dtype="float32"),
+        x_cat=np.zeros((3, 1), dtype="int64"),
+        y=np.array([0.0, 1.0, 0.0], dtype="float32"),
+    )
+    runtime = _TorchTabRRuntime(context, retrieval=1)
+    runtime.refresh_keys(_CountingKeyModel(), device="cpu")
+
+    try:
+        runtime.search(
+            _CountingKeyModel(),
+            torch.tensor([[0.0]]),
+            torch.zeros((1, 1), dtype=torch.long),
+            row_indices=None,
+        )
+    except RuntimeError as error:
+        assert "model" in str(error).casefold()
+    else:
+        raise AssertionError("TabR accepted keys from another model")
