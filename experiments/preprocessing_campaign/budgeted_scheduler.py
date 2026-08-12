@@ -37,6 +37,10 @@ class WorkerProcess(Protocol):
 
     def terminate(self) -> None: ...
 
+    def wait(self, timeout: float | None = None) -> int: ...
+
+    def kill(self) -> None: ...
+
 
 class _SubprocessHandle:
     def __init__(self, process: subprocess.Popen[str]) -> None:
@@ -68,6 +72,12 @@ class _SubprocessHandle:
 
     def terminate(self) -> None:
         self._process.terminate()
+
+    def wait(self, timeout: float | None = None) -> int:
+        return self._process.wait(timeout=timeout)
+
+    def kill(self) -> None:
+        self._process.kill()
 
 
 ProcessFactory = Callable[
@@ -304,9 +314,11 @@ class BudgetedScheduler:
                     deadline_reached = returncode is None and now >= worker.deadline
                     if deadline_reached:
                         worker.process.terminate()
-                        returncode = worker.process.poll()
-                        if returncode is None:
-                            returncode = -15
+                        try:
+                            returncode = worker.process.wait(timeout=10)
+                        except subprocess.TimeoutExpired:
+                            worker.process.kill()
+                            returncode = worker.process.wait(timeout=10)
                     if returncode is None:
                         continue
                     for line in worker.process.read_available():
@@ -372,6 +384,11 @@ class BudgetedScheduler:
             for worker in active.values():
                 if worker.process.poll() is None:
                     worker.process.terminate()
+                    try:
+                        worker.process.wait(timeout=10)
+                    except subprocess.TimeoutExpired:
+                        worker.process.kill()
+                        worker.process.wait(timeout=10)
 
         return SchedulerSummary(
             tuple(completed),

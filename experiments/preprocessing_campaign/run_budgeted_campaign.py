@@ -1003,6 +1003,7 @@ def evaluate_stage(
                     evidence[(2024, "full")].job_id,
                 ),
                 hashes_valid=True,
+                cross_family_confirmed=False,
             )
         state["catboost_preprocessing_status"] = cat_statuses
     elif stage_id == 5:
@@ -1107,6 +1108,13 @@ def run_auto(
     )
     if selection is not None and not (root / "campaign_manifest.json").is_file():
         _safe_restore(selection, root)
+    manifest_path = root / "campaign_manifest.json"
+    if manifest_path.is_file():
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        if not isinstance(manifest, dict) or manifest.get("identity") != identity:
+            raise StageNeedsReview(
+                "restored campaign identity differs from current data, config, or code"
+            )
     state_path = root / "stage_state.json"
     if state_path.is_file():
         state = json.loads(state_path.read_text(encoding="utf-8"))

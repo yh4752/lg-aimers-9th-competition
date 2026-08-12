@@ -46,6 +46,14 @@ class _FinishedProcess:
     def terminate(self) -> None:
         self.returncode = -15
 
+    def wait(self, timeout=None) -> int:
+        del timeout
+        assert self.returncode is not None
+        return self.returncode
+
+    def kill(self) -> None:
+        self.returncode = -9
+
 
 class _NeverFinishesProcess(_FinishedProcess):
     def __init__(self) -> None:

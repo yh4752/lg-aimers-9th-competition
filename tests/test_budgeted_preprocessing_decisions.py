@@ -104,6 +104,23 @@ def test_final_recommendation_requires_two_fold_direction_full_gain_and_segments
     assert decision == "recommended"
 
 
+def test_final_status_is_model_specific_without_cross_family_confirmation() -> None:
+    decision = final_preprocessing_status(
+        proxy_deltas={2023: -0.00012, 2024: -0.00014},
+        proxy_rows={2023: 245_525, 2024: 253_507},
+        full_2024_delta=-0.00003,
+        segment_deltas={
+            "pitcher_oov": 0.0001,
+            "batter_oov": 0.0,
+            "game_type": 0.00019,
+        },
+        hashes_valid=True,
+        cross_family_confirmed=False,
+    )
+
+    assert decision == "model_specific"
+
+
 def test_final_status_is_inconclusive_when_only_one_proxy_fold_improves() -> None:
     decision = final_preprocessing_status(
         proxy_deltas={2023: 0.00001, 2024: -0.0003},

@@ -158,6 +158,7 @@ def final_preprocessing_status(
     full_2024_delta: float,
     segment_deltas: Mapping[str, float],
     hashes_valid: bool,
+    cross_family_confirmed: bool = True,
 ) -> str:
     if not hashes_valid:
         return "inconclusive"
@@ -183,4 +184,4 @@ def final_preprocessing_status(
     weighted = sum(deltas[year] * proxy_rows[year] for year in (2023, 2024)) / total_rows
     if weighted > -0.0001 or full_delta >= 0 or max(segments) > 0.0002:
         return "inconclusive"
-    return "recommended"
+    return "recommended" if cross_family_confirmed else "model_specific"
