@@ -20,6 +20,12 @@ from .feature_sources.trackman import (
     TrackmanBuildResult,
     build_trackman_lookup,
 )
+from .preprocessing import (
+    PreprocessingSpec,
+    PreprocessingState,
+    fit_preprocessor,
+    transform_preprocessor,
+)
 
 
 TARGET_COLUMN = "control_success"
@@ -86,6 +92,18 @@ class FoldCache:
     valid: FeatureBatch
     state: FeatureState
     reused: bool
+
+
+@dataclass(frozen=True)
+class PreprocessedFeatureState:
+    view: str
+    cutoff_year: int
+    numeric_columns: tuple[str, ...]
+    categorical_columns: tuple[str, ...]
+    category_maps: Mapping[str, Mapping[str, int]]
+    preprocessing: PreprocessingState
+    trackman_result: TrackmanBuildResult | None
+    trackman_lookup_sha256: str | None
 
 
 def feature_metadata(state: FeatureState) -> FeatureMetadata:
@@ -592,4 +610,322 @@ def materialize_fold_cache(
             json.loads((target / "state.json").read_text(encoding="utf-8")),
         ),
         reused=False,
+    )
+
+
+def _preprocessing_id(spec: PreprocessingSpec) -> str:
+    suffix = "__".join(spec.components) if spec.components else "baseline"
+    return f"{spec.profile}__{suffix}"
+
+
+def _preprocessing_code_sha256() -> str:
+    from . import preprocessing
+
+    return sha256(Path(preprocessing.__file__).read_bytes()).hexdigest()
+
+
+def _preprocessing_payload(state: PreprocessingState) -> dict[str, object]:
+    return {
+        "spec": {
+            "profile": state.spec.profile,
+            "components": list(state.spec.components),
+        },
+        "source_columns": list(state.source_columns),
+        "output_columns": list(state.output_columns),
+        "categorical_columns": list(state.categorical_columns),
+        "numeric_columns": list(state.numeric_columns),
+        "numeric_median": dict(state.numeric_median),
+        "numeric_mean": dict(state.numeric_mean),
+        "numeric_std": dict(state.numeric_std),
+        "yeo_johnson_lambda": dict(state.yeo_johnson_lambda),
+        "entity_frequency": {
+            entity: dict(mapping)
+            for entity, mapping in state.entity_frequency.items()
+        },
+        "target_prior": state.target_prior,
+    }
+
+
+def _preprocessing_from_payload(payload: Mapping[str, object]) -> PreprocessingState:
+    spec_payload = payload["spec"]
+    if not isinstance(spec_payload, Mapping):
+        raise FeatureContractError("cached preprocessing spec is invalid")
+    frequencies = payload["entity_frequency"]
+    if not isinstance(frequencies, Mapping):
+        raise FeatureContractError("cached entity frequencies are invalid")
+    return PreprocessingState(
+        spec=PreprocessingSpec(
+            str(spec_payload["profile"]),
+            tuple(str(item) for item in spec_payload["components"]),
+        ),
+        source_columns=tuple(str(item) for item in payload["source_columns"]),
+        output_columns=tuple(str(item) for item in payload["output_columns"]),
+        categorical_columns=tuple(
+            str(item) for item in payload["categorical_columns"]
+        ),
+        numeric_columns=tuple(str(item) for item in payload["numeric_columns"]),
+        numeric_median=MappingProxyType(
+            {str(key): float(value) for key, value in payload["numeric_median"].items()}
+        ),
+        numeric_mean=MappingProxyType(
+            {str(key): float(value) for key, value in payload["numeric_mean"].items()}
+        ),
+        numeric_std=MappingProxyType(
+            {str(key): float(value) for key, value in payload["numeric_std"].items()}
+        ),
+        yeo_johnson_lambda=MappingProxyType(
+            {
+                str(key): float(value)
+                for key, value in payload["yeo_johnson_lambda"].items()
+            }
+        ),
+        entity_frequency=MappingProxyType(
+            {
+                str(entity): MappingProxyType(
+                    {str(key): int(value) for key, value in mapping.items()}
+                )
+                for entity, mapping in frequencies.items()
+            }
+        ),
+        target_prior=float(payload["target_prior"]),
+    )
+
+
+def _preprocessed_state_payload(state: PreprocessedFeatureState) -> dict[str, object]:
+    return {
+        "view": state.view,
+        "cutoff_year": state.cutoff_year,
+        "numeric_columns": list(state.numeric_columns),
+        "categorical_columns": list(state.categorical_columns),
+        "category_maps": {
+            column: dict(mapping) for column, mapping in state.category_maps.items()
+        },
+        "preprocessing": _preprocessing_payload(state.preprocessing),
+        "trackman": (
+            None
+            if state.trackman_result is None
+            else {
+                "cutoff_year": state.trackman_result.cutoff_year,
+                "lookup_schema": list(state.trackman_result.lookup_schema),
+                "lookup_sha256": state.trackman_lookup_sha256,
+            }
+        ),
+    }
+
+
+def _preprocessed_state_from_payload(
+    root: Path, payload: Mapping[str, object]
+) -> PreprocessedFeatureState:
+    trackman_payload = payload.get("trackman")
+    trackman_result: TrackmanBuildResult | None = None
+    trackman_hash: str | None = None
+    if isinstance(trackman_payload, Mapping):
+        lookup = pd.read_csv(root / "trackman_lookup.csv")
+        trackman_hash = _lookup_sha256(lookup)
+        if trackman_hash != trackman_payload.get("lookup_sha256"):
+            raise FeatureContractError("trackman cache hash differs")
+        trackman_result = TrackmanBuildResult(
+            cutoff_year=int(trackman_payload["cutoff_year"]),
+            lookup=lookup,
+            lookup_schema=tuple(str(item) for item in trackman_payload["lookup_schema"]),
+            mapping=pd.DataFrame(),
+            team_mapping=pd.DataFrame(),
+        )
+    maps = payload["category_maps"]
+    if not isinstance(maps, Mapping):
+        raise FeatureContractError("cached category maps are invalid")
+    preprocessing_payload = payload["preprocessing"]
+    if not isinstance(preprocessing_payload, Mapping):
+        raise FeatureContractError("cached preprocessing state is invalid")
+    return PreprocessedFeatureState(
+        view=str(payload["view"]),
+        cutoff_year=int(payload["cutoff_year"]),
+        numeric_columns=tuple(str(item) for item in payload["numeric_columns"]),
+        categorical_columns=tuple(
+            str(item) for item in payload["categorical_columns"]
+        ),
+        category_maps=MappingProxyType(
+            {
+                str(column): MappingProxyType(
+                    {str(key): int(value) for key, value in mapping.items()}
+                )
+                for column, mapping in maps.items()
+            }
+        ),
+        preprocessing=_preprocessing_from_payload(preprocessing_payload),
+        trackman_result=trackman_result,
+        trackman_lookup_sha256=trackman_hash,
+    )
+
+
+def _preprocessed_source(
+    frame: pd.DataFrame,
+    *,
+    view: str,
+    trackman_result: TrackmanBuildResult | None,
+) -> pd.DataFrame:
+    if view == "raw_typed":
+        return frame.copy()
+    if view != "raw_plus_trackman":
+        raise FeatureContractError(f"unknown preprocessing feature view: {view}")
+    if trackman_result is None:
+        raise FeatureContractError("raw_plus_trackman requires a cutoff lookup")
+    target = frame[TARGET_COLUMN] if TARGET_COLUMN in frame else None
+    source = _attach_trackman(
+        frame.drop(columns=[TARGET_COLUMN], errors="ignore"), trackman_result
+    )
+    if target is not None:
+        source[TARGET_COLUMN] = target.to_numpy(copy=False)
+    source.index = frame.index
+    return source
+
+
+def _preprocessed_batch(
+    original: pd.DataFrame,
+    prepared: pd.DataFrame,
+    state: PreprocessedFeatureState,
+) -> FeatureBatch:
+    if ROW_ID_COLUMN not in original or original[ROW_ID_COLUMN].isna().any():
+        raise FeatureContractError("row_id must be present and non-null")
+    row_id = original[ROW_ID_COLUMN].astype(str).to_numpy(dtype=str)
+    if len(set(row_id.tolist())) != len(row_id):
+        raise FeatureContractError("row_id must be unique")
+    x_num = prepared.loc[:, state.numeric_columns].to_numpy(dtype="float32")
+    if not np.isfinite(x_num).all():
+        raise FeatureContractError("DL numeric features must be finite")
+    encoded = [
+        _category_text(prepared[column])
+        .map(state.category_maps[column])
+        .fillna(0)
+        .to_numpy(dtype="int64")
+        for column in state.categorical_columns
+    ]
+    x_cat = (
+        np.column_stack(encoded).astype("int64", copy=False)
+        if encoded
+        else np.empty((len(original), 0), dtype="int64")
+    )
+    target = None
+    if TARGET_COLUMN in original:
+        target = _numeric(original[TARGET_COLUMN], TARGET_COLUMN).to_numpy(
+            dtype="float32"
+        )
+    season = _numeric(original["season"], "season").to_numpy(dtype="int64")
+    game_type = (
+        _category_text(original["game_type"]).to_numpy(dtype=str)
+        if "game_type" in original
+        else np.full(len(original), MISSING_CATEGORY, dtype=str)
+    )
+    return FeatureBatch(row_id, season, game_type, x_num, x_cat, target)
+
+
+def materialize_preprocessed_fold_cache(
+    cache_root: str | Path,
+    train: pd.DataFrame,
+    valid: pd.DataFrame,
+    history: pd.DataFrame,
+    view: str,
+    spec: PreprocessingSpec,
+    train_end_year: int,
+    valid_year: int,
+) -> FoldCache:
+    """Build or reuse a fold cache bound to an explicit preprocessing contract."""
+
+    if spec.profile == "tree_native":
+        raise FeatureContractError("tree_native does not produce a DL feature cache")
+    if valid_year != train_end_year + 1:
+        raise FeatureContractError("fold must be a yearly transition")
+    if train["season"].gt(train_end_year).any():
+        raise FeatureContractError("training rows exceed train_end_year")
+    if not valid["season"].eq(valid_year).all():
+        raise FeatureContractError("validation rows do not match valid_year")
+    identifier = _preprocessing_id(spec)
+    identity = {
+        "view": view,
+        "preprocessing_id": identifier,
+        "train_end_year": train_end_year,
+        "valid_year": valid_year,
+        "train_row_sha256": _row_sha256(train),
+        "valid_row_sha256": _row_sha256(valid),
+        "train_frame_sha256": _frame_sha256(train),
+        "valid_frame_sha256": _frame_sha256(valid),
+        "history_frame_sha256": _frame_sha256(history),
+        "feature_code_sha256": _code_sha256(),
+        "preprocessing_code_sha256": _preprocessing_code_sha256(),
+    }
+    fold_root = (
+        Path(cache_root).expanduser().resolve()
+        / f"train_{train_end_year}_valid_{valid_year}"
+        / view
+    )
+    target = fold_root / identifier
+    if target.exists():
+        saved = json.loads((target / "identity.json").read_text(encoding="utf-8"))
+        if saved != identity:
+            raise FeatureContractError("preprocessed cache identity differs")
+        payload = json.loads((target / "state.json").read_text(encoding="utf-8"))
+        state = _preprocessed_state_from_payload(target, payload)
+        return FoldCache(
+            target,
+            _load_batch(target / "train"),
+            _load_batch(target / "valid"),
+            state,
+            True,
+        )
+
+    fold_root.mkdir(parents=True, exist_ok=True)
+    temporary = Path(tempfile.mkdtemp(prefix=f".{identifier}-", dir=fold_root))
+    try:
+        trackman_result = (
+            build_trackman_lookup(train, history, train_end_year)
+            if view == "raw_plus_trackman"
+            else None
+        )
+        train_source = _preprocessed_source(
+            train, view=view, trackman_result=trackman_result
+        )
+        valid_source = _preprocessed_source(
+            valid, view=view, trackman_result=trackman_result
+        )
+        preprocessing_state, train_prepared = fit_preprocessor(train_source, spec)
+        valid_prepared = transform_preprocessor(valid_source, preprocessing_state)
+        categorical = preprocessing_state.categorical_columns
+        numeric = preprocessing_state.numeric_columns
+        category_maps = _fit_categories(train_prepared, categorical)
+        lookup_hash = (
+            _lookup_sha256(trackman_result.lookup)
+            if trackman_result is not None
+            else None
+        )
+        state = PreprocessedFeatureState(
+            view,
+            train_end_year,
+            numeric,
+            categorical,
+            category_maps,
+            preprocessing_state,
+            trackman_result,
+            lookup_hash,
+        )
+        _write_batch(
+            temporary / "train", _preprocessed_batch(train, train_prepared, state)
+        )
+        _write_batch(
+            temporary / "valid", _preprocessed_batch(valid, valid_prepared, state)
+        )
+        if trackman_result is not None:
+            trackman_result.lookup.to_csv(temporary / "trackman_lookup.csv", index=False)
+        _write_json(temporary / "state.json", _preprocessed_state_payload(state))
+        _write_json(temporary / "identity.json", identity)
+        os.replace(temporary, target)
+    except Exception:
+        shutil.rmtree(temporary, ignore_errors=True)
+        raise
+    payload = json.loads((target / "state.json").read_text(encoding="utf-8"))
+    return FoldCache(
+        target,
+        _load_batch(target / "train"),
+        _load_batch(target / "valid"),
+        _preprocessed_state_from_payload(target, payload),
+        False,
     )
