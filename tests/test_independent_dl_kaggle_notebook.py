@@ -30,7 +30,6 @@ def test_kaggle_notebook_uses_kaggle_paths_and_existing_campaign():
     required = (
         "/kaggle/input",
         "/kaggle/working",
-        "https://github.com/yh4752/lg-aimers-9th-competition.git",
         "c36811956e632a00f775525f83bcb666ff2ec9d6",
         "torch.cuda.is_available()",
         "experiments.independent_dl.run_campaign",
@@ -63,13 +62,15 @@ def test_kaggle_notebook_rejects_ambiguous_inputs_and_preserves_working_copy():
     assert "shutil.rmtree(CAMPAIGN_OUTPUT_DIR)" not in code
 
 
-def test_kaggle_notebook_authenticates_private_github_without_leaking_token():
+def test_kaggle_notebook_uses_embedded_runtime_without_github_authentication():
     code = "".join(_load_notebook()["cells"][1]["source"])
 
-    assert "from kaggle_secrets import UserSecretsClient" in code
-    assert 'get_secret("GITHUB_TOKEN")' in code
-    assert "GIT_ASKPASS" in code
-    assert "GIT_TERMINAL_PROMPT" in code
-    assert "x-access-token" in code
-    assert "https://x-access-token:" not in code
-    assert "print(token)" not in code
+    assert "EMBEDDED_RUNTIME_B64" in code
+    assert "EMBEDDED_RUNTIME_SHA256" in code
+    assert "base64.b64decode" in code
+    assert "tarfile.open" in code
+    assert "runtime archive SHA-256 mismatch" in code
+    assert "github.com" not in code.lower()
+    assert "GITHUB_TOKEN" not in code
+    assert "kaggle_secrets" not in code
+    assert "git clone" not in code
