@@ -10,7 +10,7 @@ import subprocess
 
 
 ROOT = Path(__file__).resolve().parents[1]
-RUNTIME_COMMIT = "276b54c7fa93aa041a6fcd4f389c2d6e8cea002c"
+RUNTIME_COMMIT = "9a88d2e2ad482a637a72179bb2fc65df72e79704"
 OUTPUT = ROOT / "experiments/preprocessing_campaign/KAGGLE_CELL.py"
 
 
@@ -43,12 +43,13 @@ import tarfile
 import traceback
 
 
-# 사용자 설정: 한 세션에서 새로 시도할 fold 작업 수입니다.
-# 5이면 첫 기준점의 다섯 시간 fold가 완결되어 바로 비교할 수 있습니다.
-MAX_JOBS_PER_SESSION = 5
+# 사용자 설정: Save Version 한 번에는 fold 작업 하나만 완료·재개합니다.
+MAX_JOBS_PER_SESSION = 1
+# 약 8시간 20분 뒤에는 마지막 완료 epoch 체크포인트에서 정상 종료합니다.
+MAX_SESSION_SECONDS = 30000
 INPUT_ROOT = Path("/kaggle/input")
 WORKING_ROOT = Path("/kaggle/working")
-REPO_DIR = WORKING_ROOT / "preprocessing_embedded_code_276b54c"
+REPO_DIR = WORKING_ROOT / "preprocessing_embedded_code_9a88d2e"
 REQUIRED_CODE_COMMIT = "__COMMIT__"
 RUNTIME_DIR = WORKING_ROOT / "preprocessing_runtime_v1"
 CAMPAIGN_OUTPUT_DIR = WORKING_ROOT / "preprocessing_campaign_v1"
@@ -116,6 +117,8 @@ try:
         raise RuntimeError("This cell must run in a Kaggle Notebook")
     if isinstance(MAX_JOBS_PER_SESSION, bool) or MAX_JOBS_PER_SESSION < 1:
         raise RuntimeError("MAX_JOBS_PER_SESSION must be a positive integer")
+    if isinstance(MAX_SESSION_SECONDS, bool) or MAX_SESSION_SECONDS < 1:
+        raise RuntimeError("MAX_SESSION_SECONDS must be a positive integer")
 
     train_path = find_unique_file("train.csv")
     trackman_path = find_unique_file("trackman_history.csv")
@@ -214,6 +217,8 @@ try:
         str(CAMPAIGN_OUTPUT_DIR),
         "--max-jobs",
         str(MAX_JOBS_PER_SESSION),
+        "--max-session-seconds",
+        str(MAX_SESSION_SECONDS),
     ]
     process = subprocess.Popen(
         command,
