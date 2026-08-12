@@ -182,11 +182,11 @@ def test_stage_four_worst_case_fits_before_archive_reserve() -> None:
     cat_jobs = [job for job in jobs if job.family == "catboost"]
     assert len(dl_jobs) == 4
     assert len(cat_jobs) == 7
-    # Jobs are queued by family; two DL waves plus four CatBoost waves fit in 5,700 s.
+    # Jobs are queued by family; two DL waves plus four CatBoost waves fit in 5,000 s.
     assert sum(job.max_seconds for job in dl_jobs) / 2 <= 3600
     assert ((len(cat_jobs) + 1) // 2) * max(
         job.max_seconds for job in cat_jobs
-    ) <= 2000
+    ) <= 1400
 
 
 def test_stage_five_never_requires_sixth_version_for_short_training() -> None:

@@ -364,7 +364,7 @@ def _stage_four_jobs(
                     components=tuple(descriptor["components"]),
                     train_end_year=train_end,
                     valid_year=valid,
-                    max_seconds=500,
+                    max_seconds=350,
                     sample_mode=sample_mode,
                 )
             )
@@ -425,7 +425,7 @@ def build_stage_jobs(
                     stage_id=3,
                     setting_id=setting,
                     components=components,
-                    max_seconds=600,
+                    max_seconds=500,
                 )
                 for setting, components in candidates
             )
