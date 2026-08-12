@@ -36,7 +36,13 @@ class ModelAdapter(Protocol):
     ) -> object: ...
 
     def loss(
-        self, model: object, x_num: object, x_cat: object, y: object
+        self,
+        model: object,
+        x_num: object,
+        x_cat: object,
+        y: object,
+        *,
+        row_indices: object,
     ) -> object: ...
 
     def probabilities(

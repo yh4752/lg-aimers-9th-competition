@@ -17,7 +17,9 @@ from experiments.independent_dl.models.tabm import SUPPORTED_NUM_EMBEDDINGS
 from experiments.independent_dl.training import (
     BackendAttemptResult,
     TrainRequest,
+    call_adapter_loss,
     fit_candidate,
+    prepare_adapter_context,
 )
 
 
@@ -226,3 +228,70 @@ def test_activation_checkpoint_module_is_imported_lazily(monkeypatch) -> None:
     wrapped("num", "cat")
 
     assert calls == [("num", "cat")]
+
+
+def test_training_loss_passes_fold_training_row_indices() -> None:
+    class IndexRecordingAdapter:
+        def loss(self, model, x_num, x_cat, y, *, row_indices):
+            self.row_indices = row_indices
+            return "loss"
+
+    adapter = IndexRecordingAdapter()
+    indices = np.array([7, 3], dtype="int64")
+
+    result = call_adapter_loss(
+        adapter, object(), "num", "cat", "target", row_indices=indices
+    )
+
+    assert result == "loss"
+    assert adapter.row_indices.tolist() == [7, 3]
+
+
+def test_training_prepares_optional_retrieval_context() -> None:
+    class ContextAdapter:
+        def fit_context(self, batch):
+            self.batch = batch
+
+    adapter = ContextAdapter()
+    batch = _batch("train", with_target=True)
+
+    prepare_adapter_context(adapter, batch)
+
+    assert adapter.batch is batch
+
+
+def test_oom_retry_resumes_newly_completed_checkpoint(tmp_path: Path) -> None:
+    request = _request()
+
+    class CheckpointThenOOM(_RecordingBackend):
+        def run_attempt(self, **kwargs: object) -> BackendAttemptResult:
+            self.calls.append(dict(kwargs))
+            if len(self.calls) == 1:
+                output_dir = Path(kwargs["output_dir"])
+                (output_dir / "checkpoint.pt").write_bytes(b"checkpoint")
+                (output_dir / "checkpoint_meta.json").write_text(
+                    json.dumps(
+                        {
+                            "candidate_id": request.candidate_id,
+                            "epoch": 3,
+                            "checkpoint": "checkpoint.pt",
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+                raise RuntimeError("CUDA out of memory")
+            output_dir = Path(kwargs["output_dir"])
+            checkpoint = output_dir / "checkpoint.pt"
+            return BackendAttemptResult(
+                best_epoch=11,
+                best_brier=0.24,
+                checkpoint=checkpoint,
+                predictions=np.array([0.4, 0.6], dtype="float64"),
+            )
+
+    backend = CheckpointThenOOM()
+
+    result = fit_candidate(request, _FakeAdapter(), tmp_path, backend=backend)
+
+    assert result.started_epoch == 0
+    assert [call["resume_epoch"] for call in backend.calls] == [0, 4]

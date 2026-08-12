@@ -49,7 +49,16 @@ class TabMAdapter:
         )
         return make_two_input_checkpoint_wrapper(torch, model).to(device)
 
-    def loss(self, model: object, x_num: object, x_cat: object, y: object) -> object:
+    def loss(
+        self,
+        model: object,
+        x_num: object,
+        x_cat: object,
+        y: object,
+        *,
+        row_indices: object,
+    ) -> object:
+        del row_indices
         torch = import_runtime_module("torch")
         member_logits = model(x_num, x_cat).squeeze(-1)
         member_targets = y.float().unsqueeze(1).expand_as(member_logits)

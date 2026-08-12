@@ -58,7 +58,16 @@ class MLPResNetAdapter:
             int(model_config["embedding_dim"]),
         ).to(device)
 
-    def loss(self, model: object, x_num: object, x_cat: object, y: object) -> object:
+    def loss(
+        self,
+        model: object,
+        x_num: object,
+        x_cat: object,
+        y: object,
+        *,
+        row_indices: object,
+    ) -> object:
+        del row_indices
         torch = import_runtime_module("torch")
         logits = model(x_num, x_cat).squeeze(-1)
         return torch.nn.functional.binary_cross_entropy_with_logits(logits, y.float())

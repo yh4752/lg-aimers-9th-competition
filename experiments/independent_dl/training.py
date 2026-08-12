@@ -68,6 +68,26 @@ class TrainingBackend(Protocol):
     ) -> BackendAttemptResult: ...
 
 
+def prepare_adapter_context(adapter: object, train: FeatureBatch) -> None:
+    fit_context = getattr(adapter, "fit_context", None)
+    if fit_context is not None:
+        fit_context(train)
+
+
+def call_adapter_loss(
+    adapter: ModelAdapter,
+    model: object,
+    x_num: object,
+    x_cat: object,
+    y: object,
+    *,
+    row_indices: object,
+) -> object:
+    return adapter.loss(
+        model, x_num, x_cat, y, row_indices=row_indices
+    )
+
+
 def _positive_integer(value: object, label: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
         raise TrainingContractError(f"{label} must be a positive integer")
@@ -135,6 +155,7 @@ def fit_candidate(
     root = Path(output_dir)
     root.mkdir(parents=True, exist_ok=True)
     started_epoch = _resume_epoch(root, request.candidate_id)
+    current_resume_epoch = started_epoch
     runtime = TorchTrainingBackend() if backend is None else backend
     attempted: list[int] = []
     activation_checkpointing = False
@@ -149,12 +170,13 @@ def fit_candidate(
                 micro_batch_size=micro,
                 accumulation_steps=effective // micro,
                 activation_checkpointing=activation_checkpointing,
-                resume_epoch=started_epoch,
+                resume_epoch=current_resume_epoch,
             )
             break
         except RuntimeError as error:
             if not _is_cuda_oom(error):
                 raise
+            current_resume_epoch = _resume_epoch(root, request.candidate_id)
             if micro > 1:
                 micro //= 2
                 while effective % micro:
@@ -258,6 +280,7 @@ class TorchTrainingBackend:
         torch.backends.cudnn.allow_tf32 = True
 
         metadata = metadata_from_train(request.train)
+        prepare_adapter_context(adapter, request.train)
         model = adapter.build(request.model_config, metadata, device)
         if activation_checkpointing and hasattr(model, "enable_activation_checkpointing"):
             model.enable_activation_checkpointing()
@@ -316,10 +339,20 @@ class TorchTrainingBackend:
                         dtype=torch.float32,
                         device=device,
                     )
+                    row_indices = torch.as_tensor(
+                        indices, dtype=torch.long, device=device
+                    )
                     with torch.autocast(
                         device_type="cuda", dtype=torch.float16, enabled=amp_enabled
                     ):
-                        loss = adapter.loss(model, x_num, x_cat, y) / n_micro
+                        loss = call_adapter_loss(
+                            adapter,
+                            model,
+                            x_num,
+                            x_cat,
+                            y,
+                            row_indices=row_indices,
+                        ) / n_micro
                     scaler.scale(loss).backward()
                 scaler.step(optimizer)
                 scaler.update()
