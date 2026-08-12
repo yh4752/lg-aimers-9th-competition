@@ -38,7 +38,7 @@ CAMPAIGN_OUTPUT_DIR = Path(
 )
 REPO_URL = "https://github.com/yh4752/lg-aimers-9th-competition.git"
 REPO_DIR = Path("/content/lg-aimers-9th-competition")
-REQUIRED_CODE_COMMIT = "0000000000000000000000000000000000000000"
+REQUIRED_CODE_COMMIT = "d1ee36430d2a8fe15d37df81058f764091b39646"
 RUNTIME_DIR = Path("/content/preprocessing_runtime_v1")
 
 
