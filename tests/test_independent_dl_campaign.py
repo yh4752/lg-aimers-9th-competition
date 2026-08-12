@@ -191,6 +191,12 @@ def test_official_runtime_writes_fold_bound_prediction_artifacts(tmp_path: Path)
             effective_batch_size=4096,
             model_config=request.model_config,
             started_epoch=0,
+            hardware={
+                "device_count": 1,
+                "devices": ({"index": 0, "name": "fake", "vram_bytes": 1024},),
+                "training_mode": "single_gpu",
+                "training_device_indices": (0,),
+            },
         )
 
     runtime = OfficialCampaignRuntime(
@@ -215,6 +221,9 @@ def test_official_runtime_writes_fold_bound_prediction_artifacts(tmp_path: Path)
     ]
     assert predictions["row_id"].tolist() == ["va-1", "va-2"]
     assert predictions["fold"].tolist() == ["valid_2024", "valid_2024"]
+    metrics = json.loads(result.metrics_path.read_text(encoding="utf-8"))
+    assert metrics["hardware"]["training_mode"] == "single_gpu"
+    assert metrics["hardware"]["training_device_indices"] == [0]
 
 
 def test_campaign_cli_exposes_run_status_and_summarize() -> None:

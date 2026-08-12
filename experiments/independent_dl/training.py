@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import json
 import math
 import os
@@ -39,6 +39,7 @@ class BackendAttemptResult:
     best_brier: float
     checkpoint: Path
     predictions: np.ndarray
+    hardware: Mapping[str, object] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -52,6 +53,7 @@ class TrainResult:
     effective_batch_size: int
     model_config: Mapping[str, object]
     started_epoch: int
+    hardware: Mapping[str, object] = field(default_factory=dict)
 
 
 class TrainingBackend(Protocol):
@@ -66,6 +68,26 @@ class TrainingBackend(Protocol):
         activation_checkpointing: bool,
         resume_epoch: int,
     ) -> BackendAttemptResult: ...
+
+
+def inspect_cuda_hardware(torch: object) -> dict[str, object]:
+    """Describe visible CUDA devices and the device this backend actually uses."""
+
+    count = int(torch.cuda.device_count())
+    devices = tuple(
+        {
+            "index": index,
+            "name": str(torch.cuda.get_device_name(index)),
+            "vram_bytes": int(torch.cuda.get_device_properties(index).total_memory),
+        }
+        for index in range(count)
+    )
+    return {
+        "device_count": count,
+        "devices": devices,
+        "training_mode": "single_gpu",
+        "training_device_indices": (0,),
+    }
 
 
 def prepare_adapter_context(adapter: object, train: FeatureBatch) -> None:
@@ -204,6 +226,7 @@ def fit_candidate(
         effective_batch_size=effective,
         model_config=MappingProxyType(dict(request.model_config)),
         started_epoch=started_epoch,
+        hardware=MappingProxyType(dict(attempt.hardware)),
     )
 
 
@@ -272,6 +295,7 @@ class TorchTrainingBackend:
         if not torch.cuda.is_available():
             raise RuntimeError("CUDA GPU가 필요합니다. Colab 런타임을 T4 GPU로 바꾸세요.")
         device = "cuda"
+        hardware = inspect_cuda_hardware(torch)
         random.seed(request.seed)
         np.random.seed(request.seed)
         torch.manual_seed(request.seed)
@@ -430,6 +454,7 @@ class TorchTrainingBackend:
             best_brier=best_brier,
             checkpoint=best_path,
             predictions=predictions,
+            hardware=hardware,
         )
 
     @staticmethod

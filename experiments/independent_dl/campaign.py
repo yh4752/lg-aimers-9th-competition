@@ -179,6 +179,7 @@ class OfficialCampaignRuntime:
                     "brier": brier,
                     "best_epoch": int(result.best_epoch),
                     "checkpoint": str(Path(result.checkpoint).resolve()),
+                    "hardware": dict(result.hardware),
                 },
             )
             return CandidateRunResult(

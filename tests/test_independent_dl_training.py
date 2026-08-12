@@ -19,8 +19,30 @@ from experiments.independent_dl.training import (
     TrainRequest,
     call_adapter_loss,
     fit_candidate,
+    inspect_cuda_hardware,
     prepare_adapter_context,
 )
+
+
+def test_cuda_hardware_reports_visible_devices_without_claiming_multi_gpu() -> None:
+    properties = SimpleNamespace(total_memory=40 * 1024**3)
+    cuda = SimpleNamespace(
+        device_count=lambda: 2,
+        get_device_name=lambda index: f"NVIDIA A100 #{index}",
+        get_device_properties=lambda index: properties,
+    )
+
+    hardware = inspect_cuda_hardware(SimpleNamespace(cuda=cuda))
+
+    assert hardware == {
+        "device_count": 2,
+        "devices": (
+            {"index": 0, "name": "NVIDIA A100 #0", "vram_bytes": 40 * 1024**3},
+            {"index": 1, "name": "NVIDIA A100 #1", "vram_bytes": 40 * 1024**3},
+        ),
+        "training_mode": "single_gpu",
+        "training_device_indices": (0,),
+    }
 
 
 class _RecordingBackend:
