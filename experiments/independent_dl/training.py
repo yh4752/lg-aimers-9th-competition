@@ -92,6 +92,8 @@ class BackendAttemptResult:
     checkpoint: Path
     predictions: np.ndarray
     hardware: Mapping[str, object] = field(default_factory=dict)
+    completed_epochs: int = 0
+    validation_curve: tuple[tuple[int, float], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -106,6 +108,8 @@ class TrainResult:
     model_config: Mapping[str, object]
     started_epoch: int
     hardware: Mapping[str, object] = field(default_factory=dict)
+    completed_epochs: int = 0
+    validation_curve: tuple[tuple[int, float], ...] = ()
 
 
 class TrainingBackend(Protocol):
@@ -285,6 +289,15 @@ def fit_candidate(
         model_config=MappingProxyType(dict(request.model_config)),
         started_epoch=started_epoch,
         hardware=MappingProxyType(dict(attempt.hardware)),
+        completed_epochs=(
+            int(attempt.completed_epochs)
+            if int(attempt.completed_epochs) > 0
+            else int(attempt.best_epoch) + 1
+        ),
+        validation_curve=tuple(
+            (int(epoch), float(brier))
+            for epoch, brier in attempt.validation_curve
+        ),
     )
 
 
@@ -378,6 +391,7 @@ class TorchTrainingBackend:
         best_path = output_dir / "best_checkpoint.pt"
         best_brier = math.inf
         best_epoch = -1
+        validation_curve: list[tuple[int, float]] = []
         if resume_epoch:
             payload = torch.load(checkpoint_path, map_location=device, weights_only=False)
             model.load_state_dict(payload["model"])
@@ -386,6 +400,10 @@ class TorchTrainingBackend:
             scaler.load_state_dict(payload["scaler"])
             best_brier = float(payload["best_brier"])
             best_epoch = int(payload["best_epoch"])
+            validation_curve = [
+                (int(item[0]), float(item[1]))
+                for item in payload.get("validation_curve", ())
+            ]
             random.setstate(payload["python_rng"])
             np.random.set_state(payload["numpy_rng"])
             torch.set_rng_state(payload["torch_rng"])
@@ -483,6 +501,7 @@ class TorchTrainingBackend:
             )
             target = np.asarray(request.valid.y, dtype="float64")
             brier = float(np.mean(np.square(predictions - target)))
+            validation_curve.append((epoch, brier))
             improved = brier < best_brier
             if improved:
                 best_brier = brier
@@ -503,6 +522,7 @@ class TorchTrainingBackend:
                 "epoch": epoch,
                 "best_epoch": best_epoch,
                 "best_brier": best_brier,
+                "validation_curve": validation_curve,
                 "model": model.state_dict(),
                 "optimizer": optimizer.state_dict(),
                 "scheduler": scheduler.state_dict(),
@@ -552,6 +572,8 @@ class TorchTrainingBackend:
             checkpoint=best_path,
             predictions=predictions,
             hardware=hardware,
+            completed_epochs=last_epoch + 1,
+            validation_curve=tuple(validation_curve),
         )
 
     @staticmethod
