@@ -1,20 +1,27 @@
-# 독립 DL 캠페인 Colab 실행
+# 독립 DL 프런티어 캠페인 Colab Pro 실행
 
 ## 실행 안내
 
-- 목적: 검증된 시간 cutoff를 유지하면서 TabM/TabMmini, MLP/ResNet,
-  FT-Transformer, TabR의 64개 초기 후보와 이후 확장 후보를 T4에서 생성·재개한다.
+- 목적: 전체 `2023→2024` 검증에서 TabM 입력 표현, 대형 ResNet·FT-Transformer,
+  TabICLv2와 수정된 TabR를 명시된 순서로 생성·재개한다. Smoke 결과는 성능 근거가
+  아니다.
 - 필수 입력: Colab 보안 비밀 `GITHUB_TOKEN`, Drive의 `train.csv`와
-  `trackman_history.csv`, GPU 런타임(T4).
-- 예상 시간: 패키지 준비는 보통 수 분, 첫 64개 후보는 여러 Colab 세션과 수일이
-  걸릴 수 있다. 오래 걸리는 것은 후보 기각 사유가 아니다.
-- 재실행: 같은 `CAMPAIGN_OUTPUT_DIR`로 아래 셀 전체를 다시 실행하면 완료 artifact의
-  해시를 확인해 건너뛰고, 중단 후보는 마지막 유효 checkpoint부터 이어간다.
-- 성공 시: `INDEPENDENT_DL_CAMPAIGN_CHECKPOINTED`와 Drive 결과 경로가 출력된다.
-  `campaign_manifest.json` 및 존재할 때 `campaign_summary.json`을 보내면 된다.
-- 오류 시: 셀에 출력된 첫 traceback부터 마지막 줄까지 생략하지 말고 보내면 된다.
+  `trackman_history.csv`, CUDA GPU 런타임이다.
+- 예상 시간: 환경 준비는 수 분, 각 본 후보는 GPU와 모델에 따라 수십 분에서 여러
+  시간이 걸릴 수 있으며 전체 캠페인은 여러 세션이 필요하다.
+- Colab Pro: 더 빠른 GPU와 고용량 메모리는 가용성에 따라 달라진다. 아래 셀은
+  특정 GPU를 요구하지 않고 실제 장치 수, 이름과 VRAM을 출력한다.
+- 재실행: 같은 `CAMPAIGN_OUTPUT_DIR`로 셀 전체를 다시 실행하면 기존 checkpoint 재개
+  여부와 다음 후보를 먼저 표시하고, 해시가 유효한 완료 후보를 건너뛴다.
+- 성공 시: `INDEPENDENT_DL_CAMPAIGN_CHECKPOINTED`, Drive 결과 루트,
+  `campaign_manifest.json`, `candidate_results.jsonl`과 존재하는
+  `campaign_summary.json` 경로가 출력된다.
+- 오류 시: 첫 번째 원본 traceback부터 마지막 오류까지 생략하지 않고 보내면 된다.
+- 제출: 이 셀은 제출 CSV나 ZIP을 만들지 않는다. TabICLv2는 대회 사용 가능성이
+  별도로 확인될 때까지 `research_only`다.
 
-아래는 하나의 완결된 셀이다. 저장소 코드나 노트북을 수정하지 않는다.
+아래는 하나의 완결된 셀이다. 사용자가 바꿀 값은 `DATA_DIR`와
+`CAMPAIGN_OUTPUT_DIR`뿐이다.
 
 ```python
 from __future__ import annotations
@@ -32,7 +39,6 @@ import tempfile
 from google.colab import drive, userdata
 
 
-# 사용자 설정: 기존 Drive 구조가 다르면 이 두 경로만 바꾸세요.
 DATA_DIR = Path("/content/drive/MyDrive/LG_AIMERS_2026/competition/data")
 CAMPAIGN_OUTPUT_DIR = Path(
     "/content/drive/MyDrive/LG_AIMERS_2026/outputs/independent_dl_campaign_v1"
@@ -40,8 +46,8 @@ CAMPAIGN_OUTPUT_DIR = Path(
 
 REPO_URL = "https://github.com/yh4752/lg-aimers-9th-competition.git"
 REPO_DIR = Path("/content/lg-aimers-9th-competition")
-REQUIRED_CODE_COMMIT = "c36811956e632a00f775525f83bcb666ff2ec9d6"
-RUNTIME_DIR = Path("/content/independent_dl_runtime_v1")
+REQUIRED_CODE_COMMIT = "2c796dd757bf27ae30797fa01378db5bb6011b7f"
+RUNTIME_DIR = Path("/content/independent_dl_runtime_v2")
 
 
 def run_checked(command, *, cwd=None, env=None):
@@ -105,12 +111,14 @@ with tempfile.TemporaryDirectory(prefix="independent_dl_git_") as temporary_valu
     else:
         run_checked(["git", "clone", "--no-checkout", REPO_URL, REPO_DIR], env=git_env)
         run_checked(["git", "fetch", "--prune", "origin"], cwd=REPO_DIR, env=git_env)
-    run_checked(["git", "checkout", "--detach", REQUIRED_CODE_COMMIT], cwd=REPO_DIR, env=git_env)
+    run_checked(
+        ["git", "checkout", "--detach", REQUIRED_CODE_COMMIT],
+        cwd=REPO_DIR,
+        env=git_env,
+    )
 del token
 
-head = run_checked(
-    ["git", "rev-parse", "HEAD"], cwd=REPO_DIR
-).stdout.strip()
+head = run_checked(["git", "rev-parse", "HEAD"], cwd=REPO_DIR).stdout.strip()
 if head != REQUIRED_CODE_COMMIT:
     raise RuntimeError(f"코드 커밋 불일치: {head}")
 
@@ -123,10 +131,12 @@ if not marker.is_file() or marker.read_text(encoding="utf-8").strip() != require
     RUNTIME_DIR.mkdir(parents=True)
     run_checked(
         [
-            sys.executable,
-            "-m",
-            "pip", "install", "--target", str(RUNTIME_DIR),
-            "--upgrade", "--no-deps", "-r", str(requirements),
+            sys.executable, "-m", "pip", "install", "--target",
+            str(RUNTIME_DIR),
+            "--upgrade",
+            "--no-deps",
+            "-r",
+            str(requirements),
         ]
     )
     marker.write_text(requirements_sha + "\n", encoding="utf-8")
@@ -137,23 +147,77 @@ child_env["PYTHONPATH"] = os.pathsep.join(
 )
 child_env["PYTHONUNBUFFERED"] = "1"
 
-gpu_check = (
-    "import torch; "
-    "assert torch.cuda.is_available(), 'CUDA GPU가 없습니다'; "
-    "name=torch.cuda.get_device_name(0); "
-    "print('GPU:', name); "
-    "assert 'T4' in name, f'T4 런타임이 아닙니다: {name}'"
-)
-run_checked([sys.executable, "-c", gpu_check], cwd=REPO_DIR, env=child_env)
+runtime_probe = r'''
+import json
+import sys
+import numpy
+import pandas
+import torch
+
+if not torch.cuda.is_available():
+    raise RuntimeError("CUDA GPU가 없습니다. Colab 런타임 유형에서 GPU를 선택하세요.")
+devices = []
+for index in range(torch.cuda.device_count()):
+    properties = torch.cuda.get_device_properties(index)
+    devices.append(
+        {
+            "index": index,
+            "name": torch.cuda.get_device_name(index),
+            "vram_gib": round(properties.total_memory / 1024**3, 2),
+        }
+    )
+print("Python:", sys.version.split()[0])
+print("PyTorch:", torch.__version__)
+print("CUDA:", torch.version.cuda)
+print("NumPy:", numpy.__version__)
+print("pandas:", pandas.__version__)
+print("GPU_COUNT:", torch.cuda.device_count())
+print("GPU/VRAM:", json.dumps(devices, ensure_ascii=False))
+print("실제 학습 모드: single_gpu, cuda:0")
+'''
+print("저장소 커밋:", head)
+run_checked([sys.executable, "-c", runtime_probe], cwd=REPO_DIR, env=child_env)
 
 config = REPO_DIR / "experiments/independent_dl/configs/campaign_v1.json"
+manifest = CAMPAIGN_OUTPUT_DIR / "campaign_manifest.json"
+results_jsonl = CAMPAIGN_OUTPUT_DIR / "candidate_results.jsonl"
+summary = CAMPAIGN_OUTPUT_DIR / "campaign_summary.json"
+
+if manifest.is_file():
+    payload = json.loads(manifest.read_text(encoding="utf-8"))
+    entries = payload.get("candidates", {})
+    config_payload = json.loads(config.read_text(encoding="utf-8"))
+    priority_ids = [
+        candidate_id
+        for wave in config_payload["execution_waves"]
+        if isinstance(wave["candidate_ids"], list)
+        for candidate_id in wave["candidate_ids"]
+    ]
+    next_candidate = next(
+        (
+            candidate_id
+            for candidate_id in priority_ids
+            if entries.get(candidate_id, {}).get("state") == "pending"
+        ),
+        "우선 파동 완료 후 remaining_grid에서 결정",
+    )
+    print("실행 상태: 기존 checkpoint 재개")
+    print("현재 등록 기준 다음 후보:", next_candidate)
+else:
+    print("실행 상태: 새 캠페인")
+    print("다음 후보: 설정의 첫 미완료 후보")
+
 command = [
     sys.executable,
-    "-m", "experiments.independent_dl.run_campaign",
+    "-m",
+    "experiments.independent_dl.run_campaign",
     "run",
-    "--config", str(config),
-    "--data-dir", str(DATA_DIR),
-    "--output-dir", str(CAMPAIGN_OUTPUT_DIR),
+    "--config",
+    str(config),
+    "--data-dir",
+    str(DATA_DIR),
+    "--output-dir",
+    str(CAMPAIGN_OUTPUT_DIR),
 ]
 process = subprocess.Popen(
     command,
@@ -170,11 +234,10 @@ for line in process.stdout:
 returncode = process.wait()
 if returncode != 0:
     raise RuntimeError(
-        f"독립 DL 캠페인 자식 프로세스가 실패했습니다(returncode={returncode})."
+        f"독립 DL 캠페인이 실패했습니다(returncode={returncode}). "
+        "위의 첫 원본 traceback부터 모두 보내주세요."
     )
 
-manifest = CAMPAIGN_OUTPUT_DIR / "campaign_manifest.json"
-summary = CAMPAIGN_OUTPUT_DIR / "campaign_summary.json"
 if not manifest.is_file():
     raise RuntimeError(f"campaign_manifest.json이 생성되지 않았습니다: {manifest}")
 payload = json.loads(manifest.read_text(encoding="utf-8"))
@@ -186,12 +249,9 @@ completed = [
 print("INDEPENDENT_DL_CAMPAIGN_CHECKPOINTED")
 print("결과 루트:", CAMPAIGN_OUTPUT_DIR)
 print("Manifest:", manifest)
+print("Candidate results:", results_jsonl if results_jsonl.is_file() else "아직 없음")
 print("Summary:", summary if summary.is_file() else "아직 없음")
 print("완료 후보 수:", len(completed))
 print("최근 완료 후보:", completed[-1] if completed else "아직 없음")
-print(
-    "상태 확인 명령:",
-    f"{sys.executable} -m experiments.independent_dl.run_campaign status "
-    f"--output-dir {CAMPAIGN_OUTPUT_DIR}",
-)
+print("성공 시 위 경로와 manifest·results·summary 파일을 보내주세요.")
 ```

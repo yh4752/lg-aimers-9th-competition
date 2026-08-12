@@ -20,7 +20,11 @@ def test_colab_handoff_is_one_cell_and_does_not_package_submission() -> None:
         "재실행",
         "성공 시",
         "오류 시",
-        "T4",
+        "Colab Pro",
+        "가용성",
+        "VRAM",
+        "다음 후보",
+        "기존 checkpoint 재개",
         "INDEPENDENT_DL_CAMPAIGN_CHECKPOINTED",
         "campaign_manifest.json",
         "campaign_summary.json",
@@ -60,12 +64,15 @@ def test_handoff_uses_child_runtime_and_existing_colab_secret() -> None:
     text = HANDOFF.read_text(encoding="utf-8")
 
     assert 'userdata.get("GITHUB_TOKEN")' in text
-    assert 'REQUIRED_CODE_COMMIT = "c36811956e632a00f775525f83bcb666ff2ec9d6"' in text
+    assert 'REQUIRED_CODE_COMMIT = "2c796dd' in text
     assert 'PYTHONPATH' in text
     assert 'subprocess.Popen' in text
     assert 'pip", "install", "--target"' in text
     assert '"run",' in text
     assert 'force_remount=True' not in text
+    assert "assert 'T4' in name" not in text
+    assert 'torch.cuda.device_count()' in text
+    assert 'total_memory' in text
 
 
 def test_roadmap_marks_dl_code_ready_and_waiting_for_user_run() -> None:
