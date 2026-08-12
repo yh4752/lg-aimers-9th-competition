@@ -40,10 +40,11 @@ Assert that the ZIP contains exactly:
     "metrics.json",
     "predictions.csv",
     "requirements-colab.txt",
+    "environment.json",
 }
 ```
 
-Assert `handoff_manifest.json` contains the candidate ID, campaign ID, protocol, runtime digest, requirements digest, metrics/predictions digests, uncompressed sizes, ZIP size, and metrics hardware. Add separate tests proving the writer rejects missing/non-completed candidates, path escape, symlinks, altered artifact hashes, malformed/duplicate/non-finite manifest JSON, invalid runtime digest, output aliasing an input, and an existing output before opening artifact contents.
+Assert `handoff_manifest.json` contains the candidate ID, campaign ID, protocol, runtime digest, requirements digest, metrics/predictions/environment digests, uncompressed member sizes, and metrics hardware. The final ZIP size and digest are returned after publication, not embedded recursively. Add focused tests proving the writer rejects missing/non-completed candidates, paths outside the campaign root, non-regular or altered artifacts, invalid runtime digest, and an existing output.
 
 - [ ] **Step 2: Run the handoff tests and confirm RED**
 
@@ -64,7 +65,7 @@ Add a CLI action:
 
 ```text
 handoff --output-dir ROOT --candidate-id ID --result ZIP
-        --runtime-sha256 SHA256 --requirements FILE
+        --runtime-sha256 SHA256 --requirements FILE --environment FILE
 ```
 
 Print JSON with `status: handoff_ready`, candidate ID, absolute ZIP path, byte size, and SHA-256. Do not import pandas, NumPy, Torch, or model packages in the handoff path.
@@ -130,6 +131,8 @@ The renderer must:
 - discover exactly one directory containing all four official CSVs;
 - restore at most one attached `independent_dl_campaign_v1` directory only when `/kaggle/working` has no campaign directory;
 - prepare packages and print GPU/VRAM without starting training;
+- state that Kaggle Internet must be enabled for the first PyPI package installation, while GitHub authentication is never used;
+- write `environment.json` with Python, Torch, CUDA, GPU/VRAM and installed package versions;
 - define read-only `show_campaign_status`, streaming `run_one_family`, and `write_handoff` helpers;
 - create five model-family cells, each running one candidate;
 - create a handoff cell where the user sets only `HANDOFF_CANDIDATE_ID` and receives `/kaggle/working/codex_handoffs/<candidate_id>_handoff.zip` plus bytes and SHA-256;

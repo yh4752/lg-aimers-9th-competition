@@ -26,6 +26,10 @@ ZIP으로 내려받아 대화에 첨부한다. 선택된 후보의 전체 학습
 expansion, 다중 fold·seed confirmation과 TabICLv2 연구 후보는 기존 캠페인 그대로
 보존한다.
 
+공식 Dataset에는 CSV만 있으므로 첫 공통 준비에서는 PyPI 패키지 설치를 위해 Kaggle
+Notebook의 **Internet 옵션을 켜야 한다**. GitHub에는 연결하지 않는다. 설치 완료
+표식과 requirements 해시가 같으면 같은 세션의 재실행에서는 재설치하지 않는다.
+
 ## 공식 데이터와 재개
 
 입력 폴더는 `train.csv`, `test.csv`, `sample_submission.csv`,
@@ -46,7 +50,8 @@ Dataset을 Input에 연결한다. 원본과 재개 후보가 여러 개면 자�
 - `metrics.json`과 그 SHA-256
 - `predictions.csv` OOF와 그 SHA-256
 - 후보 실행 로그 또는 manifest에 기록된 전체 실패 이유
-- ZIP 내부 파일 목록, 크기와 SHA-256을 담은 `handoff_manifest.json`
+- 실제 Python·Torch·CUDA·GPU와 설치 패키지 버전의 `environment.json`
+- ZIP 내부 멤버 목록, 각 멤버 크기와 SHA-256을 담은 `handoff_manifest.json`
 
 checkpoint, feature cache, 원본 데이터, test 예측과 제출 파일은 handoff ZIP에 넣지
 않는다. ZIP 생성 전에 manifest에 기록된 metrics·predictions 해시와 현재 파일을 다시
@@ -54,7 +59,8 @@ checkpoint, feature cache, 원본 데이터, test 예측과 제출 파일은 han
 동일 경로 ZIP은 덮어쓰지 않는다.
 
 후보 하나의 OOF를 포함하므로 ZIP은 대체로 약 5~15MB로 예상하지만 문자열 길이와
-압축률에 따라 달라질 수 있다. 실제 크기와 SHA-256을 마지막 셀에서 출력한다.
+압축률에 따라 달라질 수 있다. 최종 ZIP은 자기 자신의 해시를 내부에 기록하지 않고,
+생성이 끝난 뒤 실제 크기와 SHA-256을 화면에 출력한다.
 
 ## 분석 이후 흐름
 
