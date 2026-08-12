@@ -187,6 +187,9 @@ class BudgetedScheduler:
         archive_reserve_seconds: int = 600,
         heartbeat_seconds: int = 60,
         poll_seconds: float = 0.25,
+        campaign_identity: dict[str, str] | None = None,
+        required_gpu_name: str | None = None,
+        worker_shutdown_grace_seconds: int = 120,
     ) -> None:
         self.process_factory = process_factory or _default_process_factory
         self.gpu_probe = gpu_probe or _default_gpu_probe
@@ -197,6 +200,9 @@ class BudgetedScheduler:
         self.archive_reserve_seconds = archive_reserve_seconds
         self.heartbeat_seconds = heartbeat_seconds
         self.poll_seconds = poll_seconds
+        self.campaign_identity = dict(campaign_identity or {})
+        self.required_gpu_name = required_gpu_name
+        self.worker_shutdown_grace_seconds = worker_shutdown_grace_seconds
 
     def run(
         self,
@@ -208,8 +214,15 @@ class BudgetedScheduler:
         gpu_count = self.gpu_probe()
         if gpu_count != 2:
             raise RuntimeError("exactly two CUDA devices are required")
+        gpu_status = self.gpu_status_probe()
+        if self.required_gpu_name and (
+            gpu_status.casefold().count(self.required_gpu_name.casefold()) != 2
+        ):
+            raise RuntimeError(
+                f"exactly two {self.required_gpu_name} devices are required"
+            )
         print(
-            f"GPU_READY device_count={gpu_count} status={self.gpu_status_probe()}",
+            f"GPU_READY device_count={gpu_count} status={gpu_status}",
             flush=True,
         )
         root = Path(output_root).resolve()
@@ -219,6 +232,10 @@ class BudgetedScheduler:
         jobs_root.mkdir(parents=True, exist_ok=True)
         manifest_path = root / "campaign_manifest.json"
         manifest = self._read_manifest(manifest_path)
+        saved_identity = manifest.get("identity", {})
+        if saved_identity and saved_identity != self.campaign_identity:
+            raise ArtifactValidationError("campaign identity differs")
+        manifest["identity"] = dict(self.campaign_identity)
         pending_queue: list[BudgetedJob] = []
         completed: list[str] = []
         for job in jobs:
@@ -228,6 +245,7 @@ class BudgetedScheduler:
                     raise ArtifactValidationError(
                         f"completed job identity differs: {job.job_id}"
                     )
+                self._validate_published_entry(existing, root)
                 completed.append(job.job_id)
             else:
                 pending_queue.append(job)
@@ -245,9 +263,13 @@ class BudgetedScheduler:
                         break
                     job = pending_queue.pop(0)
                     temporary_dir = workers_root / job.job_id
-                    worker_deadline = min(
+                    hard_deadline = min(
                         now + job.max_seconds,
                         deadline - self.archive_reserve_seconds,
+                    )
+                    worker_deadline = max(
+                        now,
+                        hard_deadline - self.worker_shutdown_grace_seconds,
                     )
                     env = dict(os.environ)
                     env.update(
@@ -268,7 +290,7 @@ class BudgetedScheduler:
                         job, temporary_dir, env, worker_deadline
                     )
                     active[gpu] = _ActiveWorker(
-                        job, gpu, temporary_dir, worker_deadline, process
+                        job, gpu, temporary_dir, hard_deadline, process
                     )
 
                 for gpu, worker in list(active.items()):
@@ -338,8 +360,26 @@ class BudgetedScheduler:
         return payload
 
     @staticmethod
+    def _validate_published_entry(entry: dict[str, object], root: Path) -> None:
+        artifacts = entry.get("artifacts")
+        if not isinstance(artifacts, list):
+            raise ArtifactValidationError("completed artifact list is invalid")
+        for record in artifacts:
+            if not isinstance(record, dict):
+                raise ArtifactValidationError("completed artifact record is invalid")
+            relative = Path(str(record.get("path", "")))
+            candidate = (root / relative).resolve()
+            if relative.is_absolute() or not candidate.is_relative_to(root):
+                raise ArtifactValidationError("completed artifact path escapes root")
+            if not candidate.is_file():
+                raise ArtifactValidationError(f"completed artifact is missing: {relative}")
+            if candidate.stat().st_size != int(record.get("size_bytes", -1)):
+                raise ArtifactValidationError(f"completed artifact size differs: {relative}")
+            if sha256(candidate.read_bytes()).hexdigest() != record.get("sha256"):
+                raise ArtifactValidationError(f"completed artifact sha256 differs: {relative}")
+
     def _validate_and_publish(
-        worker: _ActiveWorker, jobs_root: Path
+        self, worker: _ActiveWorker, jobs_root: Path
     ) -> dict[str, object]:
         result_path = worker.temporary_dir / "worker_result.json"
         try:
@@ -355,6 +395,19 @@ class BudgetedScheduler:
             or not isinstance(payload.get("artifacts"), list)
         ):
             raise ArtifactValidationError("worker result contract is invalid")
+        if self.required_gpu_name:
+            worker_gpu = payload.get("worker_gpu")
+            devices = worker_gpu.get("devices") if isinstance(worker_gpu, dict) else None
+            if (
+                not isinstance(worker_gpu, dict)
+                or worker_gpu.get("device_count") != 1
+                or not isinstance(devices, list)
+                or len(devices) != 1
+                or self.required_gpu_name.casefold() not in str(devices[0]).casefold()
+            ):
+                raise ArtifactValidationError(
+                    "worker did not prove exactly one required GPU"
+                )
         artifacts: list[dict[str, object]] = []
         temporary_root = worker.temporary_dir.resolve()
         for raw in payload["artifacts"]:

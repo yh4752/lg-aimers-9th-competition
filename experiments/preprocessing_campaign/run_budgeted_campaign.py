@@ -46,6 +46,8 @@ class StageFiveDecision:
     reason: str
     common_epochs: int
     campaign_terminal: bool = True
+    baseline_best_brier: float | None = None
+    candidate_best_brier: float | None = None
 
 
 @dataclass(frozen=True)
@@ -65,6 +67,40 @@ def _atomic_json(path: Path, payload: Mapping[str, object]) -> None:
         encoding="utf-8",
     )
     os.replace(temporary, path)
+
+
+def _file_sha256(path: Path) -> str:
+    digest = sha256()
+    with path.open("rb") as source:
+        while block := source.read(1024 * 1024):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def _campaign_identity(config: Path, data_dir: Path) -> dict[str, str]:
+    train = data_dir / "train.csv"
+    history = data_dir / "trackman_history.csv"
+    if not train.is_file() or not history.is_file():
+        raise ValueError("train.csv and trackman_history.csv are required")
+    code_paths = (
+        Path(__file__),
+        Path(__file__).with_name("budgeted_runtime.py"),
+        Path(__file__).with_name("budgeted_scheduler.py"),
+        Path(__file__).with_name("budgeted_decisions.py"),
+        Path(__file__).with_name("budgeted_artifacts.py"),
+        Path(__file__).parents[1] / "independent_dl" / "training.py",
+        Path(__file__).parents[1] / "independent_dl" / "preprocessing.py",
+    )
+    code_digest = sha256()
+    for path in code_paths:
+        code_digest.update(path.name.encode("utf-8"))
+        code_digest.update(path.read_bytes())
+    return {
+        "config_sha256": _file_sha256(config),
+        "train_sha256": _file_sha256(train),
+        "trackman_history_sha256": _file_sha256(history),
+        "code_sha256": code_digest.hexdigest(),
+    }
 
 
 def _read_last_member(archive: ZipFile, name: str) -> bytes:
@@ -297,8 +333,16 @@ def _stage_four_jobs(
                 ),
             }
         )
+    combo_setting = (
+        str(cat_descriptors[-1]["setting_id"])
+        if len(cat_candidates) == 2
+        else None
+    )
     for descriptor in cat_descriptors:
-        for train_end, valid, sample_mode in ((2022, 2023, "proxy"), (2023, 2024, "full")):
+        folds = [(2022, 2023, "proxy"), (2023, 2024, "full")]
+        if descriptor["setting_id"] == combo_setting:
+            folds.insert(1, (2023, 2024, "proxy"))
+        for train_end, valid, sample_mode in folds:
             jobs.append(
                 replace(
                     cat_base,
@@ -311,7 +355,7 @@ def _stage_four_jobs(
                     components=tuple(descriptor["components"]),
                     train_end_year=train_end,
                     valid_year=valid,
-                    max_seconds=600,
+                    max_seconds=500,
                     sample_mode=sample_mode,
                 )
             )
@@ -416,9 +460,21 @@ def finalize_stage_five(
     except (DecisionError, TypeError, ValueError):
         return StageFiveDecision("inconclusive", "common_curve_invalid", common)
     if candidate_best < baseline_best:
-        return StageFiveDecision("recommended", "candidate_improved_capped_brier", common)
+        return StageFiveDecision(
+            "recommended",
+            "candidate_improved_capped_brier",
+            common,
+            True,
+            baseline_best,
+            candidate_best,
+        )
     return StageFiveDecision(
-        "not_recommended", "candidate_did_not_improve_capped_brier", common
+        "not_recommended",
+        "candidate_did_not_improve_capped_brier",
+        common,
+        True,
+        baseline_best,
+        candidate_best,
     )
 
 
@@ -428,6 +484,20 @@ def _metrics(root: Path, job_id: str) -> dict[str, object]:
     if not isinstance(payload, dict):
         raise StageNeedsReview(f"metrics are invalid for {job_id}")
     return payload
+
+
+def _valid_dl_metric(metric: Mapping[str, object]) -> bool:
+    return (
+        int(metric.get("completed_epochs", 0)) >= 10
+        and int(metric.get("validation_points", 0)) >= 3
+    )
+
+
+def _valid_catboost_metric(metric: Mapping[str, object]) -> bool:
+    return (
+        int(metric.get("best_epoch", -1)) >= 0
+        and int(metric.get("validation_points", 0)) > 0
+    )
 
 
 def _predictions(root: Path, job_id: str) -> pd.DataFrame:
@@ -573,7 +643,10 @@ def evaluate_stage(
                     ),
                 }
             )
-        decision = choose_dl_representative(rows, blends)
+        try:
+            decision = choose_dl_representative(rows, blends)
+        except DecisionError as error:
+            raise StageNeedsReview(str(error)) from error
         selected_job = next(
             job for job in jobs if job.job_id == decision.selected_candidate_id
         )
@@ -592,14 +665,47 @@ def evaluate_stage(
             for row in blends
             if row["candidate_id"] == tabnet_job.job_id
         )
-        best_brier = min(float(row["brier"]) for row in rows)
-        state["tabnet_decision"] = decide_tabnet(
-            tabnet_row,
-            best_dl_brier=best_brier,
-            blend_gain=tabnet_blend,
-            oov_gain=0.0,
-            overall_delta=float(tabnet_row["brier"]) - best_brier,
-        ).__dict__
+        eligible_rows = [row for row in rows if _valid_dl_metric(row)]
+        common_epochs = min(
+            (int(row["completed_epochs"]) for row in eligible_rows), default=0
+        )
+        other_rows = [row for row in eligible_rows if row["family"] != "tabnet"]
+        if _valid_dl_metric(tabnet_row) and common_epochs >= 10 and other_rows:
+            tabnet_common = _curve_best(tabnet_row, common_epochs)
+            other_common = [
+                (_curve_best(row, common_epochs), row) for row in other_rows
+            ]
+            best_other_brier, best_other_row = min(
+                other_common, key=lambda item: (item[0], str(item[1]["candidate_id"]))
+            )
+            comparable_tabnet = {**tabnet_row, "brier": tabnet_common}
+            oov_gain = -_oov_delta(
+                campaign_root,
+                str(best_other_row["candidate_id"]),
+                tabnet_job.job_id,
+            )
+            tabnet_decision = decide_tabnet(
+                comparable_tabnet,
+                best_dl_brier=best_other_brier,
+                blend_gain=tabnet_blend,
+                oov_gain=oov_gain,
+                overall_delta=tabnet_common - best_other_brier,
+            )
+            state["tabnet_common_epochs"] = common_epochs
+            state["tabnet_common_brier"] = tabnet_common
+            state["tabnet_reference_brier"] = best_other_brier
+            state["tabnet_oov_gain"] = oov_gain
+        else:
+            tabnet_decision = decide_tabnet(
+                tabnet_row,
+                best_dl_brier=min(float(row["brier"]) for row in other_rows)
+                if other_rows
+                else float("inf"),
+                blend_gain=tabnet_blend,
+                oov_gain=0.0,
+                overall_delta=0.0,
+            )
+        state["tabnet_decision"] = tabnet_decision.__dict__
     elif stage_id in {2, 3}:
         selected = _selected_model(state)
         family = str(selected["family"])
@@ -629,9 +735,15 @@ def evaluate_stage(
             and job.setting_id != "dl_standard"
         ]
         promoted_dl = []
-        base_brier = float(_metrics(campaign_root, dl_baseline.job_id)["brier"])
+        baseline_metric = _metrics(campaign_root, dl_baseline.job_id)
+        if not _valid_dl_metric(baseline_metric):
+            raise StageNeedsReview("selected DL baseline lacks minimum valid evidence")
+        base_brier = float(baseline_metric["brier"])
         for job in dl_candidates:
-            delta = float(_metrics(campaign_root, job.job_id)["brier"]) - base_brier
+            candidate_metric = _metrics(campaign_root, job.job_id)
+            if not _valid_dl_metric(candidate_metric):
+                continue
+            delta = float(candidate_metric["brier"]) - base_brier
             blend_gain = _blend_gain(
                 campaign_root, cat_baseline.job_id, job.job_id, campaign.blend_weights
             )
@@ -667,6 +779,8 @@ def evaluate_stage(
             job for job in stability_jobs if job.setting_id == "dl_standard"
         )
         baseline_metric_2023 = _metrics(campaign_root, baseline.job_id)
+        if not _valid_dl_metric(baseline_metric_2023):
+            raise StageNeedsReview("DL stability baseline lacks minimum valid evidence")
         baseline_brier_2023 = float(baseline_metric_2023["brier"])
         manifest = json.loads(
             (campaign_root / "campaign_manifest.json").read_text(encoding="utf-8")
@@ -685,6 +799,8 @@ def evaluate_stage(
             and job.sample_mode == "proxy"
         )
         baseline_metric_2024 = _metrics(campaign_root, baseline_2024.job_id)
+        if not _valid_dl_metric(baseline_metric_2024):
+            raise StageNeedsReview("DL primary baseline lacks minimum valid evidence")
         baseline_brier_2024 = float(baseline_metric_2024["brier"])
         improving = []
         for job in stability_jobs:
@@ -705,6 +821,10 @@ def evaluate_stage(
                 continue
             metric_2023 = _metrics(campaign_root, job.job_id)
             metric_2024 = _metrics(campaign_root, primary.job_id)
+            if not (
+                _valid_dl_metric(metric_2023) and _valid_dl_metric(metric_2024)
+            ):
+                continue
             delta_2023 = float(metric_2023["brier"]) - baseline_brier_2023
             delta_2024 = float(metric_2024["brier"]) - baseline_brier_2024
             total_rows = int(metric_2023["valid_rows"]) + int(metric_2024["valid_rows"])
@@ -728,6 +848,77 @@ def evaluate_stage(
         else:
             state["final_dl"] = None
             state["preprocessing_status"] = "not_recommended"
+
+        cat_jobs = [job for job in jobs if job.family == "catboost"]
+        all_cat_jobs = [job for job in all_jobs if job.family == "catboost"]
+
+        def find_cat(setting: str, valid_year: int, sample_mode: str) -> BudgetedJob:
+            matches = [
+                job
+                for job in all_cat_jobs
+                if job.setting_id == setting
+                and job.valid_year == valid_year
+                and job.sample_mode == sample_mode
+            ]
+            if len(matches) != 1:
+                raise StageNeedsReview(
+                    f"CatBoost evidence is ambiguous: {setting}/{valid_year}/{sample_mode}"
+                )
+            return matches[0]
+
+        baseline_cat = {
+            (2023, "proxy"): find_cat("tree_native", 2023, "proxy"),
+            (2024, "proxy"): find_cat("tree_native", 2024, "proxy"),
+            (2024, "full"): find_cat("tree_native", 2024, "full"),
+        }
+        cat_statuses: dict[str, str] = {}
+        candidate_settings = sorted(
+            {
+                job.setting_id
+                for job in cat_jobs
+                if job.setting_id != "tree_native"
+            }
+        )
+        for setting in candidate_settings:
+            evidence = {
+                key: find_cat(setting, *key) for key in baseline_cat
+            }
+            metrics = {
+                key: _metrics(campaign_root, job.job_id)
+                for key, job in evidence.items()
+            }
+            baseline_metrics = {
+                key: _metrics(campaign_root, job.job_id)
+                for key, job in baseline_cat.items()
+            }
+            if not all(
+                _valid_catboost_metric(metric)
+                for metric in [*metrics.values(), *baseline_metrics.values()]
+            ):
+                cat_statuses[setting] = "inconclusive"
+                continue
+            cat_statuses[setting] = final_preprocessing_status(
+                proxy_deltas={
+                    year: float(metrics[(year, "proxy")]["brier"])
+                    - float(baseline_metrics[(year, "proxy")]["brier"])
+                    for year in (2023, 2024)
+                },
+                proxy_rows={
+                    year: int(metrics[(year, "proxy")]["valid_rows"])
+                    for year in (2023, 2024)
+                },
+                full_2024_delta=(
+                    float(metrics[(2024, "full")]["brier"])
+                    - float(baseline_metrics[(2024, "full")]["brier"])
+                ),
+                segment_deltas=_final_segment_deltas(
+                    campaign_root,
+                    baseline_cat[(2024, "full")].job_id,
+                    evidence[(2024, "full")].job_id,
+                ),
+                hashes_valid=True,
+            )
+        state["catboost_preprocessing_status"] = cat_statuses
     elif stage_id == 5:
         if len(jobs) != 2:
             state["preprocessing_status"] = "not_recommended"
@@ -739,8 +930,6 @@ def evaluate_stage(
             if decision.status == "recommended" and isinstance(
                 state.get("final_dl"), dict
             ):
-                baseline_metric = _metrics(campaign_root, jobs[0].job_id)
-                candidate_metric = _metrics(campaign_root, jobs[1].job_id)
                 final_dl = state["final_dl"]
                 state["preprocessing_status"] = final_preprocessing_status(
                     proxy_deltas={
@@ -752,8 +941,8 @@ def evaluate_stage(
                         for year, value in final_dl["proxy_rows"].items()
                     },
                     full_2024_delta=(
-                        float(candidate_metric["brier"])
-                        - float(baseline_metric["brier"])
+                        float(decision.candidate_best_brier)
+                        - float(decision.baseline_best_brier)
                     ),
                     segment_deltas=_final_segment_deltas(
                         campaign_root, jobs[0].job_id, jobs[1].job_id
@@ -814,6 +1003,9 @@ def run_auto(
     scheduler: BudgetedScheduler | None = None,
 ) -> AutoResult:
     campaign = load_budgeted_campaign(config)
+    config_path = Path(config).resolve()
+    data_path = Path(data_dir).resolve()
+    identity = _campaign_identity(config_path, data_path)
     root = Path(output_root).resolve()
     selection = inspect_resume_bundles(
         input_root, campaign_id=campaign.campaign_id
@@ -841,8 +1033,15 @@ def run_auto(
         runner = scheduler or BudgetedScheduler(
             stop_new_jobs_seconds=campaign.stop_new_jobs_seconds,
             archive_reserve_seconds=campaign.archive_reserve_seconds,
+            campaign_identity=identity,
+            required_gpu_name="T4",
         )
-        summary = runner.run(jobs, root, deadline=deadline)
+        try:
+            summary = runner.run(jobs, root, deadline=deadline)
+        except RuntimeError as error:
+            if "devices are required" in str(error):
+                raise StageNeedsReview(str(error)) from error
+            raise
     else:
         summary = SchedulerSummary((), (), ())
     if summary.pending or summary.failed:
@@ -897,6 +1096,14 @@ def run_worker(
 
     job = _job_from_payload(json.loads(Path(job_json).read_text(encoding="utf-8")))
     output = Path(output_dir).resolve()
+    import torch
+
+    device_count = int(torch.cuda.device_count())
+    device_names = [str(torch.cuda.get_device_name(index)) for index in range(device_count)]
+    if device_count != 1 or "t4" not in device_names[0].casefold():
+        raise StageNeedsReview(
+            f"worker must see exactly one T4 GPU; count={device_count} names={device_names}"
+        )
     os.environ["PREPROCESSING_SESSION_DEADLINE_UNIX"] = str(deadline_unix)
     runtime = BudgetedRuntime(data_dir, cache_root=cache_root)
     result = runtime.run_job(job, output)
@@ -917,6 +1124,7 @@ def run_worker(
             "job_id": job.job_id,
             "state": "completed",
             "artifacts": artifacts,
+            "worker_gpu": {"device_count": device_count, "devices": device_names},
         },
     )
     if result.metrics_path.is_file():

@@ -181,7 +181,7 @@ def test_stage_four_worst_case_fits_before_archive_reserve() -> None:
     dl_jobs = [job for job in jobs if job.family != "catboost"]
     cat_jobs = [job for job in jobs if job.family == "catboost"]
     assert len(dl_jobs) == 4
-    assert len(cat_jobs) == 6
+    assert len(cat_jobs) == 7
     # Jobs are queued by family; with two GPUs these upper bounds total 5,400 s.
     assert sum(job.max_seconds for job in dl_jobs) / 2 <= 3600
     assert sum(job.max_seconds for job in cat_jobs) / 2 <= 1800
@@ -195,6 +195,24 @@ def test_stage_five_never_requires_sixth_version_for_short_training() -> None:
 
     assert result.status == "inconclusive"
     assert result.campaign_terminal is True
+
+
+def test_stage_five_compares_best_brier_only_over_common_epochs() -> None:
+    result = finalize_stage_five(
+        baseline={
+            "completed_epochs": 12,
+            "validation_curve": [[9, 0.25], [10, 0.20], [11, 0.19]],
+        },
+        candidate={
+            "completed_epochs": 10,
+            "validation_curve": [[8, 0.24], [9, 0.23]],
+        },
+    )
+
+    assert result.status == "recommended"
+    assert result.common_epochs == 10
+    assert result.baseline_best_brier == 0.25
+    assert result.candidate_best_brier == 0.23
 
 
 def test_status_dry_contract_reports_sealed_execution_shape(capsys) -> None:

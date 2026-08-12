@@ -24,6 +24,7 @@ from experiments.independent_dl.training import (
     inspect_cuda_hardware,
     prepare_adapter_context,
     refresh_retrieval_cache,
+    session_deadline_reached,
     TrainingTimeBudgetReached,
     enforce_session_deadline,
     progress_message,
@@ -163,6 +164,12 @@ def test_resume_starts_after_last_complete_checkpoint(tmp_path: Path) -> None:
 def test_expired_session_deadline_stops_at_a_safe_boundary() -> None:
     with pytest.raises(TrainingTimeBudgetReached, match="session time budget"):
         enforce_session_deadline(time.time() - 1, boundary="epoch_3_batch_20")
+
+
+def test_deadline_probe_allows_backend_to_finish_from_last_complete_epoch() -> None:
+    assert session_deadline_reached(time.time() - 1) is True
+    assert session_deadline_reached(time.time() + 60) is False
+    assert session_deadline_reached(None) is False
 
 
 def test_progress_message_exposes_job_epoch_batch_and_eta() -> None:

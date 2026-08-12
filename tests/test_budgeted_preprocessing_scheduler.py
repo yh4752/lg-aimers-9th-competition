@@ -78,6 +78,42 @@ class _Factory:
         return _FinishedProcess()
 
 
+def _artifact_entry(root: Path, job: BudgetedJob) -> dict[str, object]:
+    job_root = root / "jobs" / job.job_id
+    job_root.mkdir(parents=True)
+    metrics = job_root / "metrics.json"
+    predictions = job_root / "predictions.csv"
+    metrics.write_text('{"brier": 0.24}\n', encoding="utf-8")
+    predictions.write_text("row_id,probability\na,0.5\n", encoding="utf-8")
+    return {
+        "state": "completed",
+        "job": {
+            "job_id": job.job_id,
+            "stage_id": job.stage_id,
+            "family": job.family,
+            "profile_id": job.profile_id,
+            "setting_id": job.setting_id,
+            "preprocessing_profile": job.preprocessing_profile,
+            "components": list(job.components),
+            "model": dict(job.model),
+            "training": dict(job.training),
+            "train_end_year": job.train_end_year,
+            "valid_year": job.valid_year,
+            "seed": job.seed,
+            "max_seconds": job.max_seconds,
+            "sample_mode": job.sample_mode,
+        },
+        "artifacts": [
+            {
+                "path": f"jobs/{job.job_id}/{path.name}",
+                "sha256": sha256(path.read_bytes()).hexdigest(),
+                "size_bytes": path.stat().st_size,
+            }
+            for path in (metrics, predictions)
+        ],
+    }
+
+
 def test_scheduler_pins_one_worker_per_gpu_and_parent_merges_only_valid_results(
     tmp_path: Path,
 ) -> None:
@@ -145,3 +181,47 @@ def test_scheduler_rejects_non_t4x2_shape_before_starting(tmp_path: Path) -> Non
     with pytest.raises(RuntimeError, match="exactly two CUDA devices"):
         scheduler.run([_job("a")], tmp_path, deadline=10_000)
     assert factory.calls == []
+
+
+def test_scheduler_revalidates_completed_artifacts_before_skipping(tmp_path: Path) -> None:
+    job = _job("a")
+    entry = _artifact_entry(tmp_path, job)
+    (tmp_path / "campaign_manifest.json").write_text(
+        json.dumps({"schema_version": 1, "jobs": {"a": entry}}),
+        encoding="utf-8",
+    )
+    (tmp_path / "jobs" / "a" / "metrics.json").write_text(
+        '{"brier": 0.99}\n', encoding="utf-8"
+    )
+    scheduler = BudgetedScheduler(
+        clock=lambda: 1_000,
+        process_factory=_Factory(),
+        gpu_probe=lambda: 2,
+        poll_seconds=0,
+    )
+
+    with pytest.raises(ArtifactValidationError, match="sha256"):
+        scheduler.run([job], tmp_path, deadline=10_000)
+
+
+def test_scheduler_rejects_changed_campaign_identity(tmp_path: Path) -> None:
+    (tmp_path / "campaign_manifest.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "identity": {"config_sha256": "a" * 64},
+                "jobs": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+    scheduler = BudgetedScheduler(
+        clock=lambda: 1_000,
+        process_factory=_Factory(),
+        gpu_probe=lambda: 2,
+        campaign_identity={"config_sha256": "b" * 64},
+        poll_seconds=0,
+    )
+
+    with pytest.raises(ArtifactValidationError, match="identity"):
+        scheduler.run([_job("a")], tmp_path, deadline=10_000)

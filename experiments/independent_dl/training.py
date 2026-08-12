@@ -26,10 +26,16 @@ class TrainingTimeBudgetReached(RuntimeError):
     """Raised after preserving the last complete epoch checkpoint."""
 
 
+def session_deadline_reached(deadline: float | None) -> bool:
+    """Return whether a training boundary has reached its absolute deadline."""
+
+    return deadline is not None and time.time() >= deadline
+
+
 def enforce_session_deadline(deadline: float | None, *, boundary: str) -> None:
     """Stop before more GPU work when the user-owned session budget expires."""
 
-    if deadline is not None and time.time() >= deadline:
+    if session_deadline_reached(deadline):
         raise TrainingTimeBudgetReached(
             f"session time budget reached at {boundary}; resume from the last complete epoch"
         )
@@ -412,12 +418,12 @@ class TorchTrainingBackend:
         refresh_retrieval_cache(adapter, model, device)
         patience = int(request.training_config["patience"])
         stale_epochs = 0 if best_epoch < 0 else max(0, resume_epoch - 1 - best_epoch)
-        last_epoch = resume_epoch - 1
         deadline = _session_deadline()
+        budget_reached = False
         for epoch in range(resume_epoch, request.epochs):
-            if epoch > 0:
-                enforce_session_deadline(deadline, boundary=f"before_epoch_{epoch + 1}")
-            last_epoch = epoch
+            if epoch > 0 and session_deadline_reached(deadline):
+                budget_reached = True
+                break
             epoch_started = time.monotonic()
             model.train()
             order = np.random.default_rng(request.seed + epoch).permutation(
@@ -428,11 +434,9 @@ class TorchTrainingBackend:
             for window_number, window_start in enumerate(
                 range(0, len(order), effective_batch), start=1
             ):
-                if epoch > 0:
-                    enforce_session_deadline(
-                        deadline,
-                        boundary=f"epoch_{epoch + 1}_batch_{window_number}",
-                    )
+                if epoch > 0 and session_deadline_reached(deadline):
+                    budget_reached = True
+                    break
                 window = order[window_start : window_start + effective_batch]
                 n_micro = math.ceil(len(window) / micro_batch_size)
                 optimizer.zero_grad(set_to_none=True)
@@ -488,6 +492,15 @@ class TorchTrainingBackend:
                         ),
                         flush=True,
                     )
+
+            if budget_reached:
+                print(
+                    "TRAINING_TIME_BUDGET_REACHED "
+                    f"candidate={request.candidate_id} "
+                    f"completed_epochs={len(validation_curve)}",
+                    flush=True,
+                )
+                break
 
             refresh_retrieval_cache(adapter, model, device)
             predictions = self._predict(
@@ -565,14 +578,13 @@ class TorchTrainingBackend:
             amp_enabled,
             device,
         )
-        del last_epoch
         return BackendAttemptResult(
             best_epoch=best_epoch,
             best_brier=best_brier,
             checkpoint=best_path,
             predictions=predictions,
             hardware=hardware,
-            completed_epochs=last_epoch + 1,
+            completed_epochs=len(validation_curve),
             validation_curve=tuple(validation_curve),
         )
 

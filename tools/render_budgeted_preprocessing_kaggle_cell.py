@@ -55,7 +55,15 @@ CONFIG_PATH = CODE_ROOT / "experiments/preprocessing_campaign/configs/budgeted_c
 REQUIRED_CODE_COMMIT = "__COMMIT__"
 
 
-def run_checked(command, *, cwd=None, env=None):
+class StageNeedsReview(RuntimeError):
+    pass
+
+
+def remaining_seconds():
+    return max(0.0, SESSION_STARTED_UNIX + MAX_SESSION_SECONDS - time.time())
+
+
+def run_checked(command, *, cwd=None, env=None, timeout=None):
     completed = subprocess.run(
         [str(item) for item in command],
         cwd=cwd,
@@ -63,6 +71,7 @@ def run_checked(command, *, cwd=None, env=None):
         text=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
+        timeout=timeout,
     )
     if completed.stdout:
         print(completed.stdout, end="", flush=True)
@@ -133,7 +142,8 @@ def install_runtime():
             "--no-deps",
             "-r",
             str(requirements),
-        ]
+        ],
+        timeout=max(1.0, remaining_seconds()),
     )
     marker.write_text(expected + "\\n", encoding="utf-8")
 
@@ -172,12 +182,16 @@ try:
     child_env["PYTHONUNBUFFERED"] = "1"
     gpu_probe = (
         "import json, torch; "
-        "count=torch.cuda.device_count(); "
-        "assert count == 2, f'exactly two CUDA devices required; found={count}'; "
-        "print(json.dumps([torch.cuda.get_device_name(i) for i in range(count)]))"
+        "print(json.dumps([torch.cuda.get_device_name(i) "
+        "for i in range(torch.cuda.device_count())]))"
     )
     gpu_result = run_checked([sys.executable, "-c", gpu_probe], env=child_env)
-    print(f"T4_X2_READY devices={gpu_result.stdout.strip()}", flush=True)
+    gpu_names = json.loads(gpu_result.stdout)
+    if len(gpu_names) != 2 or any("t4" not in str(name).casefold() for name in gpu_names):
+        raise StageNeedsReview(
+            f"exactly two T4 devices are required; found={gpu_names}"
+        )
+    print(f"T4_X2_READY devices={gpu_names}", flush=True)
 
     CAMPAIGN_ROOT.mkdir(parents=True, exist_ok=True)
     log_path = CAMPAIGN_ROOT / "run.log"
@@ -213,6 +227,8 @@ try:
             log.write(line)
             log.flush()
         returncode = process.wait()
+    if returncode == 2:
+        raise StageNeedsReview("campaign requested manual review; inspect the streamed reason")
     if returncode != 0:
         raise RuntimeError(f"budgeted campaign failed returncode={returncode}")
 
@@ -224,6 +240,15 @@ try:
         print("NEXT_ACTION=send only the final review ZIP to Codex", flush=True)
     else:
         print("NEXT_ACTION=Save Version, attach the newest resume bundle as a Dataset, then run this same cell", flush=True)
+except StageNeedsReview as error:
+    traceback.print_exc()
+    try:
+        if "child_env" in globals() and CAMPAIGN_ROOT.is_dir():
+            write_partial_review(child_env)
+    except BaseException:
+        traceback.print_exc()
+    print(f"STAGE_NEEDS_REVIEW message={str(error).replace(' ', '_')}", flush=True)
+    raise
 except BaseException as error:
     traceback.print_exc()
     try:
