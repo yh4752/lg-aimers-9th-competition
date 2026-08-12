@@ -32,6 +32,7 @@ def test_wave_a_expands_eight_anchors_nineteen_settings_and_five_folds() -> None
     assert len(campaign.wave_a_jobs) == 760
     assert {job.seed for job in campaign.wave_a_jobs} == {42}
     assert {job.profile_id for job in campaign.wave_a_jobs} == {"p3", "p4"}
+    assert {job.epochs for job in campaign.wave_a_jobs} == {240, 400}
     assert len({job.job_id for job in campaign.wave_a_jobs}) == 760
 
 

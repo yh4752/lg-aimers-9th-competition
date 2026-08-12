@@ -31,6 +31,7 @@ class PreprocessingJob:
     anchor_id: str
     family: str
     profile_id: str
+    epochs: int
     model: Mapping[str, object]
     training: Mapping[str, object]
     feature_view: str
@@ -311,6 +312,7 @@ def load_preprocessing_campaign(path: str | Path) -> PreprocessingCampaignSpec:
                         anchor_id=anchor_id,
                         family=candidate.family,
                         profile_id=profile_id,
+                        epochs=candidate.epochs,
                         model=candidate.model,
                         training=candidate.training,
                         feature_view="raw_typed",
