@@ -23,6 +23,11 @@ class CandidateSpec:
     epochs: int
     model: Mapping[str, object]
     training: Mapping[str, object]
+    train_end_year: int | None = None
+    valid_year: int | None = None
+    stage: str = "exploration"
+    parent_candidate_id: str | None = None
+    parent_model: Mapping[str, object] | None = None
 
 
 @dataclass(frozen=True)
@@ -139,6 +144,9 @@ def _boundary_expansion(value: object) -> Mapping[str, Mapping[str, tuple[int, .
 
 def _expand_candidates(payload: dict[str, object]) -> tuple[CandidateSpec, ...]:
     seed = _integer(payload["exploration_seed"], "exploration_seed", minimum=0)
+    train_end_year, valid_year = _year_pair(
+        payload["exploration_fold"], "exploration_fold"
+    )
     training_profiles = _mapping(payload["training_profiles"], "training_profiles")
     capacity_profiles = _mapping(payload["capacity_profiles"], "capacity_profiles")
     if tuple(capacity_profiles) != _FAMILIES:
@@ -185,6 +193,8 @@ def _expand_candidates(payload: dict[str, object]) -> tuple[CandidateSpec, ...]:
                         epochs=_integer(profile["epochs"], "epochs", minimum=100),
                         model=_freeze_mapping(model),
                         training=_freeze_mapping(training),
+                        train_end_year=train_end_year,
+                        valid_year=valid_year,
                     )
                 )
     if len({candidate.candidate_id for candidate in candidates}) != 64:
@@ -244,4 +254,3 @@ def load_campaign(path: str | Path) -> CampaignSpec:
         survivor_policy=_freeze_mapping(survivor_policy),
         candidates=_expand_candidates(payload),
     )
-
