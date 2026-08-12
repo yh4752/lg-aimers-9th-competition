@@ -231,6 +231,7 @@ try:
         raise StageNeedsReview("campaign requested manual review; inspect the streamed reason")
     if returncode != 0:
         raise RuntimeError(f"budgeted campaign failed returncode={returncode}")
+    write_partial_review(child_env)
 
     final_review = WORKING_ROOT / "preprocessing_campaign_final_review_bundle.zip"
     stage_archives = sorted(WORKING_ROOT.glob("preprocessing_stage_*_resume_bundle.zip"))

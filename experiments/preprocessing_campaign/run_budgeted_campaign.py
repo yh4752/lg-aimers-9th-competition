@@ -48,6 +48,7 @@ class StageFiveDecision:
     campaign_terminal: bool = True
     baseline_best_brier: float | None = None
     candidate_best_brier: float | None = None
+    predictions_comparable: bool = False
 
 
 @dataclass(frozen=True)
@@ -460,6 +461,10 @@ def finalize_stage_five(
     except (DecisionError, TypeError, ValueError):
         return StageFiveDecision("inconclusive", "common_curve_invalid", common)
     if candidate_best < baseline_best:
+        comparable = (
+            int(baseline.get("best_epoch", -1)) < common
+            and int(candidate.get("best_epoch", -1)) < common
+        )
         return StageFiveDecision(
             "recommended",
             "candidate_improved_capped_brier",
@@ -467,6 +472,7 @@ def finalize_stage_five(
             True,
             baseline_best,
             candidate_best,
+            comparable,
         )
     return StageFiveDecision(
         "not_recommended",
@@ -475,6 +481,10 @@ def finalize_stage_five(
         True,
         baseline_best,
         candidate_best,
+        (
+            int(baseline.get("best_epoch", -1)) < common
+            and int(candidate.get("best_epoch", -1)) < common
+        ),
     )
 
 
@@ -621,6 +631,9 @@ def evaluate_stage(
     state = dict(previous_state)
     if stage_id == 1:
         cat_job = next(job for job in jobs if job.family == "catboost")
+        cat_metric = _metrics(campaign_root, cat_job.job_id)
+        if not _valid_catboost_metric(cat_metric):
+            raise StageNeedsReview("CatBoost baseline lacks minimum valid evidence")
         rows = []
         blends = []
         for job in jobs:
@@ -679,10 +692,18 @@ def evaluate_stage(
                 other_common, key=lambda item: (item[0], str(item[1]["candidate_id"]))
             )
             comparable_tabnet = {**tabnet_row, "brier": tabnet_common}
-            oov_gain = -_oov_delta(
-                campaign_root,
-                str(best_other_row["candidate_id"]),
-                tabnet_job.job_id,
+            predictions_comparable = (
+                int(tabnet_row.get("best_epoch", -1)) < common_epochs
+                and int(best_other_row.get("best_epoch", -1)) < common_epochs
+            )
+            oov_gain = (
+                -_oov_delta(
+                    campaign_root,
+                    str(best_other_row["candidate_id"]),
+                    tabnet_job.job_id,
+                )
+                if predictions_comparable
+                else 0.0
             )
             tabnet_decision = decide_tabnet(
                 comparable_tabnet,
@@ -695,6 +716,7 @@ def evaluate_stage(
             state["tabnet_common_brier"] = tabnet_common
             state["tabnet_reference_brier"] = best_other_brier
             state["tabnet_oov_gain"] = oov_gain
+            state["tabnet_segment_predictions_comparable"] = predictions_comparable
         else:
             tabnet_decision = decide_tabnet(
                 tabnet_row,
@@ -927,8 +949,12 @@ def evaluate_stage(
                 baseline=_metrics(campaign_root, jobs[0].job_id),
                 candidate=_metrics(campaign_root, jobs[1].job_id),
             )
-            if decision.status == "recommended" and isinstance(
+            if (
+                decision.status == "recommended"
+                and decision.predictions_comparable
+                and isinstance(
                 state.get("final_dl"), dict
+                )
             ):
                 final_dl = state["final_dl"]
                 state["preprocessing_status"] = final_preprocessing_status(
@@ -950,7 +976,12 @@ def evaluate_stage(
                     hashes_valid=True,
                 )
             else:
-                state["preprocessing_status"] = decision.status
+                state["preprocessing_status"] = (
+                    "inconclusive"
+                    if decision.status == "recommended"
+                    and not decision.predictions_comparable
+                    else decision.status
+                )
             state["stage_five_reason"] = decision.reason
             state["common_epochs"] = decision.common_epochs
     state["completed_stage"] = stage_id

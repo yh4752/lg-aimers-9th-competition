@@ -313,6 +313,10 @@ class BudgetedScheduler:
                             f"JOB_COMPLETE job={worker.job.job_id} gpu={gpu}",
                             flush=True,
                         )
+                    elif returncode == 2:
+                        raise RuntimeError(
+                            "worker GPU isolation devices are required"
+                        )
                     else:
                         failed.append(worker.job.job_id)
                         manifest["jobs"][worker.job.job_id] = {

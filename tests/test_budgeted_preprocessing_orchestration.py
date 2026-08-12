@@ -182,9 +182,11 @@ def test_stage_four_worst_case_fits_before_archive_reserve() -> None:
     cat_jobs = [job for job in jobs if job.family == "catboost"]
     assert len(dl_jobs) == 4
     assert len(cat_jobs) == 7
-    # Jobs are queued by family; with two GPUs these upper bounds total 5,400 s.
+    # Jobs are queued by family; two DL waves plus four CatBoost waves fit in 5,700 s.
     assert sum(job.max_seconds for job in dl_jobs) / 2 <= 3600
-    assert sum(job.max_seconds for job in cat_jobs) / 2 <= 1800
+    assert ((len(cat_jobs) + 1) // 2) * max(
+        job.max_seconds for job in cat_jobs
+    ) <= 2000
 
 
 def test_stage_five_never_requires_sixth_version_for_short_training() -> None:
@@ -201,10 +203,12 @@ def test_stage_five_compares_best_brier_only_over_common_epochs() -> None:
     result = finalize_stage_five(
         baseline={
             "completed_epochs": 12,
+            "best_epoch": 9,
             "validation_curve": [[9, 0.25], [10, 0.20], [11, 0.19]],
         },
         candidate={
             "completed_epochs": 10,
+            "best_epoch": 9,
             "validation_curve": [[8, 0.24], [9, 0.23]],
         },
     )
@@ -213,6 +217,25 @@ def test_stage_five_compares_best_brier_only_over_common_epochs() -> None:
     assert result.common_epochs == 10
     assert result.baseline_best_brier == 0.25
     assert result.candidate_best_brier == 0.23
+    assert result.predictions_comparable is True
+
+
+def test_stage_five_marks_segment_predictions_outside_common_range() -> None:
+    result = finalize_stage_five(
+        baseline={
+            "completed_epochs": 12,
+            "best_epoch": 11,
+            "validation_curve": [[9, 0.25], [11, 0.20]],
+        },
+        candidate={
+            "completed_epochs": 10,
+            "best_epoch": 9,
+            "validation_curve": [[9, 0.23]],
+        },
+    )
+
+    assert result.status == "recommended"
+    assert result.predictions_comparable is False
 
 
 def test_status_dry_contract_reports_sealed_execution_shape(capsys) -> None:
