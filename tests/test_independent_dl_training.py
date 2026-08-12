@@ -4,9 +4,11 @@ import json
 from pathlib import Path
 import subprocess
 import sys
+import time
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
 
 from experiments.independent_dl.features import FeatureBatch
 from experiments.independent_dl.models.ft_transformer import ft_transformer_kwargs
@@ -22,6 +24,9 @@ from experiments.independent_dl.training import (
     inspect_cuda_hardware,
     prepare_adapter_context,
     refresh_retrieval_cache,
+    TrainingTimeBudgetReached,
+    enforce_session_deadline,
+    progress_message,
 )
 
 
@@ -153,6 +158,27 @@ def test_resume_starts_after_last_complete_checkpoint(tmp_path: Path) -> None:
 
     assert result.started_epoch == 8
     assert backend.calls[0]["resume_epoch"] == 8
+
+
+def test_expired_session_deadline_stops_at_a_safe_boundary() -> None:
+    with pytest.raises(TrainingTimeBudgetReached, match="session time budget"):
+        enforce_session_deadline(time.time() - 1, boundary="epoch_3_batch_20")
+
+
+def test_progress_message_exposes_job_epoch_batch_and_eta() -> None:
+    message = progress_message(
+        candidate_id="a__tabm_p3__dl_standard__tr2019__va2020__s42",
+        epoch=2,
+        epochs=240,
+        batch=10,
+        batches=100,
+        elapsed_seconds=120.0,
+    )
+
+    assert "TRAINING_PROGRESS" in message
+    assert "epoch=3/240" in message
+    assert "batch=10/100" in message
+    assert "epoch_eta_seconds=1080" in message
 
 
 def test_model_adapter_modules_import_without_torch_site_packages() -> None:

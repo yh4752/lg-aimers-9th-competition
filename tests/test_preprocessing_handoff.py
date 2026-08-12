@@ -24,6 +24,22 @@ def test_cli_exposes_run_promote_status_and_summarize() -> None:
         name in completed.stdout for name in ("run", "promote", "status", "summarize")
     )
 
+    run_help = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "experiments.preprocessing_campaign.run_campaign",
+            "run",
+            "--help",
+        ],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+    )
+    assert run_help.returncode == 0
+    assert "--max-session-seconds" in run_help.stdout
+    assert "--max-jobs" in run_help.stdout
+
 
 def test_status_dry_contract_reports_sealed_counts() -> None:
     completed = subprocess.run(

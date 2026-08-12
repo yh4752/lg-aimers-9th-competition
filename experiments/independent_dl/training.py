@@ -8,6 +8,7 @@ import math
 import os
 from pathlib import Path
 import random
+import time
 from types import MappingProxyType
 from typing import Mapping, Protocol
 
@@ -19,6 +20,57 @@ from .models.common import ModelAdapter, import_runtime_module, metadata_from_tr
 
 class TrainingContractError(ValueError):
     """Raised before a malformed training request can start GPU work."""
+
+
+class TrainingTimeBudgetReached(RuntimeError):
+    """Raised after preserving the last complete epoch checkpoint."""
+
+
+def enforce_session_deadline(deadline: float | None, *, boundary: str) -> None:
+    """Stop before more GPU work when the user-owned session budget expires."""
+
+    if deadline is not None and time.time() >= deadline:
+        raise TrainingTimeBudgetReached(
+            f"session time budget reached at {boundary}; resume from the last complete epoch"
+        )
+
+
+def progress_message(
+    *,
+    candidate_id: str,
+    epoch: int,
+    epochs: int,
+    batch: int,
+    batches: int,
+    elapsed_seconds: float,
+) -> str:
+    """Format one machine- and human-readable training heartbeat."""
+
+    completed_fraction = max(batch / max(batches, 1), 1e-12)
+    eta = max(0, round(elapsed_seconds / completed_fraction - elapsed_seconds))
+    return (
+        "TRAINING_PROGRESS "
+        f"candidate={candidate_id} epoch={epoch + 1}/{epochs} "
+        f"batch={batch}/{batches} elapsed_seconds={round(elapsed_seconds)} "
+        f"epoch_eta_seconds={eta}"
+    )
+
+
+def _session_deadline() -> float | None:
+    raw = os.environ.get("PREPROCESSING_SESSION_DEADLINE_UNIX")
+    if raw is None or not raw.strip():
+        return None
+    try:
+        value = float(raw)
+    except ValueError as error:
+        raise TrainingContractError(
+            "PREPROCESSING_SESSION_DEADLINE_UNIX must be numeric"
+        ) from error
+    if not math.isfinite(value) or value <= 0:
+        raise TrainingContractError(
+            "PREPROCESSING_SESSION_DEADLINE_UNIX must be finite and positive"
+        )
+    return value
 
 
 @dataclass(frozen=True)
@@ -343,13 +395,26 @@ class TorchTrainingBackend:
         patience = int(request.training_config["patience"])
         stale_epochs = 0 if best_epoch < 0 else max(0, resume_epoch - 1 - best_epoch)
         last_epoch = resume_epoch - 1
+        deadline = _session_deadline()
         for epoch in range(resume_epoch, request.epochs):
+            if epoch > 0:
+                enforce_session_deadline(deadline, boundary=f"before_epoch_{epoch + 1}")
             last_epoch = epoch
+            epoch_started = time.monotonic()
             model.train()
             order = np.random.default_rng(request.seed + epoch).permutation(
                 len(request.train.row_id)
             )
-            for window_start in range(0, len(order), effective_batch):
+            total_windows = math.ceil(len(order) / effective_batch)
+            heartbeat_every = max(1, total_windows // 20)
+            for window_number, window_start in enumerate(
+                range(0, len(order), effective_batch), start=1
+            ):
+                if epoch > 0:
+                    enforce_session_deadline(
+                        deadline,
+                        boundary=f"epoch_{epoch + 1}_batch_{window_number}",
+                    )
                 window = order[window_start : window_start + effective_batch]
                 n_micro = math.ceil(len(window) / micro_batch_size)
                 optimizer.zero_grad(set_to_none=True)
@@ -389,6 +454,22 @@ class TorchTrainingBackend:
                 scaler.update()
                 if scheduler_mode == "update":
                     scheduler.step()
+                if (
+                    window_number == 1
+                    or window_number == total_windows
+                    or window_number % heartbeat_every == 0
+                ):
+                    print(
+                        progress_message(
+                            candidate_id=request.candidate_id,
+                            epoch=epoch,
+                            epochs=request.epochs,
+                            batch=window_number,
+                            batches=total_windows,
+                            elapsed_seconds=time.monotonic() - epoch_started,
+                        ),
+                        flush=True,
+                    )
 
             refresh_retrieval_cache(adapter, model, device)
             predictions = self._predict(
@@ -439,6 +520,13 @@ class TorchTrainingBackend:
                     "checkpoint": checkpoint_path.name,
                 },
                 output_dir / "checkpoint_meta.json",
+            )
+            print(
+                "EPOCH_CHECKPOINTED "
+                f"candidate={request.candidate_id} epoch={epoch + 1}/{request.epochs} "
+                f"brier={brier:.10f} best_brier={best_brier:.10f} "
+                f"elapsed_seconds={round(time.monotonic() - epoch_started)}",
+                flush=True,
             )
             if stale_epochs >= patience:
                 break

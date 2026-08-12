@@ -14,6 +14,8 @@ import time
 import traceback
 from typing import Mapping, Protocol
 
+from .training import TrainingTimeBudgetReached
+
 
 class CampaignInterrupted(RuntimeError):
     """A deliberate interruption that must leave the current job resumable."""
@@ -251,6 +253,10 @@ def run_preprocessing_campaign(
         _atomic_json(manifest_path, manifest)
         try:
             result = runtime.run_job(job, root / "jobs" / job_id)
+        except TrainingTimeBudgetReached as error:
+            entry.update({"state": "pending", "updated_at": _now()})
+            _atomic_json(manifest_path, manifest)
+            raise CampaignInterrupted(str(error)) from error
         except (CampaignInterrupted, KeyboardInterrupt):
             entry.update({"state": "pending", "updated_at": _now()})
             _atomic_json(manifest_path, manifest)

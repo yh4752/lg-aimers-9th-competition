@@ -12,6 +12,7 @@ from experiments.independent_dl.preprocessing_campaign import (
     estimate_remaining_resources,
     run_preprocessing_campaign,
 )
+from experiments.independent_dl.training import TrainingTimeBudgetReached
 
 
 def _tiny_campaign() -> SimpleNamespace:
@@ -49,6 +50,23 @@ class FakeRuntime:
             1.0,
             2.0,
         )
+
+
+class TimeBudgetRuntime:
+    def run_job(self, job: object, output_dir: Path) -> PreprocessingJobResult:
+        output_dir.mkdir(parents=True, exist_ok=True)
+        (output_dir / "checkpoint.pt").write_bytes(b"checkpoint")
+        (output_dir / "checkpoint_meta.json").write_text(
+            json.dumps(
+                {
+                    "candidate_id": job.job_id,
+                    "epoch": 2,
+                    "checkpoint": "checkpoint.pt",
+                }
+            ),
+            encoding="utf-8",
+        )
+        raise TrainingTimeBudgetReached("session time budget reached")
 
 
 def test_campaign_resumes_at_job_granularity_without_repeating_completed(
@@ -121,6 +139,15 @@ def test_max_jobs_limits_new_attempts_without_shrinking_campaign(tmp_path: Path)
     resumed = run_preprocessing_campaign(campaign, tmp_path, second, max_jobs=1)
     assert second.started == ["job-2"]
     assert resumed.completed == ("job-1", "job-2")
+
+
+def test_time_budget_keeps_current_job_pending_and_checkpointed(tmp_path: Path) -> None:
+    with pytest.raises(CampaignInterrupted, match="session time budget"):
+        run_preprocessing_campaign(_tiny_campaign(), tmp_path, TimeBudgetRuntime())
+
+    manifest = json.loads((tmp_path / "campaign_manifest.json").read_text())
+    assert manifest["jobs"]["job-1"]["state"] == "pending"
+    assert (tmp_path / "jobs/job-1/checkpoint_meta.json").is_file()
 
 
 def test_completed_artifact_hash_change_forces_only_that_job_to_rerun(

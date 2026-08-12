@@ -8,6 +8,7 @@ from hashlib import sha256
 import json
 import os
 from pathlib import Path
+import time
 from types import MappingProxyType, SimpleNamespace
 from typing import Mapping
 
@@ -18,6 +19,7 @@ from experiments.catboost_preprocessing.campaign import (
     expand_catboost_jobs,
 )
 from experiments.independent_dl.preprocessing_campaign import (
+    CampaignInterrupted,
     OfficialPreprocessingDLRuntime,
     run_preprocessing_campaign,
 )
@@ -42,6 +44,11 @@ def _parser() -> argparse.ArgumentParser:
         "--max-jobs",
         type=int,
         help="attempt at most this many unfinished jobs in the current session",
+    )
+    run.add_argument(
+        "--max-session-seconds",
+        type=int,
+        help="checkpoint and stop cleanly after this wall-time budget",
     )
     promote = actions.add_parser("promote", help="register the next wave from valid evidence")
     promote.add_argument("--from-wave", choices=("a", "b", "c", "d"), required=True)
@@ -390,9 +397,30 @@ def main(argv: list[str] | None = None) -> int:
         runtime = OfficialPreprocessingDLRuntime(
             args.data_dir, cache_root=root / "feature_cache"
         )
-    summary = run_preprocessing_campaign(
-        _wave_campaign(campaign, jobs), root, runtime, max_jobs=args.max_jobs
-    )
+    if args.max_session_seconds is not None:
+        if args.max_session_seconds < 1:
+            raise RuntimeError("--max-session-seconds must be positive")
+        os.environ["PREPROCESSING_SESSION_DEADLINE_UNIX"] = str(
+            time.time() + args.max_session_seconds
+        )
+    try:
+        summary = run_preprocessing_campaign(
+            _wave_campaign(campaign, jobs), root, runtime, max_jobs=args.max_jobs
+        )
+    except CampaignInterrupted as error:
+        print(
+            json.dumps(
+                {
+                    "campaign_id": campaign.campaign_id,
+                    "requested_wave": args.wave,
+                    "state": "checkpointed_time_budget",
+                    "message": str(error),
+                    "output_root": str(root),
+                },
+                indent=2,
+            )
+        )
+        return 0
     print(
         json.dumps(
             {
