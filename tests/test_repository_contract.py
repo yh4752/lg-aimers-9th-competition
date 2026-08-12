@@ -256,6 +256,32 @@ def test_roadmap_keeps_dl_primary_without_discarding_ml() -> None:
         assert retained_context in roadmap
 
 
+def test_every_experiment_requires_performance_first_precheck() -> None:
+    agents = read_text("AGENTS.md")
+    contract = read_text("docs/EXPERIMENT_CONTRACT.md")
+
+    for phrase in (
+        "[성능 우선 확인]",
+        "smoke 결과를 성능 근거로 사용하지 않았는가",
+        "첫 본 실험에 큰 모델·긴 학습·넓은 탐색",
+        "최고 설정이 탐색 경계에 있으면",
+        "OOM·시간·비용 또는 단일 설정 실패",
+        "실험 설계는 미완성",
+    ):
+        assert phrase in agents
+
+    for phrase in (
+        "기술 확인 전용",
+        "성능을 판단할 수 있는 충분한",
+        "다음 범위를 확장",
+        "mixed precision",
+        "gradient accumulation",
+        "모델 계열 기각 근거가 아니다",
+        "해당 설정만 종료",
+    ):
+        assert phrase in contract
+
+
 def test_xgboost_public_result_is_visible_in_existing_documents() -> None:
     readme = read_text("README.md")
     ledger = read_text("reports/EXPERIMENT_LEDGER.md")
