@@ -27,6 +27,13 @@ def _parser() -> argparse.ArgumentParser:
     summarize = actions.add_parser("summarize", help="write or refresh campaign summary")
     summarize.add_argument("--output-dir", required=True)
     summarize.add_argument("--aligned-ml-oof")
+    handoff = actions.add_parser("handoff", help="export one completed candidate")
+    handoff.add_argument("--output-dir", required=True)
+    handoff.add_argument("--candidate-id", required=True)
+    handoff.add_argument("--result", required=True)
+    handoff.add_argument("--runtime-sha256", required=True)
+    handoff.add_argument("--requirements", required=True)
+    handoff.add_argument("--environment", required=True)
     return parser
 
 
@@ -48,7 +55,9 @@ def _with_family_status(manifest: object) -> dict[str, object]:
         matching = [
             (candidate_id, entry)
             for candidate_id, entry in candidates.items()
-            if isinstance(entry, dict) and entry.get("family") == family
+            if isinstance(entry, dict)
+            and isinstance(entry.get("candidate"), dict)
+            and entry["candidate"].get("family") == family
         ]
         completed = [
             candidate_id
@@ -110,6 +119,31 @@ def main(argv: list[str] | None = None) -> int:
         print(
             json.dumps(
                 _with_family_status(manifest),
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
+        return 0
+    if args.action == "handoff":
+        from .handoff import write_candidate_handoff
+
+        result = write_candidate_handoff(
+            output_dir,
+            args.candidate_id,
+            args.result,
+            args.runtime_sha256,
+            args.requirements,
+            args.environment,
+        )
+        print(
+            json.dumps(
+                {
+                    "status": "handoff_ready",
+                    "candidate_id": args.candidate_id,
+                    "path": str(result.path),
+                    "size_bytes": result.size_bytes,
+                    "sha256": result.sha256,
+                },
                 ensure_ascii=False,
                 indent=2,
             )

@@ -57,12 +57,12 @@ def test_status_cli_lists_next_candidate_and_remaining_count_by_family(
     manifest = {
         "campaign_id": "tiny",
         "candidates": {
-            "tabm_done": {"family": "tabm", "state": "completed"},
-            "tabm_p3": {"family": "tabm", "state": "pending"},
-            "tabm_p4": {"family": "tabm", "state": "pending"},
-            "tabm_expand": {"family": "tabm", "state": "pending"},
-            "tabm_confirm": {"family": "tabm", "state": "pending"},
-            "resnet_next": {"family": "mlp_resnet", "state": "pending"},
+            "tabm_done": {"candidate": {"family": "tabm"}, "state": "completed"},
+            "tabm_p3": {"candidate": {"family": "tabm"}, "state": "pending"},
+            "tabm_p4": {"candidate": {"family": "tabm"}, "state": "pending"},
+            "tabm_expand": {"candidate": {"family": "tabm"}, "state": "pending"},
+            "tabm_confirm": {"candidate": {"family": "tabm"}, "state": "pending"},
+            "resnet_next": {"candidate": {"family": "mlp_resnet"}, "state": "pending"},
         },
     }
     (output / "campaign_manifest.json").write_text(
@@ -92,7 +92,7 @@ def test_status_cli_does_not_modify_manifest(tmp_path: Path, capsys) -> None:
         {
             "campaign_id": "tiny",
             "candidates": {
-                "next": {"family": "tabr", "state": "pending"},
+                "next": {"candidate": {"family": "tabr"}, "state": "pending"},
             },
         },
         separators=(",", ":"),
