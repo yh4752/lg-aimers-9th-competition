@@ -74,6 +74,14 @@ def _read_last_member(archive: ZipFile, name: str) -> bytes:
     return archive.read(matches[-1])
 
 
+def _archive_member_sha256(archive: ZipFile, name: str) -> str:
+    digest = sha256()
+    with archive.open(name) as source:
+        while block := source.read(1024 * 1024):
+            digest.update(block)
+    return digest.hexdigest()
+
+
 def inspect_resume_bundles(
     input_root: str | Path,
     *,
@@ -85,10 +93,37 @@ def inspect_resume_bundles(
     for path in sorted(Path(input_root).rglob("*resume_bundle.zip")):
         try:
             with ZipFile(path) as archive:
+                names = [info.filename for info in archive.infolist()]
+                if len(names) != len(set(names)):
+                    continue
                 metadata = json.loads(
                     _read_last_member(archive, "resume_metadata.json").decode("utf-8")
                 )
                 manifest = _read_last_member(archive, "campaign_manifest.json")
+                file_records = metadata.get("files") if isinstance(metadata, dict) else None
+                if not isinstance(file_records, list) or not file_records:
+                    continue
+                expected_names = {"resume_metadata.json"}
+                files_valid = True
+                for record in file_records:
+                    if (
+                        not isinstance(record, dict)
+                        or set(record) != {"path", "size_bytes", "sha256"}
+                    ):
+                        files_valid = False
+                        break
+                    name = str(record["path"])
+                    expected_names.add(name)
+                    if (
+                        name not in names
+                        or int(record["size_bytes"]) != archive.getinfo(name).file_size
+                        or str(record["sha256"])
+                        != _archive_member_sha256(archive, name)
+                    ):
+                        files_valid = False
+                        break
+                if not files_valid or expected_names != set(names):
+                    continue
         except (BadZipFile, KeyError, OSError, UnicodeDecodeError, json.JSONDecodeError):
             continue
         if (

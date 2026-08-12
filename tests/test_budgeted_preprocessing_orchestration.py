@@ -38,6 +38,13 @@ def _write_resume(
                     "campaign_id": "budgeted_preprocessing_campaign_v1",
                     "completed_stage": stage,
                     "manifest_sha256": manifest_hash or observed,
+                    "files": [
+                        {
+                            "path": "campaign_manifest.json",
+                            "size_bytes": len(manifest),
+                            "sha256": observed,
+                        }
+                    ],
                 }
             ),
         )
@@ -73,6 +80,13 @@ def test_conflicting_same_stage_bundles_need_review(tmp_path: Path) -> None:
                     "campaign_id": "budgeted_preprocessing_campaign_v1",
                     "completed_stage": 2,
                     "manifest_sha256": sha256(other).hexdigest(),
+                    "files": [
+                        {
+                            "path": "campaign_manifest.json",
+                            "size_bytes": len(other),
+                            "sha256": sha256(other).hexdigest(),
+                        }
+                    ],
                 }
             ),
         )
