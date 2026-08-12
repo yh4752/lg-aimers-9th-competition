@@ -191,8 +191,13 @@ def run_preprocessing_campaign(
     campaign: object,
     output_root: str | Path,
     runtime: PreprocessingRuntime,
+    *,
+    max_jobs: int | None = None,
 ) -> PreprocessingCampaignSummary:
     """Run registered jobs sequentially and preserve independent failures."""
+
+    if max_jobs is not None and (isinstance(max_jobs, bool) or max_jobs < 1):
+        raise ValueError("max_jobs must be a positive integer or None")
 
     root = Path(output_root).expanduser().resolve()
     root.mkdir(parents=True, exist_ok=True)
@@ -223,11 +228,15 @@ def run_preprocessing_campaign(
     manifest["updated_at"] = _now()
     _atomic_json(manifest_path, manifest)
 
+    attempted = 0
     for job in jobs:
         job_id = str(getattr(job, "job_id"))
         entry = entries[job_id]
         if _valid_completion(root, entry):
             continue
+        if max_jobs is not None and attempted >= max_jobs:
+            break
+        attempted += 1
         entry.update(
             {
                 "state": "running",
