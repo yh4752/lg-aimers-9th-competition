@@ -10,6 +10,7 @@ import pandas as pd
 import pytest
 
 from experiments.independent_dl.campaign import (
+    CandidateExecutionError,
     CandidateRunResult,
     OfficialCampaignRuntime,
     run_campaign,
@@ -209,3 +210,36 @@ def test_campaign_cli_exposes_run_status_and_summarize() -> None:
     assert "run" in completed.stdout
     assert "status" in completed.stdout
     assert "summarize" in completed.stdout
+
+
+def test_official_runtime_preserves_inner_traceback(tmp_path: Path) -> None:
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    pd.DataFrame(
+        {
+            "row_id": ["tr", "va"],
+            "season": [2023, 2024],
+            "game_type": ["R", "R"],
+            "feature": [0.0, 1.0],
+            "control_success": [0, 1],
+        }
+    ).to_csv(data_dir / "train.csv", index=False)
+    pd.DataFrame({"season": pd.Series(dtype="int64")}).to_csv(
+        data_dir / "trackman_history.csv", index=False
+    )
+
+    def fail_fit(request, adapter, output_dir):
+        raise ValueError("inner training failure")
+
+    runtime = OfficialCampaignRuntime(
+        data_dir,
+        cache_root=tmp_path / "cache",
+        fit_function=fail_fit,
+        adapter_factory=lambda family: object(),
+    )
+
+    with pytest.raises(CandidateExecutionError) as captured:
+        runtime.run_candidate(_candidate("candidate", width=512), tmp_path / "out")
+
+    assert "Traceback (most recent call last)" in str(captured.value)
+    assert "ValueError: inner training failure" in str(captured.value)

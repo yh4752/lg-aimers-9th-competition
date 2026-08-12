@@ -8,6 +8,7 @@ from hashlib import sha256
 import json
 import os
 from pathlib import Path
+import traceback
 from types import MappingProxyType
 from typing import Mapping, Protocol
 
@@ -189,7 +190,8 @@ class OfficialCampaignRuntime:
             raise
         except Exception as error:
             raise CandidateExecutionError(
-                f"{candidate.candidate_id}: {type(error).__name__}: {error}"
+                f"{candidate.candidate_id}: {type(error).__name__}: {error}\n"
+                f"{traceback.format_exc()}"
             ) from error
 
 
@@ -502,6 +504,11 @@ def run_campaign(
             entry["updated_at"] = _utc_now()
             _save_manifest(manifest_path, manifest)
             candidate_dir = root / "candidates" / candidate.candidate_id
+            print(
+                f"[independent-dl] 시작: {candidate.candidate_id} "
+                f"({candidate.stage}, fold={candidate.train_end_year}->{candidate.valid_year})",
+                flush=True,
+            )
             try:
                 result = runtime.run_candidate(candidate, candidate_dir)
             except CandidateExecutionError as error:
@@ -509,6 +516,7 @@ def run_campaign(
                 entry["failure_reason"] = str(error)
                 entry["updated_at"] = _utc_now()
                 _save_manifest(manifest_path, manifest)
+                print(f"[independent-dl] 후보 실패:\n{error}", flush=True)
                 continue
             except BaseException:
                 _save_manifest(manifest_path, manifest)
@@ -537,6 +545,11 @@ def run_campaign(
                 }
             )
             _save_manifest(manifest_path, manifest)
+            print(
+                f"[independent-dl] 완료: {candidate.candidate_id} "
+                f"brier={float(result.best_brier):.12f}",
+                flush=True,
+            )
 
         registered = _registered_candidates(manifest)
         if not manifest["boundary_expansion_registered"]:
