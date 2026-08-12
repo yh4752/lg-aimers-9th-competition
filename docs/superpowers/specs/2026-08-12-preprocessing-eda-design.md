@@ -93,7 +93,6 @@ ZIP은 읽기 전용으로 열고 필요한 두 CSV만 Colab 런타임의 임시
 | permutation 반복 | `5`회 |
 | 상관 군집 기준 | Spearman 절댓값 `0.95` 이상인 연결 성분 |
 | smoothing K grid | `0, 5, 10, 25, 50, 100, 125, 250, 500, 1000, 2500, 5000, 10000` |
-| 수치 logistic probe | `LogisticRegression(C=1, max_iter=1000)` |
 | quantile 수 | 학습 고유값 수와 `1000` 중 작은 값 |
 | QuantileTransformer 표본 상한 | 학습 `200,000`행 |
 
@@ -206,21 +205,26 @@ importance는 고정된 holdout 일부와 반복 횟수를 사용한다. 결과�
 
 #### `asof_*` 신뢰도와 smoothing
 
-확률 의미가 있는 `asof_*_rate`마다 시즌 및 관련 표본 수 구간별로 행 수, 평균
-rate, 실제 타깃률, Brier와 calibration gap을 계산한다. 관련 표본 수가 0인 행과
-cold-start 행을 별도 구간으로 둔다.
+`control_success`와 같은 사건의 확률을 나타내는 success rate 계열만 시즌 및 관련
+표본 수 구간별 행 수, 평균 rate, 실제 타깃률, Brier와 calibration gap을 계산한다.
+구종, reverse, middle, ball과 strike rate는 정답 확률로 해석하지 않고 결측·범위·
+시즌 이동 진단만 수행한다. 관련 표본 수가 0인 행과 cold-start 행을 별도 구간으로
+둔다.
 
-누적 success rate에는 고정 기본 설정의 K grid를 적용한다. 투수 누적·최근 경기
-rate에는 `asof_pitcher_n`, 타자 rate에는 `asof_batter_n`, 구종 구성 rate에는
-`asof_pitcher_pitchmix_n`을 대응 표본 수로 사용한다. 각 K는 과거 시즌에서만
-smoothing한 뒤 다음 시즌 Brier로 평가한다. fold별 결과와 전체 결과를 모두 남기며,
-최적 K가 탐색 경계에 있으면 후속 실험에서 범위를 확장할 후보로 표시한다. EDA
-자체가 최종 K를 모델 공통값으로 확정하지 않는다.
+정확한 누적 분모가 있는 `asof_pitcher_success_rate`와
+`asof_batter_success_rate`에만 고정 기본 설정의 K grid를 적용한다. 각각
+`asof_pitcher_n`과 `asof_batter_n`을 사용한다. 최근 1·3·5경기 success rate는
+정확한 경기별 분모가 없으므로 K-grid smoothing에서 제외하고 표본 수 구간별
+신뢰도만 본다. 각 K는 과거 시즌에서 정한 prior로 smoothing한 뒤 다음 시즌
+Brier로 평가한다. fold별 결과와 전체 결과를 모두 남기며, 최적 K가 탐색 경계에
+있으면 후속 실험에서 범위를 확장할 후보로 표시한다. EDA 자체가 최종 K를 모델
+공통값으로 확정하지 않는다.
 
-#### DL 수치 변환 probe
+#### DL 수치 변환 진단
 
 각 수치 피처에 대해 고유값 수, 분위수 중복, 0의 비율, 꼬리 비율, 다음 시즌의
-학습 범위 초과율을 계산한다. 다음 변환을 단변량 logistic probe로 비교한다.
+학습 범위 초과율을 계산한다. 다음 변환을 fold 학습 구간에서만 적합하고, 검증
+시즌에 적용한 뒤 변환별 분포 안정성을 비교한다.
 
 - 원본값과 학습 median 대체
 - StandardScaler
@@ -229,10 +233,12 @@ smoothing한 뒤 다음 시즌 Brier로 평가한다. fold별 결과와 전체 �
 - Yeo-Johnson PowerTransformer
 
 변환기와 median은 fold 학습 구간에서만 적합한다. QuantileTransformer의
-subsample과 quantile 수, logistic 설정은 manifest에 고정한다. 이 결과는 TabM 등
-DL의 수치 표현 ablation 후보를 정하는 자료다. piecewise-linear 및 periodic
-embedding은 이번 EDA에서 학습하지 않고, 고유값·분위수 안정성을 바탕으로 후속
-후보 여부만 표시한다.
+subsample과 quantile 수는 manifest에 고정한다. 결과에는 변환 전후의 finite 비율,
+왜도, 중앙 절대 편차, 1%·99% 분위수, 검증 시즌의 변환 범위 초과율을 기록한다.
+StandardScaler와 RobustScaler는 선형 변환이므로 별도의 단변량 성능 비교를 하지
+않는다. 이 결과는 TabM 등 DL의 수치 표현 ablation 후보를 정하는 자료다.
+piecewise-linear 및 periodic embedding은 이번 EDA에서 학습하지 않고,
+고유값·분위수 안정성을 바탕으로 후속 후보 여부만 표시한다.
 
 #### 범주형·ID 시간 coverage
 
@@ -278,7 +284,7 @@ embedding 후보를 나누는 근거로 사용한다. ID를 연속 수치로 간
 8. 결측 indicator와 ID coverage probe
 9. adversarial validation과 그룹 중요도
 10. `asof_*` reliability 및 smoothing grid
-11. DL 수치 변환과 의미 기반 상호작용 probe
+11. DL 수치 변환 진단과 의미 기반 상호작용 probe
 12. 핵심 그래프 생성, 산출물 검증 및 원자적 게시
 
 한 셀이 실패하면 임시 실행 디렉터리를 최종 결과 디렉터리로 승격하지 않는다.
@@ -304,7 +310,7 @@ embedding 후보를 나누는 근거로 사용한다. ID를 연속 수치로 간
 | `correlation_clusters.csv` | 수치형 상관 군집 정의 |
 | `asof_reliability.csv` | rate별 표본 수 구간 reliability |
 | `asof_smoothing_grid.csv` | fold·K별 smoothing 결과 |
-| `numeric_transform_probes.csv` | 수치 변환별 시간 전이 결과 |
+| `numeric_transform_diagnostics.csv` | 수치 변환별 분포 안정성 결과 |
 | `interaction_probes.csv` | 의미 기반 상호작용 결과 |
 
 `plots/`에는 8~12개의 핵심 PNG만 저장한다. 최소 그래프는 시즌별 행 수·타깃률,
