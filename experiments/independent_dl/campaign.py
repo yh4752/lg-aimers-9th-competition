@@ -89,11 +89,13 @@ class OfficialCampaignRuntime:
             FTTransformerAdapter,
             MLPResNetAdapter,
             TabMAdapter,
+            TabNetAdapter,
             TabRAdapter,
         )
 
         adapters = {
             "tabm": TabMAdapter,
+            "tabnet": TabNetAdapter,
             "mlp_resnet": MLPResNetAdapter,
             "ft_transformer": FTTransformerAdapter,
             "tabr": TabRAdapter,

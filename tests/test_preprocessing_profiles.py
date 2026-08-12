@@ -161,3 +161,20 @@ def test_entity_frequency_is_fit_on_train_and_unseen_is_zero(
     assert transformed["pitcher_id_frequency"].tolist() == [2.0, 0.0]
     assert transformed["batter_id_frequency"].tolist() == [0.0, 1.0]
     assert transformed["pitcher_id_frequency_log1p"].iloc[1] == 0.0
+
+
+def test_entity_frequency_and_oov_keeps_ids_and_marks_unseen_values(
+    preprocessing_train: pd.DataFrame,
+    preprocessing_valid: pd.DataFrame,
+) -> None:
+    state, fitted = fit_preprocessor(
+        preprocessing_train,
+        PreprocessingSpec("dl_standard", ("entity_frequency_and_oov",)),
+    )
+    transformed = transform_preprocessor(preprocessing_valid, state)
+
+    assert "pitcher_id" in fitted
+    assert transformed["pitcher_id_oov"].tolist() == [0.0, 1.0]
+    assert transformed["batter_id_oov"].tolist() == [1.0, 0.0]
+    assert "unseen" not in state.entity_frequency["pitcher_id"]
+    assert "pitcher_id_oov" in state.numeric_columns

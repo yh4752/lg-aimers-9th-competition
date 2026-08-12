@@ -64,10 +64,13 @@ PASSTHROUGH_NUMERIC_COLUMNS = (
     "pitcher_recent_missing",
     "pitcher_career_missing",
     "batter_career_missing",
+    "pitcher_id_oov",
+    "batter_id_oov",
 )
 _SIMPLE_COMPONENTS = (
     "asof_count_log1p",
     "entity_frequency_log1p",
+    "entity_frequency_and_oov",
     "grouped_missing_indicators",
     "hand_matchup",
     "count_state",
@@ -219,13 +222,15 @@ def _add_components(
             for column in ("asof_pitcher_n", "asof_batter_n"):
                 values = _numeric(result[column], column).clip(lower=0)
                 result[f"{column}_log1p"] = np.log1p(values)
-        elif component == "entity_frequency_log1p":
+        elif component in {"entity_frequency_log1p", "entity_frequency_and_oov"}:
             _required(result, ("pitcher_id", "batter_id"), component)
             for entity in ("pitcher_id", "batter_id"):
                 mapping = entity_frequency[entity]
                 frequency = _category(result[entity]).map(mapping).fillna(0).astype(float)
                 result[f"{entity}_frequency"] = frequency
                 result[f"{entity}_frequency_log1p"] = np.log1p(frequency)
+                if component == "entity_frequency_and_oov":
+                    result[f"{entity}_oov"] = frequency.eq(0).astype("float64")
         elif component == "grouped_missing_indicators":
             _add_grouped_missing(result)
         elif component == "hand_matchup":
@@ -319,8 +324,10 @@ def fit_preprocessor(
     prior = _target_prior(train)
     source = _prepare_source(train)
     entity_frequency: dict[str, Mapping[str, int]] = {}
-    if "entity_frequency_log1p" in normalized.components:
-        _required(source, ("pitcher_id", "batter_id"), "entity_frequency_log1p")
+    if {"entity_frequency_log1p", "entity_frequency_and_oov"}.intersection(
+        normalized.components
+    ):
+        _required(source, ("pitcher_id", "batter_id"), "entity frequency")
         entity_frequency = {
             entity: _frequency(source[entity])
             for entity in ("pitcher_id", "batter_id")
