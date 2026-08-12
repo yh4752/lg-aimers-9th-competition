@@ -61,3 +61,15 @@ def test_kaggle_notebook_rejects_ambiguous_inputs_and_preserves_working_copy():
     assert "if CAMPAIGN_OUTPUT_DIR.exists()" in code
     assert "dirs_exist_ok=False" in code
     assert "shutil.rmtree(CAMPAIGN_OUTPUT_DIR)" not in code
+
+
+def test_kaggle_notebook_authenticates_private_github_without_leaking_token():
+    code = "".join(_load_notebook()["cells"][1]["source"])
+
+    assert "from kaggle_secrets import UserSecretsClient" in code
+    assert 'get_secret("GITHUB_TOKEN")' in code
+    assert "GIT_ASKPASS" in code
+    assert "GIT_TERMINAL_PROMPT" in code
+    assert "x-access-token" in code
+    assert "https://x-access-token:" not in code
+    assert "print(token)" not in code
