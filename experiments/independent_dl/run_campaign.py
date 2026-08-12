@@ -10,6 +10,9 @@ from .campaign import OfficialCampaignRuntime, run_campaign
 from .contracts import load_campaign
 
 
+_FAMILIES = ("tabm", "mlp_resnet", "ft_transformer", "tabr", "tabicl_v2")
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     actions = parser.add_subparsers(dest="action", required=True)
@@ -17,6 +20,8 @@ def _parser() -> argparse.ArgumentParser:
     run.add_argument("--config", required=True)
     run.add_argument("--data-dir", required=True)
     run.add_argument("--output-dir", required=True)
+    run.add_argument("--family", choices=_FAMILIES)
+    run.add_argument("--max-candidates", type=int)
     status = actions.add_parser("status", help="print the current campaign manifest")
     status.add_argument("--output-dir", required=True)
     summarize = actions.add_parser("summarize", help="write or refresh campaign summary")
@@ -31,6 +36,46 @@ def _read_json(path: Path) -> object:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+def _with_family_status(manifest: object) -> dict[str, object]:
+    if not isinstance(manifest, dict) or not isinstance(
+        manifest.get("candidates"), dict
+    ):
+        raise RuntimeError("campaign manifest candidates are invalid")
+    response = dict(manifest)
+    candidates = manifest["candidates"]
+    family_status: dict[str, object] = {}
+    for family in _FAMILIES:
+        matching = [
+            (candidate_id, entry)
+            for candidate_id, entry in candidates.items()
+            if isinstance(entry, dict) and entry.get("family") == family
+        ]
+        completed = [
+            candidate_id
+            for candidate_id, entry in matching
+            if entry.get("state") == "completed"
+        ]
+        failed = [
+            candidate_id
+            for candidate_id, entry in matching
+            if entry.get("state") == "failed"
+        ]
+        pending = [
+            candidate_id
+            for candidate_id, entry in matching
+            if entry.get("state") in {"pending", "running"}
+        ]
+        family_status[family] = {
+            "completed": completed,
+            "failed": failed,
+            "pending": pending,
+            "next_candidate": pending[0] if pending else None,
+            "remaining_count": len(pending),
+        }
+    response["family_status"] = family_status
+    return response
+
+
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     output_dir = Path(args.output_dir).resolve()
@@ -39,7 +84,13 @@ def main(argv: list[str] | None = None) -> int:
         runtime = OfficialCampaignRuntime(
             args.data_dir, cache_root=output_dir / "feature_cache"
         )
-        summary = run_campaign(campaign, output_dir, runtime)
+        summary = run_campaign(
+            campaign,
+            output_dir,
+            runtime,
+            family=args.family,
+            max_candidates=args.max_candidates,
+        )
         print(
             json.dumps(
                 {
@@ -55,9 +106,10 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 0
     if args.action == "status":
+        manifest = _read_json(output_dir / "campaign_manifest.json")
         print(
             json.dumps(
-                _read_json(output_dir / "campaign_manifest.json"),
+                _with_family_status(manifest),
                 ensure_ascii=False,
                 indent=2,
             )
