@@ -15,6 +15,7 @@
 | 열린 계열 | segment-aware calibration, 독립 TabM 후보, XGBoost |
 | XGBoost v3 | 공격적 4-member ensemble, Public `820.9583317093` |
 | XGBoost rescue | 2024 `0.24826687414041645`, technical verified, Public 미확인 |
+| 다음 주력 | Colab Pro의 독립 DL 프런티어 캠페인 |
 
 점수가 같은 표에 있어도 검증 프로토콜이 다르면 직접 순위를 매기지 않는다. R9은
 세 개 시즌 전이, XGBoost v3는 네 개 역사 fold 선택 후 2024 holdout을 사용했다.
@@ -68,5 +69,8 @@ R9 이후 CatBoost 계보, R25 TabM 잔차와 R32 분모 보정 연구는 동료
 ## 다음 후보
 
 구체적인 실행 순서는 [ROADMAP](docs/ROADMAP.md)에 있다. 저장소 기반을 확인한 뒤
-R9 공통 검증 코드, calibration, XGBoost 순서로 코드를 독립 이전한다. 비용은
-실행 순서 안내에만 사용하고 좋은 후보를 제외하는 기준으로 삼지 않는다.
+기존 TabM raw P1·P2를 보존하고, TabM 입력 표현 교차, 대형
+ResNet·FT-Transformer, 연구용 TabICLv2와 확장성 수정된 TabR를 실행한다. 본 실행은
+[Colab 노트북](notebooks/INDEPENDENT_DL_CAMPAIGN.ipynb)에서 Drive checkpoint로
+재개한다. 비용은 실행 순서 안내에만 사용하고 좋은 후보를 제외하는 기준으로 삼지
+않는다.

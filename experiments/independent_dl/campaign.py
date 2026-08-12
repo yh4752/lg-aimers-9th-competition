@@ -527,6 +527,31 @@ def _register_confirmations(campaign: CampaignSpec, manifest: dict[str, object])
 def _save_manifest(path: Path, manifest: dict[str, object]) -> None:
     manifest["updated_at"] = _utc_now()
     _atomic_json(path, manifest)
+    result_path = path.parent / "candidate_results.jsonl"
+    temporary = result_path.with_suffix(".jsonl.tmp")
+    lines = []
+    for candidate_id, entry in manifest["candidates"].items():
+        if entry["state"] not in {"completed", "failed"}:
+            continue
+        lines.append(
+            json.dumps(
+                {
+                    "candidate_id": candidate_id,
+                    "state": entry["state"],
+                    "best_brier": entry["best_brier"],
+                    "metrics_path": entry["metrics_path"],
+                    "predictions_path": entry["predictions_path"],
+                    "metrics_sha256": entry["metrics_sha256"],
+                    "predictions_sha256": entry["predictions_sha256"],
+                    "failure_reason": entry["failure_reason"],
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+        )
+    temporary.write_text("\n".join(lines) + ("\n" if lines else ""), encoding="utf-8")
+    os.replace(temporary, result_path)
 
 
 def run_campaign(

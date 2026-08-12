@@ -106,6 +106,17 @@ def test_campaign_resumes_without_repeating_completed_candidate(tmp_path: Path) 
 
     assert "candidate_0001" not in second_runtime.started
     assert summary.completed == ("candidate_0001", "candidate_0002")
+    rows = [
+        json.loads(line)
+        for line in (tmp_path / "candidate_results.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
+    assert [row["candidate_id"] for row in rows] == [
+        "candidate_0001",
+        "candidate_0002",
+    ]
+    assert {row["state"] for row in rows} == {"completed"}
 
 
 def test_existing_manifest_order_does_not_override_campaign_priority(

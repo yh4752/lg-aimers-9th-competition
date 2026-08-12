@@ -46,6 +46,15 @@ def test_cuda_hardware_reports_visible_devices_without_claiming_multi_gpu() -> N
     }
 
 
+def test_cuda_hardware_does_not_claim_gpu_when_none_is_visible() -> None:
+    cuda = SimpleNamespace(device_count=lambda: 0)
+
+    hardware = inspect_cuda_hardware(SimpleNamespace(cuda=cuda))
+
+    assert hardware["training_mode"] == "cpu"
+    assert hardware["training_device_indices"] == ()
+
+
 class _RecordingBackend:
     def __init__(self, *, oom_once: bool = False) -> None:
         self.oom_once = oom_once

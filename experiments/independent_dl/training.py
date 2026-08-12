@@ -85,8 +85,8 @@ def inspect_cuda_hardware(torch: object) -> dict[str, object]:
     return {
         "device_count": count,
         "devices": devices,
-        "training_mode": "single_gpu",
-        "training_device_indices": (0,),
+        "training_mode": "single_gpu" if count else "cpu",
+        "training_device_indices": (0,) if count else (),
     }
 
 
@@ -299,7 +299,7 @@ class TorchTrainingBackend:
         os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
         torch = import_runtime_module("torch")
         if not torch.cuda.is_available():
-            raise RuntimeError("CUDA GPU가 필요합니다. Colab 런타임을 T4 GPU로 바꾸세요.")
+            raise RuntimeError("CUDA GPU가 필요합니다. Colab 런타임 유형에서 GPU를 선택하세요.")
         device = "cuda"
         hardware = inspect_cuda_hardware(torch)
         random.seed(request.seed)

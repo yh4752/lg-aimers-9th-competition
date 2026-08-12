@@ -79,5 +79,7 @@ def test_roadmap_marks_dl_code_ready_and_waiting_for_user_run() -> None:
     text = (ROOT / "docs/ROADMAP.md").read_text(encoding="utf-8")
 
     assert "독립 DL 캠페인 코드: `code_ready`" in text
-    assert "공식 데이터 T4 실행: `waiting_for_user_run`" in text
-    assert "전체 데이터 실행 결과는 아직 없음" in text
+    assert "Colab Pro·Drive 실행: `waiting_for_user_run`" in text
+    assert "P2 Brier" in text
+    assert "TabICLv2" in text
+    assert "`research_only`" in text
