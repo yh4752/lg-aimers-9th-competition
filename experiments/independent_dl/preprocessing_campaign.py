@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, is_dataclass
+from dataclasses import dataclass, fields, is_dataclass
 from datetime import datetime, timezone
 from hashlib import sha256
 import json
@@ -56,7 +56,10 @@ def _hash(path: Path) -> str:
 
 def _json_value(value: object) -> object:
     if is_dataclass(value):
-        return _json_value(asdict(value))
+        return {
+            field.name: _json_value(getattr(value, field.name))
+            for field in fields(value)
+        }
     if isinstance(value, Mapping):
         return {str(key): _json_value(item) for key, item in value.items()}
     if isinstance(value, (list, tuple)):

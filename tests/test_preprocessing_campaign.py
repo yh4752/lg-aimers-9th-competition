@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import json
-from types import SimpleNamespace
+from types import MappingProxyType, SimpleNamespace
 
 import pytest
 
@@ -73,6 +73,38 @@ def test_one_failed_job_does_not_block_independent_jobs(tmp_path: Path) -> None:
 
     assert summary.failed == ("job-1",)
     assert "job-2" in summary.completed
+
+
+def test_campaign_serializes_dataclass_with_mappingproxy_contract(tmp_path: Path) -> None:
+    from experiments.independent_dl.preprocessing_contracts import (
+        PreprocessingJob,
+        PreprocessingSetting,
+    )
+
+    job = PreprocessingJob(
+        job_id="real-contract-job",
+        wave="a",
+        anchor_id="tabm_p3",
+        family="tabm",
+        profile_id="p3",
+        epochs=240,
+        model=MappingProxyType({"width": 768}),
+        training=MappingProxyType({"learning_rate": 0.001}),
+        feature_view="raw_typed",
+        setting=PreprocessingSetting("dl_standard", "dl_standard", ()),
+        train_end_year=2019,
+        valid_year=2020,
+        seed=42,
+    )
+    campaign = SimpleNamespace(
+        campaign_id="real-contract", protocol="test", wave_a_jobs=(job,)
+    )
+
+    summary = run_preprocessing_campaign(campaign, tmp_path, FakeRuntime())
+
+    assert summary.completed == ("real-contract-job",)
+    manifest = json.loads((tmp_path / "campaign_manifest.json").read_text())
+    assert manifest["jobs"]["real-contract-job"]["job"]["model"] == {"width": 768}
 
 
 def test_max_jobs_limits_new_attempts_without_shrinking_campaign(tmp_path: Path) -> None:
