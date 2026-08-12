@@ -10,7 +10,7 @@ import subprocess
 
 
 ROOT = Path(__file__).resolve().parents[1]
-RUNTIME_COMMIT = "82839a23adeca53b8340674377cff274909a3585"
+RUNTIME_COMMIT = "5a63a6fa128466fe9166b81d496617f907853e7f"
 OUTPUT = ROOT / "experiments/preprocessing_campaign/KAGGLE_BUDGETED_CELL.py"
 
 
@@ -48,7 +48,7 @@ SESSION_STARTED_UNIX = time.time()
 MAX_SESSION_SECONDS = 6300
 INPUT_ROOT = Path("/kaggle/input")
 WORKING_ROOT = Path("/kaggle/working")
-CODE_ROOT = WORKING_ROOT / "budgeted_preprocessing_embedded_code_82839a2"
+CODE_ROOT = WORKING_ROOT / "budgeted_preprocessing_embedded_code_5a63a6f"
 RUNTIME_ROOT = WORKING_ROOT / "budgeted_preprocessing_runtime"
 CAMPAIGN_ROOT = WORKING_ROOT / "budgeted_preprocessing_campaign_v1"
 CONFIG_PATH = CODE_ROOT / "experiments/preprocessing_campaign/configs/budgeted_campaign_v1.json"
