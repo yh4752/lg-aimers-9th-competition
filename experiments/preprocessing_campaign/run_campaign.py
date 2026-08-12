@@ -38,6 +38,11 @@ def _parser() -> argparse.ArgumentParser:
     run.add_argument("--data-dir", required=True)
     run.add_argument("--output-dir", required=True)
     run.add_argument("--task-type", choices=("CPU", "GPU"), default="GPU")
+    run.add_argument(
+        "--max-jobs",
+        type=int,
+        help="attempt at most this many unfinished jobs in the current session",
+    )
     promote = actions.add_parser("promote", help="register the next wave from valid evidence")
     promote.add_argument("--from-wave", choices=("a", "b", "c", "d"), required=True)
     promote.add_argument("--config", required=True)
@@ -385,7 +390,9 @@ def main(argv: list[str] | None = None) -> int:
         runtime = OfficialPreprocessingDLRuntime(
             args.data_dir, cache_root=root / "feature_cache"
         )
-    summary = run_preprocessing_campaign(_wave_campaign(campaign, jobs), root, runtime)
+    summary = run_preprocessing_campaign(
+        _wave_campaign(campaign, jobs), root, runtime, max_jobs=args.max_jobs
+    )
     print(
         json.dumps(
             {

@@ -75,6 +75,22 @@ def test_one_failed_job_does_not_block_independent_jobs(tmp_path: Path) -> None:
     assert "job-2" in summary.completed
 
 
+def test_max_jobs_limits_new_attempts_without_shrinking_campaign(tmp_path: Path) -> None:
+    campaign = _tiny_campaign()
+    first = FakeRuntime()
+
+    summary = run_preprocessing_campaign(campaign, tmp_path, first, max_jobs=1)
+
+    assert first.started == ["job-1"]
+    assert summary.completed == ("job-1",)
+    assert summary.pending == ("job-2",)
+
+    second = FakeRuntime()
+    resumed = run_preprocessing_campaign(campaign, tmp_path, second, max_jobs=1)
+    assert second.started == ["job-2"]
+    assert resumed.completed == ("job-1", "job-2")
+
+
 def test_completed_artifact_hash_change_forces_only_that_job_to_rerun(
     tmp_path: Path,
 ) -> None:
