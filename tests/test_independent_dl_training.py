@@ -28,6 +28,7 @@ from experiments.independent_dl.training import (
     TrainingTimeBudgetReached,
     enforce_session_deadline,
     progress_message,
+    require_finite_validation_brier,
 )
 
 
@@ -186,6 +187,15 @@ def test_progress_message_exposes_job_epoch_batch_and_eta() -> None:
     assert "epoch=3/240" in message
     assert "batch=10/100" in message
     assert "epoch_eta_seconds=1080" in message
+
+
+def test_nonfinite_validation_brier_fails_before_checkpointing() -> None:
+    with pytest.raises(RuntimeError, match="non-finite validation Brier"):
+        require_finite_validation_brier(
+            candidate_id="s3__tabm__id_frequency_and_oov__tr2023__va2024__s42",
+            epoch=0,
+            brier=float("nan"),
+        )
 
 
 def test_model_adapter_modules_import_without_torch_site_packages() -> None:

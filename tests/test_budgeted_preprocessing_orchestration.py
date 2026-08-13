@@ -196,6 +196,32 @@ def test_stage_three_includes_dl_and_catboost_single_ablations() -> None:
     assert sum(job.max_seconds for job in jobs if job.family == "catboost") / 2 <= 1200
 
 
+def test_stage_three_tabm_uses_learnable_frequency_features_without_oov_column() -> None:
+    campaign = load_budgeted_campaign(CONFIG)
+    selected = campaign.stage_jobs(1)[0]
+    state = {
+        "selected_model": {
+            "family": selected.family,
+            "profile_id": selected.profile_id,
+            "model": dict(selected.model),
+            "training": dict(selected.training),
+        }
+    }
+
+    jobs = build_stage_jobs(campaign, 3, state)
+    dl_jobs = [job for job in jobs if job.family == "tabm"]
+    treatment = next(
+        job for job in dl_jobs if job.setting_id == "id_frequency_log1p"
+    )
+
+    assert treatment.job_id == (
+        "s3__tabm__id_frequency_log1p__tr2023__va2024__s42"
+    )
+    assert treatment.components == ("entity_frequency_log1p",)
+    assert treatment.training == selected.training
+    assert all("entity_frequency_and_oov" not in job.components for job in dl_jobs)
+
+
 def test_stage_four_worst_case_fits_before_archive_reserve() -> None:
     campaign = load_budgeted_campaign(CONFIG)
     selected = campaign.stage_jobs(1)[0]

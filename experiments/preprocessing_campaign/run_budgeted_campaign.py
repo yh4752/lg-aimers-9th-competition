@@ -482,6 +482,19 @@ def build_stage_jobs(
         selected = _selected_model(state)
         jobs = [_bind_selected(job, selected) for job in campaign.stage_jobs(stage_id)]
         if stage_id == 3:
+            jobs = [
+                replace(
+                    job,
+                    job_id=job.job_id.replace(
+                        "id_frequency_and_oov", "id_frequency_log1p"
+                    ),
+                    setting_id="id_frequency_log1p",
+                    components=("entity_frequency_log1p",),
+                )
+                if job.setting_id == "id_frequency_and_oov"
+                else job
+                for job in jobs
+            ]
             cat_base = _catboost_template(campaign)
             candidates = (
                 ("pitcher_smoothing_k100", ("pitcher_smooth_k100",)),
