@@ -5,6 +5,7 @@ from .contract import (
     load_policy,
     load_policy_review,
     policy_digest,
+    validate_experiment_contract,
 )
 
 __all__ = [
@@ -12,4 +13,5 @@ __all__ = [
     "load_policy",
     "load_policy_review",
     "policy_digest",
+    "validate_experiment_contract",
 ]

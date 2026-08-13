@@ -1,0 +1,40 @@
+{
+  "schema_version": 1,
+  "contract_id": "independent_dl_rules_v1",
+  "rules_version": "dacon-236743-2026-08-13",
+  "scope": "config_bound_campaign",
+  "candidate_source": "independent_dl_non_tabicl",
+  "candidate_count": 64,
+  "candidate_ids_sha256": "896866d9906e60f3361475a26445d3214461a87d730bff029018af68a0a8e51e",
+  "allowed_derivations": [
+    "confirmation_seed",
+    "boundary_expansion"
+  ],
+  "config_sha256": {
+    "experiments/independent_dl/configs/campaign_v1.json": "a3a7f82b6d20d59764f0c7e2964a3c2b9489b452ebd59f5a9c137cf25e6d5c55",
+    "experiments/independent_dl/configs/preprocessing_ablation_v1.json": "e322a0d5b8e0759ad189528c24a353d2dfa9342d6115cc4b361a1cd77939c09f"
+  },
+  "inference_source_paths": [
+    "experiments/independent_dl/models/common.py",
+    "experiments/independent_dl/models/ft_transformer.py",
+    "experiments/independent_dl/models/mlp_resnet.py",
+    "experiments/independent_dl/models/tabm.py",
+    "experiments/independent_dl/models/tabnet.py",
+    "experiments/independent_dl/models/tabr.py",
+    "experiments/independent_dl/features.py",
+    "experiments/independent_dl/preprocessing.py",
+    "experiments/independent_dl/feature_sources"
+  ],
+  "data_sources": [
+    "official_train",
+    "official_trackman"
+  ],
+  "fit_scope": "training_rows_only",
+  "evaluation_scope": "current_row_only",
+  "time_scope": "pre_pitch_only",
+  "external_api": false,
+  "pretrained_models": [],
+  "retrieval_corpora": [
+    "official_train"
+  ]
+}

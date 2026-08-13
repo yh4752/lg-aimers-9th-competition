@@ -51,6 +51,26 @@ _ENVIRONMENT = {
     "ram_gib": 28,
     "offline_after_install": True,
 }
+_EXPERIMENT_KEYS = {
+    "schema_version",
+    "contract_id",
+    "rules_version",
+    "scope",
+    "candidate_source",
+    "candidate_count",
+    "candidate_ids_sha256",
+    "allowed_derivations",
+    "config_sha256",
+    "inference_source_paths",
+    "data_sources",
+    "fit_scope",
+    "evaluation_scope",
+    "time_scope",
+    "external_api",
+    "pretrained_models",
+    "retrieval_corpora",
+}
+_LOWER_HEX = frozenset("0123456789abcdef")
 
 
 def _unique_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
@@ -97,6 +117,26 @@ def _safe_regular_file(path: str | Path, project_root: str | Path) -> Path:
         raise RulesContractError(f"cannot inspect rules file: {candidate}") from error
     if not stat.S_ISREG(current.lstat().st_mode):
         raise RulesContractError(f"rules path is not a regular file: {current}")
+    return current
+
+
+def _safe_project_path(path: str | Path, project_root: str | Path) -> Path:
+    root = Path(project_root).expanduser().resolve(strict=True)
+    candidate = Path(path).expanduser()
+    if not candidate.is_absolute():
+        candidate = root / candidate
+    try:
+        relative = candidate.relative_to(root)
+    except ValueError as error:
+        raise RulesContractError(f"path is outside project root: {candidate}") from error
+    current = root
+    try:
+        for part in relative.parts:
+            current = current / part
+            if stat.S_ISLNK(current.lstat().st_mode):
+                raise RulesContractError(f"symlink is not allowed: {current}")
+    except (OSError, ValueError) as error:
+        raise RulesContractError(f"cannot inspect project path: {candidate}") from error
     return current
 
 
@@ -215,3 +255,198 @@ def load_policy_review(
     if reviewed_at.astimezone(kst).date() != package_time.astimezone(kst).date():
         raise RulesContractError("review must use the same KST date as packaging")
     return review
+
+
+def _sha256_file(path: Path) -> str:
+    digest = sha256()
+    try:
+        with path.open("rb") as handle:
+            while block := handle.read(1024 * 1024):
+                digest.update(block)
+    except OSError as error:
+        raise RulesContractError(f"cannot hash file: {path}") from error
+    return digest.hexdigest()
+
+
+def _lower_sha256(value: object, label: str) -> str:
+    if (
+        not isinstance(value, str)
+        or len(value) != 64
+        or any(character not in _LOWER_HEX for character in value)
+    ):
+        raise RulesContractError(f"{label} must be a lowercase SHA-256")
+    return value
+
+
+def _canonical_candidate_digest(candidate_ids: list[str]) -> str:
+    encoded = json.dumps(
+        candidate_ids,
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return sha256(encoded).hexdigest()
+
+
+def _derived_candidate_ids(
+    source: str,
+    *,
+    root: Path,
+    config_paths: list[Path],
+    explicit: object,
+) -> list[str]:
+    if source == "explicit":
+        if not isinstance(explicit, list) or not explicit:
+            raise RulesContractError("candidate_ids must be a non-empty list")
+        if any(not isinstance(item, str) or not item for item in explicit):
+            raise RulesContractError("candidate_ids contain an invalid ID")
+        if len(set(explicit)) != len(explicit):
+            raise RulesContractError("candidate_ids must be unique")
+        return list(explicit)
+    if source == "component_only":
+        return []
+    if source == "independent_dl_non_tabicl":
+        from experiments.independent_dl.contracts import load_campaign
+
+        config = next(
+            (path for path in config_paths if path.name == "campaign_v1.json"), None
+        )
+        if config is None:
+            raise RulesContractError("independent DL campaign config is missing")
+        return [
+            candidate.candidate_id
+            for candidate in load_campaign(config).candidates
+            if candidate.family != "tabicl_v2"
+        ]
+    if source == "preprocessing_wave_a":
+        from experiments.independent_dl.preprocessing_contracts import (
+            load_preprocessing_campaign,
+        )
+
+        config = next(
+            (
+                path
+                for path in config_paths
+                if path.name == "preprocessing_ablation_v1.json"
+            ),
+            None,
+        )
+        if config is None:
+            raise RulesContractError("preprocessing campaign config is missing")
+        return [
+            job.job_id for job in load_preprocessing_campaign(config).wave_a_jobs
+        ]
+    if source == "budgeted_jobs":
+        from experiments.preprocessing_campaign.budgeted_contracts import (
+            load_budgeted_campaign,
+        )
+
+        config = next(
+            (
+                path
+                for path in config_paths
+                if path.name == "budgeted_campaign_v1.json"
+            ),
+            None,
+        )
+        if config is None:
+            raise RulesContractError("budgeted campaign config is missing")
+        campaign = load_budgeted_campaign(config)
+        return [
+            job.job_id
+            for stage_id in sorted(campaign.stages)
+            for job in campaign.stages[stage_id]
+        ]
+    raise RulesContractError("candidate_source is invalid")
+
+
+def validate_experiment_contract(
+    path: str | Path,
+    *,
+    project_root: str | Path,
+    candidate_id: str | None = None,
+    config_path: str | Path | None = None,
+) -> dict[str, object]:
+    """Validate one current-policy, config-bound experiment contract."""
+
+    root = Path(project_root).expanduser().resolve(strict=True)
+    payload = _load_json(path, project_root=root)
+    if not isinstance(payload, dict):
+        raise RulesContractError("experiment contract must be an object")
+    allowed_keys = _EXPERIMENT_KEYS | {"candidate_ids"}
+    if not _EXPERIMENT_KEYS.issubset(payload) or not set(payload).issubset(allowed_keys):
+        raise RulesContractError("experiment contract has invalid keys")
+    if type(payload["schema_version"]) is not int or payload["schema_version"] != 1:
+        raise RulesContractError("schema_version must be 1")
+    if not isinstance(payload["contract_id"], str) or not payload["contract_id"]:
+        raise RulesContractError("contract_id is invalid")
+    if payload["rules_version"] != "dacon-236743-2026-08-13":
+        raise RulesContractError("rules_version is not current")
+    if payload["scope"] not in {"config_bound_campaign", "component"}:
+        raise RulesContractError("scope is invalid")
+    if payload["data_sources"] != ["official_train", "official_trackman"]:
+        raise RulesContractError("data_sources are invalid")
+    if payload["fit_scope"] != "training_rows_only":
+        raise RulesContractError("fit_scope must be training_rows_only")
+    if payload["evaluation_scope"] != "current_row_only":
+        raise RulesContractError("evaluation_scope must be current_row_only")
+    if payload["time_scope"] != "pre_pitch_only":
+        raise RulesContractError("time_scope must be pre_pitch_only")
+    if payload["external_api"] is not False:
+        raise RulesContractError("external_api must be false")
+
+    config_bindings = payload["config_sha256"]
+    if not isinstance(config_bindings, dict) or not config_bindings:
+        raise RulesContractError("config_sha256 must be a non-empty object")
+    config_paths: list[Path] = []
+    for relative, expected in config_bindings.items():
+        if not isinstance(relative, str) or not relative:
+            raise RulesContractError("config_sha256 path is invalid")
+        expected_sha = _lower_sha256(expected, "config SHA-256")
+        config = _safe_regular_file(relative, root)
+        if _sha256_file(config) != expected_sha:
+            raise RulesContractError(f"config SHA-256 mismatch: {relative}")
+        config_paths.append(config)
+    if config_path is not None:
+        requested = _safe_regular_file(config_path, root)
+        if requested not in config_paths:
+            raise RulesContractError("config_path is not covered by the contract")
+
+    source_paths = payload["inference_source_paths"]
+    if not isinstance(source_paths, list) or not source_paths:
+        raise RulesContractError("inference_source_paths must be non-empty")
+    for relative in source_paths:
+        if not isinstance(relative, str) or not relative:
+            raise RulesContractError("inference_source_paths contain an invalid path")
+        source_path = _safe_project_path(relative, root)
+        if not (source_path.is_file() or source_path.is_dir()):
+            raise RulesContractError("inference source path is not a file or directory")
+
+    allowed_derivations = payload["allowed_derivations"]
+    if not isinstance(allowed_derivations, list) or any(
+        item not in {"confirmation_seed", "boundary_expansion", "wave_promotion"}
+        for item in allowed_derivations
+    ) or len(set(allowed_derivations)) != len(allowed_derivations):
+        raise RulesContractError("allowed_derivations are invalid")
+    for collection_name in ("pretrained_models", "retrieval_corpora"):
+        if not isinstance(payload[collection_name], list):
+            raise RulesContractError(f"{collection_name} must be a list")
+    for model in payload["pretrained_models"]:
+        if not isinstance(model, dict) or set(model) != {"source", "version", "license", "sha256"}:
+            raise RulesContractError("pretrained_models entry is invalid")
+        if any(not isinstance(model[key], str) or not model[key] for key in ("source", "version", "license")):
+            raise RulesContractError("pretrained model provenance is incomplete")
+        _lower_sha256(model["sha256"], "pretrained model SHA-256")
+
+    candidate_ids = _derived_candidate_ids(
+        str(payload["candidate_source"]),
+        root=root,
+        config_paths=config_paths,
+        explicit=payload.get("candidate_ids"),
+    )
+    if type(payload["candidate_count"]) is not int or payload["candidate_count"] != len(candidate_ids):
+        raise RulesContractError("candidate_count does not match derived candidates")
+    if _lower_sha256(payload["candidate_ids_sha256"], "candidate_ids_sha256") != _canonical_candidate_digest(candidate_ids):
+        raise RulesContractError("candidate_ids_sha256 does not match derived candidates")
+    if candidate_id is not None and candidate_id not in candidate_ids:
+        raise RulesContractError(f"candidate is not covered: {candidate_id}")
+    return payload

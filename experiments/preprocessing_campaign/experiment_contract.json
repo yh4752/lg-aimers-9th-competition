@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "contract_id": "budgeted_preprocessing_rules_v1",
+  "rules_version": "dacon-236743-2026-08-13",
+  "scope": "config_bound_campaign",
+  "candidate_source": "budgeted_jobs",
+  "candidate_count": 12,
+  "candidate_ids_sha256": "12bf59aed862a197402aef55c8ef34ed28f6ae04980a659496b044e2ae4d66e5",
+  "allowed_derivations": [
+    "wave_promotion"
+  ],
+  "config_sha256": {
+    "experiments/preprocessing_campaign/configs/budgeted_campaign_v1.json": "99deaa32e5d9616a0f50625ac38eda73df2d472dd54d75ff26fda00ef9f3958b"
+  },
+  "inference_source_paths": [
+    "experiments/preprocessing_campaign/budgeted_runtime.py",
+    "experiments/independent_dl/features.py",
+    "experiments/independent_dl/preprocessing.py",
+    "experiments/catboost_preprocessing/campaign.py",
+    "experiments/catboost_preprocessing/features.py"
+  ],
+  "data_sources": [
+    "official_train",
+    "official_trackman"
+  ],
+  "fit_scope": "training_rows_only",
+  "evaluation_scope": "current_row_only",
+  "time_scope": "pre_pitch_only",
+  "external_api": false,
+  "pretrained_models": [],
+  "retrieval_corpora": []
+}
