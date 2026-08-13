@@ -24,7 +24,8 @@ class DLRuntimeDependencyError(RuntimeError):
 class ModelMetadata:
     n_num_features: int
     categorical_cardinalities: tuple[int, ...]
-    train_x_num: np.ndarray
+    train_x_num: np.ndarray | None
+    piecewise_bin_edges: tuple[np.ndarray, ...] | None = None
 
 
 class ModelAdapter(Protocol):
@@ -140,9 +141,16 @@ def make_numeric_embeddings(
             lite=False,
         )
     if mode == "piecewise_linear":
+        fitted_edges = metadata.piecewise_bin_edges
+        if fitted_edges is None:
+            if metadata.train_x_num is None:
+                raise ValueError(
+                    "piecewise embeddings require fitted edges or a training matrix"
+                )
+            fitted_edges = quantile_bin_edges(metadata.train_x_num)
         bins = [
             torch.as_tensor(edge, dtype=torch.float32)
-            for edge in quantile_bin_edges(metadata.train_x_num)
+            for edge in fitted_edges
         ]
         return rtdl_num_embeddings.PiecewiseLinearEmbeddings(
             bins,

@@ -20,6 +20,11 @@ SUPPORTED_NUM_EMBEDDINGS = {
 
 
 class TabMAdapter:
+    def __init__(self, loss_name: str = "bce") -> None:
+        if loss_name not in {"bce", "brier"}:
+            raise ValueError(f"unsupported TabM loss: {loss_name}")
+        self.loss_name = loss_name
+
     def build(
         self,
         model_config: Mapping[str, object],
@@ -61,6 +66,9 @@ class TabMAdapter:
         del row_indices
         torch = import_runtime_module("torch")
         member_logits = model(x_num, x_cat).squeeze(-1)
+        if self.loss_name == "brier":
+            probabilities = member_logits.sigmoid().mean(dim=1)
+            return ((probabilities - y.float()) ** 2).mean()
         member_targets = y.float().unsqueeze(1).expand_as(member_logits)
         return torch.nn.functional.binary_cross_entropy_with_logits(
             member_logits, member_targets, reduction="mean"
