@@ -15,7 +15,7 @@
 | 열린 계열 | segment-aware calibration, 독립 TabM 후보, XGBoost |
 | XGBoost v3 | Public `820.9583317093`; 현재 규칙 재검토 전 패키지 차단 |
 | XGBoost rescue | 2024 `0.24826687414041645`, technical verified, Public 미확인 |
-| 다음 주력 | Colab Pro의 독립 DL 프런티어 캠페인 |
+| 다음 주력 | 확정 전처리 기반 4단계 TabM champion Kaggle 캠페인 |
 | 규칙 안전선 | `competition_rules` → `experiment_contract.json` → 전체행 evidence → `submission/package.py` |
 
 점수가 같은 표에 있어도 검증 프로토콜이 다르면 직접 순위를 매기지 않는다. R9은
@@ -49,6 +49,7 @@
 - [실험 실행 계약](docs/EXPERIMENT_CONTRACT.md): 역할, 상태와 패키지 gate
 - [로드맵](docs/ROADMAP.md): 다음 후보와 코드 이전 순서
 - [저장소 이전 설계](docs/superpowers/specs/2026-08-11-competition-repository-migration-design.md)
+- [TabM Kaggle 실행 안내](docs/TABM_CHAMPION_KAGGLE.md): A–D 입력, 시간, 로그와 전달 파일
 
 ## 검증 프로토콜
 
@@ -79,9 +80,7 @@ R9 이후 CatBoost 계보, R25 TabM 잔차와 R32 분모 보정 연구는 동료
 
 ## 다음 후보
 
-구체적인 실행 순서는 [ROADMAP](docs/ROADMAP.md)에 있다. 저장소 기반을 확인한 뒤
-기존 TabM raw P1·P2를 보존하고, TabM 입력 표현 교차, 대형
-ResNet·FT-Transformer, 연구용 TabICLv2와 확장성 수정된 TabR를 실행한다. 본 실행은
-[Colab 노트북](notebooks/INDEPENDENT_DL_CAMPAIGN.ipynb)에서 Drive checkpoint로
-재개한다. 비용은 실행 순서 안내에만 사용하고 좋은 후보를 제외하는 기준으로 삼지
-않는다.
+현재 실행 대상은 확정 전처리 `dl_standard + hand_matchup`을 고정한 TabM champion
+캠페인이다. [Kaggle 실행 안내](docs/TABM_CHAMPION_KAGGLE.md)에 따라 Save Version
+A–D를 순서대로 진행한다. 다른 DL 계열과 제출 패키징은 이 후보의 final review를
+검토한 뒤 별도 작업으로 다룬다.
