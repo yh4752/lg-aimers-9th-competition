@@ -11,6 +11,7 @@ import tarfile
 
 ROOT = Path(__file__).resolve().parents[1]
 CELL = ROOT / "experiments/preprocessing_campaign/KAGGLE_BUDGETED_CELL.py"
+MAX_KAGGLE_SOURCE_BYTES = 900_000
 
 
 def _embedded_archive() -> bytes:
@@ -23,6 +24,7 @@ def _embedded_archive() -> bytes:
 def test_budgeted_cell_is_one_self_contained_kaggle_cell_without_network_source() -> None:
     text = CELL.read_text(encoding="utf-8")
 
+    assert CELL.stat().st_size < MAX_KAGGLE_SOURCE_BYTES
     compile(text, str(CELL), "exec")
     for required in (
         "/kaggle/input",

@@ -5,8 +5,10 @@ from __future__ import annotations
 import base64
 import gzip
 from hashlib import sha256
+import io
 from pathlib import Path
 import subprocess
+import tarfile
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -21,7 +23,16 @@ def _archive() -> bytes:
         check=True,
         stdout=subprocess.PIPE,
     )
-    return gzip.compress(completed.stdout, compresslevel=9, mtime=0)
+    filtered = io.BytesIO()
+    with tarfile.open(fileobj=io.BytesIO(completed.stdout), mode="r:") as source:
+        with tarfile.open(fileobj=filtered, mode="w:") as target:
+            for member in source.getmembers():
+                name = Path(member.name).name
+                if name.startswith("KAGGLE_") and name.endswith(".py"):
+                    continue
+                payload = source.extractfile(member) if member.isfile() else None
+                target.addfile(member, payload)
+    return gzip.compress(filtered.getvalue(), compresslevel=9, mtime=0)
 
 
 def main() -> None:
