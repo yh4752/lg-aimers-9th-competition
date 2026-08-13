@@ -331,6 +331,12 @@ def _atomic_torch_save(torch: object, payload: object, path: Path) -> None:
     os.replace(temporary, path)
 
 
+def load_resume_payload(torch: object, path: Path) -> object:
+    """Load optimizer and RNG state on CPU before restoring the CUDA model."""
+
+    return torch.load(path, map_location="cpu", weights_only=False)
+
+
 def _atomic_json(payload: Mapping[str, object], path: Path) -> None:
     temporary = path.with_name(path.name + ".tmp")
     temporary.write_text(
@@ -419,7 +425,7 @@ class TorchTrainingBackend:
         validation_time_curve: list[tuple[int, float, float]] = []
         elapsed_before_resume = 0.0
         if resume_epoch:
-            payload = torch.load(checkpoint_path, map_location=device, weights_only=False)
+            payload = load_resume_payload(torch, checkpoint_path)
             model.load_state_dict(payload["model"])
             optimizer.load_state_dict(payload["optimizer"])
             scheduler.load_state_dict(payload["scheduler"])

@@ -563,6 +563,7 @@ def run_campaign(
     *,
     family: str | None = None,
     max_candidates: int | None = None,
+    retry_candidate_id: str | None = None,
 ) -> CampaignSummary:
     families = {candidate.family for candidate in campaign.candidates}
     if family is not None and family not in families:
@@ -579,6 +580,21 @@ def run_campaign(
     manifest_path = root / "campaign_manifest.json"
     manifest = _load_manifest(manifest_path, campaign)
     entries = manifest["candidates"]
+    if retry_candidate_id is not None:
+        retry_entry = entries.get(retry_candidate_id)
+        if retry_entry is None:
+            raise CampaignStateError(
+                f"retry candidate is not registered: {retry_candidate_id}"
+            )
+        if retry_entry["state"] != "failed":
+            raise CampaignStateError(
+                f"retry candidate must be failed: {retry_candidate_id}"
+            )
+        retry_candidate = _candidate_from_payload(retry_entry["candidate"])
+        if family is not None and retry_candidate.family != family:
+            raise CampaignStateError("retry candidate does not belong to selected family")
+        retry_entry["state"] = "pending"
+        retry_entry["failure_reason"] = None
     for entry in entries.values():
         if entry["state"] == "running" or (
             entry["state"] == "completed" and not _completion_is_valid(root, entry)
@@ -594,6 +610,9 @@ def run_campaign(
             entry = entries[candidate.candidate_id]
             if entry["state"] != "pending" or (
                 family is not None and candidate.family != family
+            ) or (
+                retry_candidate_id is not None
+                and candidate.candidate_id != retry_candidate_id
             ):
                 continue
             entry["state"] = "running"
@@ -684,7 +703,13 @@ def run_campaign(
             break
         selected_pending = any(
             entry["state"] == "pending"
-            and (family is None or entries[candidate_id]["family"] == family)
+            and (
+                family is None
+                or _candidate_from_payload(entry["candidate"]).family == family
+            )
+            and (
+                retry_candidate_id is None or candidate_id == retry_candidate_id
+            )
             for candidate_id, entry in entries.items()
         )
         if not selected_pending:

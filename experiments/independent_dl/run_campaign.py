@@ -22,6 +22,7 @@ def _parser() -> argparse.ArgumentParser:
     run.add_argument("--output-dir", required=True)
     run.add_argument("--family", choices=_FAMILIES)
     run.add_argument("--max-candidates", type=int)
+    run.add_argument("--retry-candidate")
     status = actions.add_parser("status", help="print the current campaign manifest")
     status.add_argument("--output-dir", required=True)
     summarize = actions.add_parser("summarize", help="write or refresh campaign summary")
@@ -93,13 +94,13 @@ def main(argv: list[str] | None = None) -> int:
         runtime = OfficialCampaignRuntime(
             args.data_dir, cache_root=output_dir / "feature_cache"
         )
-        summary = run_campaign(
-            campaign,
-            output_dir,
-            runtime,
-            family=args.family,
-            max_candidates=args.max_candidates,
-        )
+        run_options = {
+            "family": args.family,
+            "max_candidates": args.max_candidates,
+        }
+        if args.retry_candidate is not None:
+            run_options["retry_candidate_id"] = args.retry_candidate
+        summary = run_campaign(campaign, output_dir, runtime, **run_options)
         print(
             json.dumps(
                 {

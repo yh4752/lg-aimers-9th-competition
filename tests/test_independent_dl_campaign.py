@@ -186,6 +186,51 @@ def test_failed_candidate_consumes_one_attempt(tmp_path: Path) -> None:
     assert second.started == ["next"]
 
 
+def test_explicit_retry_runs_the_failed_candidate_instead_of_the_next_one(
+    tmp_path: Path,
+) -> None:
+    campaign = _campaign(
+        (
+            _candidate("failed", width=512, family="ft_transformer"),
+            _candidate("next", width=256, family="ft_transformer"),
+        )
+    )
+    run_campaign(
+        campaign,
+        tmp_path,
+        _FakeRuntime(candidate_error_on="failed"),
+        family="ft_transformer",
+        max_candidates=1,
+    )
+    retry = _FakeRuntime()
+
+    summary = run_campaign(
+        campaign,
+        tmp_path,
+        retry,
+        family="ft_transformer",
+        max_candidates=1,
+        retry_candidate_id="failed",
+    )
+
+    assert retry.started == ["failed"]
+    assert "failed" in summary.completed
+    assert "next" in summary.pending
+
+
+def test_explicit_retry_rejects_a_candidate_that_did_not_fail(tmp_path: Path) -> None:
+    campaign = _campaign((_candidate("pending", width=512),))
+
+    with pytest.raises(ValueError, match="must be failed"):
+        run_campaign(
+            campaign,
+            tmp_path,
+            _FakeRuntime(),
+            retry_candidate_id="pending",
+            max_candidates=1,
+        )
+
+
 @pytest.mark.parametrize("limit", [0, -1, True])
 def test_nonpositive_or_boolean_limit_is_rejected(
     tmp_path: Path, limit: object

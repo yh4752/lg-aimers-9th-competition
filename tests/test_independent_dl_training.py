@@ -29,6 +29,7 @@ from experiments.independent_dl.training import (
     enforce_session_deadline,
     progress_message,
     require_finite_validation_brier,
+    load_resume_payload,
 )
 
 
@@ -160,6 +161,23 @@ def test_resume_starts_after_last_complete_checkpoint(tmp_path: Path) -> None:
 
     assert result.started_epoch == 8
     assert backend.calls[0]["resume_epoch"] == 8
+
+
+def test_resume_checkpoint_is_loaded_on_cpu_before_rng_restore(tmp_path: Path) -> None:
+    checkpoint = tmp_path / "checkpoint.pt"
+    checkpoint.write_bytes(b"checkpoint")
+
+    class FakeTorch:
+        @staticmethod
+        def load(path, *, map_location, weights_only):
+            assert path == checkpoint
+            assert map_location == "cpu"
+            assert weights_only is False
+            return {"torch_rng": "cpu-byte-tensor"}
+
+    assert load_resume_payload(FakeTorch(), checkpoint) == {
+        "torch_rng": "cpu-byte-tensor"
+    }
 
 
 def test_expired_session_deadline_stops_at_a_safe_boundary() -> None:
