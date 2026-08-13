@@ -479,10 +479,13 @@ def build_stage_jobs(
             jobs = [
                 replace(
                     job,
-                    training=MappingProxyType({**dict(job.training), "amp": False}),
+                    job_id=job.job_id.replace(
+                        "id_frequency_and_oov", "id_frequency_log1p"
+                    ),
+                    setting_id="id_frequency_log1p",
+                    components=("entity_frequency_log1p",),
                 )
-                if job.family == "tabm"
-                and job.setting_id == "id_frequency_and_oov"
+                if job.setting_id == "id_frequency_and_oov"
                 else job
                 for job in jobs
             ]
