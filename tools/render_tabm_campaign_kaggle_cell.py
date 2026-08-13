@@ -14,11 +14,7 @@ OUTPUT = ROOT / "experiments/tabm_campaign/KAGGLE_CELL.py"
 
 def _source_paths() -> list[Path]:
     paths: list[Path] = []
-    for directory in (
-        ROOT / "experiments/tabm_campaign",
-        ROOT / "experiments/independent_dl",
-        ROOT / "competition_rules",
-    ):
+    for directory in (ROOT / "experiments/tabm_campaign", ROOT / "competition_rules"):
         paths.extend(
             path
             for path in directory.rglob("*")
@@ -27,6 +23,13 @@ def _source_paths() -> list[Path]:
             and path.name != "KAGGLE_CELL.py"
             and "__pycache__" not in path.parts
         )
+    independent = ROOT / "experiments/independent_dl"
+    paths.extend(
+        independent / name
+        for name in ("__init__.py", "features.py", "preprocessing.py", "training.py")
+    )
+    paths.extend(sorted((independent / "models").glob("*.py")))
+    paths.extend(sorted((independent / "feature_sources").glob("*.py")))
     paths.append(ROOT / "reports/rules/2026-08-13-policy-review.json")
     return sorted(set(paths), key=lambda path: path.relative_to(ROOT).as_posix())
 

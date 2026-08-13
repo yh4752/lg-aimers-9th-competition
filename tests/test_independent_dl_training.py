@@ -179,6 +179,30 @@ def test_resume_starts_after_last_complete_checkpoint(tmp_path: Path) -> None:
     assert backend.calls[0]["resume_epoch"] == 8
 
 
+def test_resume_rejects_changed_campaign_checkpoint_binding(tmp_path: Path) -> None:
+    request = _request()
+    request = TrainRequest(
+        **{
+            **request.__dict__,
+            "checkpoint_binding": {"config_sha256": "a" * 64, "cache_sha256": "b" * 64},
+        }
+    )
+    (tmp_path / "checkpoint.pt").write_bytes(b"checkpoint")
+    (tmp_path / "checkpoint_meta.json").write_text(
+        json.dumps(
+            {
+                "candidate_id": request.candidate_id,
+                "epoch": 1,
+                "checkpoint": "checkpoint.pt",
+                "checkpoint_binding": {"config_sha256": "c" * 64, "cache_sha256": "b" * 64},
+            }
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(Exception, match="binding"):
+        fit_candidate(request, _FakeAdapter(), tmp_path, backend=_RecordingBackend())
+
+
 def test_expired_session_deadline_stops_at_a_safe_boundary() -> None:
     with pytest.raises(TrainingTimeBudgetReached, match="session time budget"):
         enforce_session_deadline(time.time() - 1, boundary="epoch_3_batch_20")

@@ -48,13 +48,13 @@ def fit_final_members(
     *,
     data_dir: Path,
     artifact_root: Path,
-    champion: Mapping[str, object],
-    member_seeds: list[int],
+    member_specs: list[Mapping[str, object]],
     epochs: int,
+    absolute_deadline: float,
 ) -> dict[str, object]:
     """Fit only on official 2019-2024 training rows for a fixed epoch count."""
 
-    if not 1 <= len(member_seeds) <= 3 or not 2 <= epochs <= 40:
+    if not 1 <= len(member_specs) <= 3 or not 2 <= epochs <= 40:
         raise FinalTrainingError("final training requires 1-3 seeds and 2-40 epochs")
     import torch
 
@@ -93,38 +93,42 @@ def fit_final_members(
     state_path = artifact_root / "preprocessing_state.json"
     _atomic_json(state_path, _preprocessed_state_payload(state))
 
-    model_config = {
-        "architecture": "tabm",
-        "k": int(champion["k"]),
-        "width": int(champion["width"]),
-        "blocks": int(champion["blocks"]),
-        "dropout": float(champion["dropout"]),
-        "num_embedding": str(champion["num_embedding"]),
-    }
-    numeric_state = fit_numeric_embedding_state(str(champion["num_embedding"]), np.asarray(batch.x_num))
-    numeric_path = artifact_root / "numeric_embedding.json"
-    save_numeric_embedding_state(numeric_state, numeric_path)
     members: list[dict[str, object]] = []
     started = time.monotonic()
-    for seed in member_seeds:
+    for member_index, member_spec in enumerate(member_specs):
+        seed = int(member_spec["seed"])
+        candidate = member_spec["candidate"]
+        if not isinstance(candidate, Mapping):
+            raise FinalTrainingError("final member candidate configuration is invalid")
+        model_config = {
+            "architecture": "tabm",
+            "k": int(candidate["k"]),
+            "width": int(candidate["width"]),
+            "blocks": int(candidate["blocks"]),
+            "dropout": float(candidate["dropout"]),
+            "num_embedding": str(candidate["num_embedding"]),
+        }
+        numeric_state = fit_numeric_embedding_state(str(candidate["num_embedding"]), np.asarray(batch.x_num))
+        numeric_path = artifact_root / f"numeric_embedding_{member_index}.json"
+        save_numeric_embedding_state(numeric_state, numeric_path)
         random.seed(seed)
         np.random.seed(seed)
         torch.manual_seed(seed)
         torch.cuda.manual_seed_all(seed)
-        adapter = TabMAdapter(loss_name=str(champion["loss"]))
+        adapter = TabMAdapter(loss_name=str(candidate["loss"]))
         model = adapter.build(model_config, metadata_from_train(batch), "cuda")
         optimizer = torch.optim.AdamW(
             model.parameters(),
-            lr=float(champion["learning_rate"]),
+            lr=float(candidate["learning_rate"]),
             weight_decay=0.0001,
         )
         effective, micro = 4096, 512
         updates_per_epoch = math.ceil(len(batch.row_id) / effective)
-        scheduler_name = str(champion["scheduler"])
+        scheduler_name = str(candidate["scheduler"])
         scheduler = (
             torch.optim.lr_scheduler.OneCycleLR(
                 optimizer,
-                max_lr=float(champion["learning_rate"]),
+                max_lr=float(candidate["learning_rate"]),
                 total_steps=epochs * updates_per_epoch,
             )
             if scheduler_name == "one_cycle"
@@ -132,9 +136,13 @@ def fit_final_members(
         )
         scaler = torch.amp.GradScaler("cuda", enabled=True)
         for epoch in range(epochs):
+            if time.time() >= absolute_deadline:
+                raise FinalTrainingError("Version D absolute training deadline reached")
             model.train()
             order = np.random.default_rng(seed + epoch).permutation(len(batch.row_id))
             for window_start in range(0, len(order), effective):
+                if time.time() >= absolute_deadline:
+                    raise FinalTrainingError("Version D absolute training deadline reached")
                 window = order[window_start : window_start + effective]
                 optimizer.zero_grad(set_to_none=True)
                 n_micro = math.ceil(len(window) / micro)
@@ -154,7 +162,7 @@ def fit_final_members(
                 if scheduler is not None:
                     scheduler.step()
             print(f"FINAL_TRAINING_PROGRESS seed={seed} epoch={epoch + 1}/{epochs}", flush=True)
-        weights = artifact_root / f"tabm_seed_{seed}.pt"
+        weights = artifact_root / f"tabm_member_{member_index}_seed_{seed}.pt"
         temporary = weights.with_suffix(".pt.tmp")
         torch.save(model.state_dict(), temporary)
         os.replace(temporary, weights)
@@ -185,7 +193,7 @@ def fit_final_members(
         "status": "completed",
         "rows": len(train),
         "epochs": epochs,
-        "seeds": member_seeds,
+        "seeds": [int(member["seed"]) for member in member_specs],
         "elapsed_seconds": time.monotonic() - started,
         "manifest_sha256": sha256((artifact_root / "inference_manifest.json").read_bytes()).hexdigest(),
     }

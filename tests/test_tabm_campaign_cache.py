@@ -47,6 +47,8 @@ def test_cache_reuse_is_read_only_and_hash_checked(
     assert second.reused is True
     assert first.array_sha256 == second.array_sha256
     assert first.train.row_id.tolist() == list(sample_ids)
+    assert len(first.model_metadata.train_x_num) == len(preprocessing_train)
+    assert first.model_metadata.n_num_features == first.train.x_num.shape[1]
 
     identity_path = first.root / "campaign_identity.json"
     identity_path.write_text(identity_path.read_text().replace("sha256", "tampered", 1))

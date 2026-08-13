@@ -21,7 +21,7 @@ from competition_rules.contract import load_policy, policy_digest
 
 from .artifacts import BundlePaths, StageEvidence, write_stage_bundles
 from .contracts import Campaign
-from .dependency_probe import run_clean_install_probe
+from .dependency_probe import run_clean_install_probe, run_python_probe
 from .runner import StageRunResult
 
 
@@ -70,16 +70,24 @@ def run_final_review(
     output_dir: Path,
     prior_manifest_sha256: str | None,
     campaign_config_sha256: str,
+    training_deadline_unix: float,
 ) -> StageRunResult:
     """Fit final members and emit review evidence only; package creation is absent."""
 
     if prior_manifest_sha256 is None:
         raise FinalReviewError("Version D requires a trusted Version C manifest")
+    if time.time() >= training_deadline_unix:
+        raise FinalReviewError("Version D training deadline was reached before final fitting")
     final_members = prior.get("final_members")
     champion = prior.get("champion")
     if not isinstance(final_members, list) or not final_members or not isinstance(champion, dict):
         raise FinalReviewError("Version D requires the Version C champion and final members")
-    best_epochs = [int(member["best_epoch"]) for member in final_members if member.get("best_epoch") is not None]
+    best_epochs = [
+        int(epoch)
+        for member in final_members
+        for epoch in member.get("temporal_best_epochs", [member.get("best_epoch")])
+        if epoch is not None
+    ]
     epochs = fixed_epoch_count(best_epochs)
     project_root = Path(__file__).resolve().parents[2]
     policy = load_policy(project_root / "competition_rules/policy.json", project_root=project_root)
@@ -104,14 +112,35 @@ def run_final_review(
     fit_report = fit_final_members(
         data_dir=data_dir,
         artifact_root=artifact_root,
-        champion=champion,
-        member_seeds=[int(member["seed"]) for member in final_members],
+        member_specs=[
+            {"seed": int(member["seed"]), "candidate": dict(member.get("candidate", champion))}
+            for member in final_members
+        ],
         epochs=epochs,
+        absolute_deadline=training_deadline_unix,
     )
     from .inference_runtime import FrozenTabMPredictor, audit_frozen_predictor
 
     sample_path = _find_one(data_dir, "test.csv")
     public_test = pd.read_csv(sample_path).head(5)
+    probe_frame_path = output_dir / "dependency_probe" / "five_rows.csv"
+    public_test.to_csv(probe_frame_path, index=False)
+    probe_python = output_dir / "dependency_probe" / "dependency_probe_venv" / "bin" / "python"
+    probe_script = (
+        "from pathlib import Path; import pandas as pd; "
+        "from experiments.tabm_campaign.inference_runtime import FrozenTabMPredictor; "
+        f"frame=pd.read_csv({str(probe_frame_path)!r}); "
+        f"predictor=FrozenTabMPredictor({str(artifact_root)!r}); "
+        "p=predictor.predict_batch(frame); "
+        "assert p.shape==(5,); print(','.join(f'{x:.8f}' for x in p))"
+    )
+    frozen_sample_probe = run_python_probe(
+        probe_python,
+        probe_script,
+        environment={"PYTHONPATH": str(project_root)},
+    )
+    if frozen_sample_probe["status"] != "passed":
+        raise FinalReviewError("clean-environment five-row inference probe failed")
     predictor = FrozenTabMPredictor(artifact_root)
     independence = audit_frozen_predictor(predictor, public_test)
     source_gate_after = inspect_inference_source(
@@ -161,6 +190,7 @@ def run_final_review(
             "peak_rss_bytes": peak_rss_bytes,
         },
         "dependency_probe": asdict(dependency),
+        "frozen_sample_probe": frozen_sample_probe,
         "artifact_bytes": artifact_bytes,
     }
     review_members = {

@@ -18,6 +18,7 @@ from experiments.independent_dl.features import (
     materialize_preprocessed_fold_cache,
 )
 from experiments.independent_dl.preprocessing import PreprocessingSpec
+from experiments.independent_dl.models.common import ModelMetadata
 
 
 class CacheError(ValueError):
@@ -100,6 +101,7 @@ class FixedCache:
     reused: bool
     identity: CacheIdentity
     array_sha256: dict[str, str]
+    model_metadata: ModelMetadata
 
 
 def _batch_arrays(batch: FeatureBatch) -> dict[str, np.ndarray]:
@@ -165,6 +167,16 @@ def _category_maps_sha256(state: PreprocessedFeatureState) -> str:
     return sha256(_canonical_json(payload)).hexdigest()
 
 
+def _model_metadata(batch: FeatureBatch, state: PreprocessedFeatureState) -> ModelMetadata:
+    return ModelMetadata(
+        n_num_features=batch.x_num.shape[1],
+        categorical_cardinalities=tuple(
+            len(state.category_maps[column]) + 1 for column in state.categorical_columns
+        ),
+        train_x_num=batch.x_num,
+    )
+
+
 def materialize_fixed_cache(
     cache_root: str | Path,
     *,
@@ -218,7 +230,16 @@ def materialize_fixed_cache(
             raise CacheError("cached array SHA-256 manifest is invalid")
         train_batch = _load_batch(target / "train", array_sha["train"])
         valid_batch = _load_batch(target / "valid", array_sha["valid"])
-        return FixedCache(target, train_batch, valid_batch, base.state, True, identity, array_sha)
+        return FixedCache(
+            target,
+            train_batch,
+            valid_batch,
+            base.state,
+            True,
+            identity,
+            array_sha,
+            _model_metadata(base.train, base.state),
+        )
 
     target.parent.mkdir(parents=True, exist_ok=True)
     temporary = Path(tempfile.mkdtemp(prefix=f".{identity.digest()}-", dir=target.parent))
@@ -238,4 +259,13 @@ def materialize_fixed_cache(
     except Exception:
         shutil.rmtree(temporary, ignore_errors=True)
         raise
-    return FixedCache(target, train_batch, base.valid, base.state, False, identity, array_sha)
+    return FixedCache(
+        target,
+        train_batch,
+        base.valid,
+        base.state,
+        False,
+        identity,
+        array_sha,
+        _model_metadata(base.train, base.state),
+    )

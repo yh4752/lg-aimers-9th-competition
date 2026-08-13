@@ -76,11 +76,13 @@ def run_worker(job: CampaignJob, data_dir: Path, output_dir: Path, cache_root: P
     import numpy as np
     import pandas as pd
 
+    from experiments.independent_dl.models.common import import_runtime_module, metadata_from_train
     from experiments.independent_dl.models.tabm import TabMAdapter
     from experiments.independent_dl.preprocessing import PreprocessingSpec
     from experiments.independent_dl.training import TrainRequest, fit_candidate
     from .cache import materialize_fixed_cache
     from .sampling import proxy_row_ids
+    from .training import preflight
 
     output_dir.mkdir(parents=True, exist_ok=True)
     train_path = _find_one(data_dir, "train.csv", required=True)
@@ -122,6 +124,52 @@ def run_worker(job: CampaignJob, data_dir: Path, output_dir: Path, cache_root: P
         except (ImportError, NameError):
             pass
 
+    model_config = {
+        "architecture": "tabm",
+        "k": job.k,
+        "width": job.width,
+        "blocks": job.blocks,
+        "dropout": job.dropout,
+        "num_embedding": job.num_embedding,
+    }
+    adapter = TabMAdapter(loss_name=job.loss)
+
+    def architecture_probe() -> dict[str, object]:
+        torch = import_runtime_module("torch")
+        model = adapter.build(model_config, cache.model_metadata, "cuda")
+        count = min(32, len(cache.train.row_id))
+        indices = np.arange(count, dtype="int64")
+        x_num = torch.as_tensor(np.asarray(cache.train.x_num[indices]), dtype=torch.float32, device="cuda")
+        x_cat = torch.as_tensor(np.asarray(cache.train.x_cat[indices]), dtype=torch.long, device="cuda")
+        target = torch.as_tensor(np.asarray(cache.train.y[indices]), dtype=torch.float32, device="cuda")
+        row_indices = torch.as_tensor(indices, dtype=torch.long, device="cuda")
+        loss = adapter.loss(model, x_num, x_cat, target, row_indices=row_indices)
+        loss.backward()
+        evidence = {
+            "loss": float(loss.detach().cpu()),
+            "parameter_count": sum(parameter.numel() for parameter in model.parameters()),
+            "gpu_allocated_bytes": int(torch.cuda.memory_allocated()),
+            "gpu_reserved_bytes": int(torch.cuda.memory_reserved()),
+            "device_name": str(torch.cuda.get_device_name(0)),
+        }
+        del model, x_num, x_cat, target, row_indices, loss
+        torch.cuda.empty_cache()
+        return evidence
+
+    preflight_result = preflight(job.candidate_id, architecture_probe)
+    if preflight_result.status != "completed":
+        return CampaignJobResult(
+            job.candidate_id,
+            "failed",
+            None,
+            None,
+            0,
+            None,
+            None,
+            {"preflight": asdict(preflight_result)},
+            f"{preflight_result.failure_type}: {preflight_result.message}",
+        )
+
     os.environ["PREPROCESSING_SESSION_DEADLINE_UNIX"] = str(deadline)
     request = TrainRequest(
         candidate_id=job.candidate_id,
@@ -129,14 +177,7 @@ def run_worker(job: CampaignJob, data_dir: Path, output_dir: Path, cache_root: P
         seed=job.seed,
         epochs=job.max_epochs,
         min_epochs=job.min_epochs,
-        model_config={
-            "architecture": "tabm",
-            "k": job.k,
-            "width": job.width,
-            "blocks": job.blocks,
-            "dropout": job.dropout,
-            "num_embedding": job.num_embedding,
-        },
+        model_config=model_config,
         training_config={
             "optimizer": "adamw",
             "scheduler": job.scheduler,
@@ -149,26 +190,46 @@ def run_worker(job: CampaignJob, data_dir: Path, output_dir: Path, cache_root: P
         },
         train=cache.train,
         valid=cache.valid,
+        checkpoint_binding={
+            "config_sha256": _job_sha(job),
+            "cache_sha256": cache.identity.digest(),
+            "training_source_sha256": sha256(
+                (Path(__file__).resolve().parents[1] / "independent_dl" / "training.py").read_bytes()
+                + (Path(__file__).resolve().parents[1] / "independent_dl" / "models" / "tabm.py").read_bytes()
+            ).hexdigest(),
+        },
+        model_metadata=cache.model_metadata,
     )
     started = time.monotonic()
-    trained = fit_candidate(request, TabMAdapter(loss_name=job.loss), output_dir)
+    trained = fit_candidate(request, adapter, output_dir)
     probability = np.asarray(trained.predictions, dtype="float64")
     target = np.asarray(cache.valid.y, dtype="float64")
     brier = float(np.mean(np.square(probability - target)))
     predictions_path = output_dir / "predictions.csv"
-    pd.DataFrame(
-        {
-            "row_id": cache.valid.row_id.astype(str),
-            "target": target.astype("int64"),
-            "probability": probability,
-        }
-    ).to_csv(predictions_path, index=False)
+    prediction_payload: dict[str, object] = {
+        "row_id": cache.valid.row_id.astype(str),
+        "target": target.astype("int64"),
+        "probability": probability,
+        "game_type": cache.valid.game_type.astype(str),
+    }
+    if "game_month" in valid_rows:
+        prediction_payload["game_month"] = valid_rows["game_month"].to_numpy(copy=False)
+    for entity in ("pitcher_id", "batter_id"):
+        if entity in valid_rows and entity in cache.state.category_maps:
+            known = set(str(value) for value in cache.state.category_maps[entity])
+            prediction_payload[f"{entity}_known"] = np.where(
+                valid_rows[entity].astype("string").fillna("__MISSING__").astype(str).isin(known),
+                "known",
+                "oov",
+            )
+    pd.DataFrame(prediction_payload).to_csv(predictions_path, index=False)
     evidence = dict(trained.hardware)
     evidence.update(
         {
             "wall_seconds": time.monotonic() - started,
             "cache_digest": cache.identity.digest(),
             "cache_reused": cache.reused,
+            "preflight": asdict(preflight_result),
         }
     )
     return CampaignJobResult(
@@ -220,6 +281,41 @@ class SubprocessCampaignRuntime:
                     print(f"WORKER[{gpu}:{job.candidate_id}] {line.rstrip()}", flush=True)
 
         while pending or active:
+            if time.time() >= job_deadline + 120:
+                for gpu, (process, thread, job, job_dir) in list(active.items()):
+                    process.terminate()
+                    try:
+                        process.wait(timeout=10)
+                    except subprocess.TimeoutExpired:
+                        process.kill()
+                        process.wait(timeout=10)
+                    thread.join(timeout=5)
+                    result = self._read_result(job_dir, job)
+                    if result is None:
+                        best = job_dir / "best_checkpoint.pt"
+                        meta_path = job_dir / "checkpoint_meta.json"
+                        completed_epochs = 0
+                        best_epoch = None
+                        if meta_path.is_file():
+                            try:
+                                meta = json.loads(meta_path.read_text(encoding="utf-8"))
+                                completed_epochs = int(meta.get("epoch", -1)) + 1
+                            except (OSError, ValueError, json.JSONDecodeError):
+                                completed_epochs = 0
+                        result = CampaignJobResult(
+                            job.candidate_id,
+                            "inconclusive",
+                            None,
+                            best_epoch,
+                            completed_epochs,
+                            best if best.is_file() else None,
+                            None,
+                            {},
+                            "worker_exceeded_deadline_grace",
+                        )
+                    results.append(result)
+                    active.pop(gpu)
+                break
             for gpu in range(gpu_count):
                 if gpu in active or not pending or time.time() >= job_deadline:
                     continue

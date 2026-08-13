@@ -8,6 +8,7 @@ import math
 import os
 from pathlib import Path
 import random
+import resource
 import time
 from types import MappingProxyType
 from typing import Mapping, Protocol
@@ -15,7 +16,7 @@ from typing import Mapping, Protocol
 import numpy as np
 
 from .features import FeatureBatch
-from .models.common import ModelAdapter, import_runtime_module, metadata_from_train
+from .models.common import ModelAdapter, ModelMetadata, import_runtime_module, metadata_from_train
 
 
 class TrainingContractError(ValueError):
@@ -102,6 +103,8 @@ class TrainRequest:
     train: FeatureBatch
     valid: FeatureBatch
     min_epochs: int = 1
+    checkpoint_binding: Mapping[str, str] = field(default_factory=dict)
+    model_metadata: ModelMetadata | None = None
 
 
 @dataclass(frozen=True)
@@ -226,7 +229,11 @@ def _validate_request(request: TrainRequest) -> tuple[int, int]:
     return effective, micro
 
 
-def _resume_epoch(output_dir: Path, candidate_id: str) -> int:
+def _resume_epoch(
+    output_dir: Path,
+    candidate_id: str,
+    checkpoint_binding: Mapping[str, str] | None = None,
+) -> int:
     path = output_dir / "checkpoint_meta.json"
     if not path.exists():
         return 0
@@ -236,6 +243,9 @@ def _resume_epoch(output_dir: Path, candidate_id: str) -> int:
         raise TrainingContractError(f"cannot read checkpoint metadata: {error}") from error
     if not isinstance(payload, dict) or payload.get("candidate_id") != candidate_id:
         raise TrainingContractError("checkpoint candidate_id does not match the request")
+    expected_binding = dict(checkpoint_binding or {})
+    if payload.get("checkpoint_binding", {}) != expected_binding:
+        raise TrainingContractError("checkpoint binding does not match the request")
     epoch = payload.get("epoch")
     checkpoint = payload.get("checkpoint")
     if isinstance(epoch, bool) or not isinstance(epoch, int) or epoch < 0:
@@ -264,7 +274,7 @@ def fit_candidate(
     effective, micro = _validate_request(request)
     root = Path(output_dir)
     root.mkdir(parents=True, exist_ok=True)
-    started_epoch = _resume_epoch(root, request.candidate_id)
+    started_epoch = _resume_epoch(root, request.candidate_id, request.checkpoint_binding)
     current_resume_epoch = started_epoch
     runtime = TorchTrainingBackend() if backend is None else backend
     attempted: list[int] = []
@@ -286,7 +296,9 @@ def fit_candidate(
         except RuntimeError as error:
             if not _is_cuda_oom(error):
                 raise
-            current_resume_epoch = _resume_epoch(root, request.candidate_id)
+            current_resume_epoch = _resume_epoch(
+                root, request.candidate_id, request.checkpoint_binding
+            )
             if micro > 1:
                 micro //= 2
                 while effective % micro:
@@ -405,7 +417,7 @@ class TorchTrainingBackend:
         torch.backends.cuda.matmul.allow_tf32 = True
         torch.backends.cudnn.allow_tf32 = True
 
-        metadata = metadata_from_train(request.train)
+        metadata = request.model_metadata or metadata_from_train(request.train)
         prepare_adapter_context(adapter, request.train)
         model = adapter.build(request.model_config, metadata, device)
         hardware["parameter_count"] = int(
@@ -594,6 +606,7 @@ class TorchTrainingBackend:
                     "candidate_id": request.candidate_id,
                     "epoch": epoch,
                     "checkpoint": checkpoint_path.name,
+                    "checkpoint_binding": dict(request.checkpoint_binding),
                 },
                 output_dir / "checkpoint_meta.json",
             )
@@ -612,6 +625,7 @@ class TorchTrainingBackend:
         best_payload = torch.load(best_path, map_location=device, weights_only=True)
         model.load_state_dict(best_payload["model"])
         refresh_retrieval_cache(adapter, model, device)
+        inference_started = time.monotonic()
         predictions = self._predict(
             torch,
             request.valid,
@@ -620,6 +634,13 @@ class TorchTrainingBackend:
             micro_batch_size,
             amp_enabled,
             device,
+        )
+        hardware["inference_seconds"] = time.monotonic() - inference_started
+        hardware["peak_gpu_allocated_bytes"] = int(torch.cuda.max_memory_allocated())
+        hardware["peak_gpu_reserved_bytes"] = int(torch.cuda.max_memory_reserved())
+        peak_rss = int(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)
+        hardware["process_peak_rss_bytes"] = (
+            peak_rss if os.uname().sysname == "Darwin" else peak_rss * 1024
         )
         return BackendAttemptResult(
             best_epoch=best_epoch,

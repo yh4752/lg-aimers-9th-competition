@@ -77,8 +77,8 @@ def _validate_evidence(evidence: StageEvidence) -> None:
     if not _valid_sha(evidence.campaign_config_sha256):
         raise ArtifactError("campaign config SHA-256 is invalid")
     if evidence.version == "A":
-        if evidence.prior_manifest_sha256 is not None:
-            raise ArtifactError("Version A must not have a prior manifest")
+        if evidence.prior_manifest_sha256 is not None and not _valid_sha(evidence.prior_manifest_sha256):
+            raise ArtifactError("Version A restart prior manifest SHA-256 is invalid")
     elif not _valid_sha(evidence.prior_manifest_sha256):
         raise ArtifactError(f"Version {evidence.version} requires the prior manifest SHA-256")
     if not evidence.review_members:

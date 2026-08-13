@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import importlib.metadata
+from hashlib import sha256
+import os
 import subprocess
 import sys
 import time
@@ -64,3 +66,31 @@ def run_clean_install_probe(
         versions,
         output,
     )
+
+
+def run_python_probe(
+    python: Path,
+    script: str,
+    *,
+    timeout_seconds: int = 480,
+    environment: dict[str, str] | None = None,
+) -> dict[str, object]:
+    started = time.monotonic()
+    completed = subprocess.run(
+        [str(python), "-c", script],
+        capture_output=True,
+        text=True,
+        timeout=timeout_seconds,
+        env=(None if environment is None else {**os.environ, **environment}),
+    )
+    elapsed = time.monotonic() - started
+    stdout = completed.stdout.encode("utf-8")
+    return {
+        "status": "passed" if completed.returncode == 0 and elapsed <= timeout_seconds else "failed",
+        "command": [str(python), "-c", "<frozen-five-row-probe>"],
+        "return_code": completed.returncode,
+        "elapsed_seconds": elapsed,
+        "stdout_sha256": sha256(stdout).hexdigest(),
+        "stdout_tail": completed.stdout[-4000:],
+        "stderr_tail": completed.stderr[-4000:],
+    }
