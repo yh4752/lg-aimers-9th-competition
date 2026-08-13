@@ -366,7 +366,10 @@ def _run_c(
     state = {
         "version": "C",
         "champion": _candidate_payload(selected),
-        "final_members": [_result_payload(row) for row in chosen],
+        "final_members": [
+            {**_result_payload(row), "seed": seed_jobs[next(i for i, value in enumerate(seeds) if value.candidate_id == row.candidate_id)].seed}
+            for row in chosen
+        ],
         "ensemble_status": "single_champion_retained_without_complete_both_fold_ensemble_evidence",
         "results": [_result_payload(result) for result in (*proxy, *confirmation, *seeds)],
     }
