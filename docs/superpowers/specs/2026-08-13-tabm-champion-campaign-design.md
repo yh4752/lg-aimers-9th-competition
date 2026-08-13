@@ -1,6 +1,6 @@
 # TabM Champion Campaign and DACON Submission Design
 
-**Status:** Conversationally approved; pending written-spec review
+**Status:** Audited and approved for implementation planning
 **Competition:** DACON 236743, Aimers 9기 투구 제구 성공 확률 예측 AI 온라인 해커톤
 **Rules snapshot date:** 2026-08-13 (Asia/Seoul)
 **Scope:** Fixed preprocessing, TabM-only model research, candidate verification, and fail-closed submission preparation
@@ -156,20 +156,28 @@ model artifact. Test values never refit embedding state.
 
 - binary cross entropy on member logits
 - Brier loss on member-mean probabilities
-- equal-weight BCE plus Brier hybrid
 
 All candidates report Brier regardless of training loss.
 
 ### 3.5 Optimization refinement
 
-The broad screen uses learning rate `0.0006` with AdamW, weight decay `0.0001`,
-effective batch size 4096, micro-batch size 512, and AMP enabled. After the
-winning structural configuration is known, refinement compares learning rates
-`0.0003`, `0.0006`, and `0.0009`, and dropout values centered on the winning
-default at offsets `-0.05`, `0`, and `+0.05`, clipped to `[0.0, 0.30]`.
+The broad screen compares `plateau` and `one_cycle` schedulers. Both use maximum
+learning rate `0.0006` with AdamW, weight decay `0.0001`, effective batch size
+4096, micro-batch size 512, and AMP enabled. This prevents a larger capacity
+from being rejected only because it was forced to use the P2 scheduler.
+
+After the winning structural, loss, and scheduler configuration is known,
+refinement compares learning rates `0.0003`, `0.0006`, and `0.0009`, and
+dropout values centered on the winning default at offsets `-0.05`, `0`, and
+`+0.05`, clipped to `[0.0, 0.30]`.
 
 The nine refinement combinations first run at proxy fidelity. Only the two best
 advance to full primary-fold validation.
+
+Before training, every unique architecture is built on its assigned T4 and
+must pass a one-batch forward/backward preflight. Parameter count, allocated
+VRAM, and elapsed time are recorded. An OOM or non-finite preflight rejects
+only that configuration and does not abort the independent candidates.
 
 ### 3.6 Seeds and ensembles
 
@@ -193,16 +201,22 @@ absolute wall-time deadline and a ten-minute finalization reserve. The same
 generated cell detects the hash-validated resume bundle and advances exactly
 one stage.
 
+The fixed preprocessor and encoded arrays are materialized once per fold and
+sample definition, then reused read-only by every compatible candidate. Cache
+reuse requires matching code, input-row, preprocessing-state, category-map,
+and array hashes. Candidate-specific numerical embedding state is not shared.
+
 ### 4.1 Version A: broad proxy screen
 
 **Budget:** at most 2 hours wall time on T4 x2.
 
-The screen evaluates 18 combinations:
+The screen evaluates 24 combinations:
 
-`3 capacities * 2 numerical embeddings * 3 losses`.
+`3 capacities * 2 numerical embeddings * 2 losses * 2 schedulers`.
 
 - Training years: through 2023.
-- Model-training sample: deterministic 25% hash sample of training `row_id`.
+- Model-training sample: at most 400,000 rows, allocated proportionally by
+  season and selected by a deterministic hash of training `row_id`.
 - Preprocessing fit: all allowed training rows through 2023, not the sample.
 - Validation: all 2024 rows.
 - Maximum: 8 epochs.
@@ -217,8 +231,8 @@ Four survivors advance:
 1. best overall proxy Brier;
 2. best P2 candidate;
 3. best P3-lite or P3-full candidate not already selected; and
-4. best candidate with a different loss or numerical embedding from the best
-   overall candidate.
+4. best candidate with a different loss, numerical embedding, or scheduler
+   from the best overall candidate.
 
 This diversity rule prevents a noisy proxy from eliminating an entire useful
 design axis.
@@ -230,9 +244,9 @@ design axis.
 The four survivors run on all training rows through 2023 and validate on all
 2024 rows:
 
-- maximum 30 epochs;
+- maximum 40 epochs;
 - minimum 3 epochs;
-- patience 8;
+- patience 10;
 - epoch-level atomic checkpoint;
 - validation predictions saved for every completed candidate.
 
@@ -252,15 +266,29 @@ worsens 2023 by more than `0.00010`, or has a positive weighted delta.
 **Budget:** at most 3 hours wall time on T4 x2.
 
 The nine learning-rate and dropout refinements first use the Version A proxy
-protocol. The best two run the full 2023-to-2024 fold. The refined champion is
-then trained with seeds 42, 2026, and 3407 on the full primary fold.
+protocol while retaining the winning scheduler. The best two run both full
+folds using the Version B maximum, minimum, and patience rules. Exact completed
+evidence from Version B or an earlier Version C job is reused rather than
+retrained.
 
-If the three-seed mean improves primary-fold Brier, its direction is confirmed
-on the 2022-to-2023 fold. The additional older-fold seed runs stop as soon as
-the ensemble verdict is determined or the stage deadline is reached.
+The refined configuration may replace the Version B champion only if it passes
+the same weighted temporal and per-fold gates. If both full-fold confirmations
+do not finish before the deadline, the Version B champion remains selected.
+
+The selected structure is then trained with seeds 42, 2026, and 3407 on the
+full primary fold using the same stopping rules. A previously completed seed-42
+run is reused. If a multi-seed mean improves the primary fold by at least
+`0.00003`, the additional seeds are run on the 2022-to-2023 fold until the
+ensemble verdict is determined or the stage deadline is reached.
 
 Version C compares the four eligible predictors listed in section 3.6. Equal
-averaging is performed row by row and is therefore row independent.
+averaging is performed row by row and is therefore row independent. An
+ensemble is eligible only when its primary-fold improvement over its best
+single member is at least `0.00003`, its older-fold Brier does not worsen by
+more than `0.00005`, its two-fold weighted delta is negative, and it passes the
+segment gate. Ties within `0.00002` select fewer weights, then lower measured
+inference time. If older-fold confirmation is incomplete, the single champion
+is retained.
 
 ### 4.4 Version D: final fit and evaluation-server simulation
 
@@ -268,7 +296,7 @@ averaging is performed row by row and is therefore row independent.
 
 For each selected final member, the epoch count is the rounded median of its
 `best_epoch + 1` values from completed full temporal folds and seeds, clipped to
-`[2, 30]`. That rule is fixed before final training.
+`[2, 40]`. That rule is fixed before final training.
 
 Final preprocessing fits on all 2019-2024 official training rows. Final TabM
 weights train on the same rows for the fixed epoch count without validation or
@@ -277,8 +305,9 @@ test access.
 Version D performs:
 
 - inference on the official five-row sample;
-- a 245,789-row synthetic workload made only by repeating the public sample
-  rows, used for timing and memory measurement;
+- a 245,789-row synthetic workload made only by repeating public sample feature
+  rows while assigning deterministic unique synthetic `row_id` values, used
+  only for timing and memory measurement;
 - singleton, full-batch, reversed-order, shuffled-order, and changed-batch-size
   invariance checks;
 - state hash checks before and after inference;
@@ -397,15 +426,15 @@ state, frozen model metadata, configuration, and manifest. No training data,
 validation predictions, checkpoints with optimizer state, cache, notebook, or
 log is included.
 
-`requirements.txt` initially contains only exact TabM-specific dependencies:
+`requirements.txt` initially contains only exact direct TabM-specific
+dependencies:
 
 - `tabm==0.0.3`
 - `rtdl-num-embeddings==0.0.12`
-- `rtdl-revisiting-models==0.0.2`
 
 Packages listed as preinstalled by the official server, including PyTorch,
 pandas, NumPy, SciPy, and scikit-learn, are omitted. If a clean install test
-shows that these exact three lines cannot meet the eight-minute internal limit
+shows that these exact two lines cannot meet the eight-minute internal limit
 without changing preinstalled packages, packaging stops for a reviewed
 dependency strategy; it does not silently vendor or change versions.
 
@@ -422,8 +451,9 @@ dependency strategy; it does not silently vendor or change versions.
 
 ### 9.2 Row independence
 
-For canonical eight-decimal probabilities, all of the following must match by
-`row_id`:
+Production inference runs in FP32 without autocast. Preprocessed feature arrays
+must match exactly, and prediction paths must have maximum absolute probability
+difference at most `0.000001` by `row_id` for all of the following:
 
 - row alone;
 - row in the full batch;
@@ -475,3 +505,28 @@ runtime, rerun safety, success text, and exact error text to return.
 - Rules reminder: https://dacon.io/competitions/official/236743/talkboard/417094?page=1&dtype=recent
 - Generic code-submission guide: https://cfiles.dacon.co.kr/competitions/236564/guide.html
 - Anti-cheating policy: https://dacon.io/notice/notice/13
+
+## 12. Pre-implementation audit corrections
+
+The written design was checked against the live official pages, repository
+contracts, prior Stage 1-5 evidence, and current PyPI metadata before
+implementation planning. The audit changed the conversational draft in these
+material ways:
+
+- scheduler became a search axis so larger TabM capacities are not judged only
+  with the P2 schedule;
+- the unvalidated hybrid loss was removed to keep the broad screen within the
+  fixed compute budget;
+- proxy sampling was aligned with the already tested deterministic,
+  season-proportional 400,000-row protocol;
+- refined hyperparameters now require both full temporal folds before replacing
+  the Version B champion;
+- ensemble promotion now has an explicit minimum gain, older-fold, segment,
+  model-count, and latency rule;
+- Version C stopping rules and incomplete-evidence fallbacks are explicit;
+- fixed preprocessing arrays are cached once per fold with hash-bound reuse;
+- the synthetic scale test gives repeated sample rows unique synthetic IDs;
+- row-independence checks require exact feature equality and FP32 probability
+  tolerance instead of brittle eight-decimal GPU equality; and
+- the unused `rtdl-revisiting-models` dependency was removed from the candidate
+  requirements.
