@@ -155,6 +155,8 @@ def _default_process_factory(
         "-m",
         "experiments.preprocessing_campaign.run_budgeted_campaign",
         "worker",
+        "--config",
+        env["PREPROCESSING_CONFIG_PATH"],
         "--job-json",
         str(job_path),
         "--output-dir",

@@ -1,0 +1,29 @@
+{
+  "schema_version": 1,
+  "contract_id": "catboost_preprocessing_component_rules_v1",
+  "rules_version": "dacon-236743-2026-08-13",
+  "scope": "component",
+  "candidate_source": "component_only",
+  "candidate_count": 0,
+  "candidate_ids_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+  "allowed_derivations": [
+    "wave_promotion"
+  ],
+  "config_sha256": {
+    "experiments/independent_dl/configs/preprocessing_ablation_v1.json": "e322a0d5b8e0759ad189528c24a353d2dfa9342d6115cc4b361a1cd77939c09f"
+  },
+  "inference_source_paths": [
+    "experiments/catboost_preprocessing/campaign.py",
+    "experiments/catboost_preprocessing/features.py"
+  ],
+  "data_sources": [
+    "official_train",
+    "official_trackman"
+  ],
+  "fit_scope": "training_rows_only",
+  "evaluation_scope": "current_row_only",
+  "time_scope": "pre_pitch_only",
+  "external_api": false,
+  "pretrained_models": [],
+  "retrieval_corpora": []
+}

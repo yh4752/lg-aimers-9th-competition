@@ -207,12 +207,33 @@ def test_xgboost_aggressive_capacity_public_result_is_bound() -> None:
     )
     assert report["scale"] == 1.05
     assert report["mean_shift"] == "linear_extrapolated"
+    assert report["rules_review_required"] is True
+    assert report["package_blocked"] is True
+    assert report["blocked_reason"] == "evaluation_prediction_mean_shift"
     assert report["members"] == [
         {"structure": "depthwise_d6", "seed": 42, "rounds": 119},
         {"structure": "depthwise_d6", "seed": 2026, "rounds": 134},
         {"structure": "lossguide_l63", "seed": 42, "rounds": 119},
         {"structure": "lossguide_l63", "seed": 2026, "rounds": 106},
     ]
+
+
+def test_operational_docs_require_current_rules_gates() -> None:
+    combined = "\n".join(
+        read_text(path)
+        for path in ("AGENTS.md", "docs/EXPERIMENT_CONTRACT.md", "README.md")
+    )
+    for phrase in (
+        "dacon-236743-2026-08-13",
+        "experiment_contract.json",
+        "current_row_only",
+        "competition_rules",
+        "submission/package.py",
+        "규칙을 통과하지 못하면",
+        "팀·계정",
+        "일일 제출",
+    ):
+        assert phrase in combined
 
 
 def test_agents_default_to_broad_performance_exploration() -> None:

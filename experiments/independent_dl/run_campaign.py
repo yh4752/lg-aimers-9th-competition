@@ -3,14 +3,20 @@
 from __future__ import annotations
 
 import argparse
+from dataclasses import replace
 import json
 from pathlib import Path
+
+from competition_rules.contract import assert_experiment_runnable
 
 from .campaign import OfficialCampaignRuntime, run_campaign
 from .contracts import load_campaign
 
 
 _FAMILIES = ("tabm", "mlp_resnet", "ft_transformer", "tabr", "tabicl_v2")
+_PROJECT_ROOT = Path(__file__).resolve().parents[2]
+_RULES_CONTRACT = Path(__file__).with_name("experiment_contract.json")
+_DEFAULT_CONFIG = Path(__file__).with_name("configs") / "campaign_v1.json"
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -90,7 +96,21 @@ def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     output_dir = Path(args.output_dir).resolve()
     if args.action == "run":
+        gate = assert_experiment_runnable(
+            project_root=_PROJECT_ROOT,
+            contract_path=_RULES_CONTRACT,
+            config_path=args.config,
+        )
         campaign = load_campaign(args.config)
+        covered = set(gate["covered_candidate_ids"])
+        campaign = replace(
+            campaign,
+            candidates=tuple(
+                candidate
+                for candidate in campaign.candidates
+                if candidate.candidate_id in covered
+            ),
+        )
         runtime = OfficialCampaignRuntime(
             args.data_dir, cache_root=output_dir / "feature_cache"
         )
@@ -126,6 +146,12 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 0
     if args.action == "handoff":
+        assert_experiment_runnable(
+            project_root=_PROJECT_ROOT,
+            contract_path=_RULES_CONTRACT,
+            config_path=_DEFAULT_CONFIG,
+            candidate_ids=[args.candidate_id],
+        )
         from .handoff import write_candidate_handoff
 
         result = write_candidate_handoff(

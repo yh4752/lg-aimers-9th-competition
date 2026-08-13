@@ -8,6 +8,7 @@ import math
 import os
 from pathlib import Path
 import random
+import resource
 import time
 import traceback
 from types import MappingProxyType
@@ -18,6 +19,7 @@ import numpy as np
 from .features import FeatureBatch
 from .models.common import (
     ModelAdapter,
+    ModelMetadata,
     attach_progress_reporter,
     import_runtime_module,
     metadata_from_train,
@@ -108,6 +110,9 @@ class TrainRequest:
     training_config: Mapping[str, object]
     train: FeatureBatch
     valid: FeatureBatch
+    min_epochs: int = 1
+    checkpoint_binding: Mapping[str, str] = field(default_factory=dict)
+    model_metadata: ModelMetadata | None = None
 
 
 @dataclass(frozen=True)
@@ -120,6 +125,7 @@ class BackendAttemptResult:
     completed_epochs: int = 0
     validation_curve: tuple[tuple[int, float], ...] = ()
     validation_time_curve: tuple[tuple[int, float, float], ...] = ()
+    budget_reached: bool = False
 
 
 @dataclass(frozen=True)
@@ -137,6 +143,7 @@ class TrainResult:
     completed_epochs: int = 0
     validation_curve: tuple[tuple[int, float], ...] = ()
     validation_time_curve: tuple[tuple[int, float, float], ...] = ()
+    budget_reached: bool = False
 
 
 class TrainingBackend(Protocol):
@@ -309,6 +316,9 @@ def _validate_request(request: TrainRequest) -> tuple[int, int]:
         raise TrainingContractError("candidate_id must not be empty")
     if request.train.y is None or request.valid.y is None:
         raise TrainingContractError("train and validation targets are required")
+    minimum = _positive_integer(request.min_epochs, "min_epochs")
+    if minimum > request.epochs:
+        raise TrainingContractError("min_epochs must not exceed epochs")
     if len(request.train.x_num) != len(request.train.y):
         raise TrainingContractError("training features and targets are not aligned")
     if len(request.valid.x_num) != len(request.valid.y):
@@ -326,7 +336,11 @@ def _validate_request(request: TrainRequest) -> tuple[int, int]:
     return effective, micro
 
 
-def _resume_epoch(output_dir: Path, candidate_id: str) -> int:
+def _resume_epoch(
+    output_dir: Path,
+    candidate_id: str,
+    checkpoint_binding: Mapping[str, str] | None = None,
+) -> int:
     path = output_dir / "checkpoint_meta.json"
     if not path.exists():
         return 0
@@ -336,6 +350,9 @@ def _resume_epoch(output_dir: Path, candidate_id: str) -> int:
         raise TrainingContractError(f"cannot read checkpoint metadata: {error}") from error
     if not isinstance(payload, dict) or payload.get("candidate_id") != candidate_id:
         raise TrainingContractError("checkpoint candidate_id does not match the request")
+    expected_binding = dict(checkpoint_binding or {})
+    if payload.get("checkpoint_binding", {}) != expected_binding:
+        raise TrainingContractError("checkpoint binding does not match the request")
     epoch = payload.get("epoch")
     checkpoint = payload.get("checkpoint")
     if isinstance(epoch, bool) or not isinstance(epoch, int) or epoch < 0:
@@ -372,7 +389,7 @@ def fit_candidate(
     )
     attach_progress_reporter(adapter, reporter)
     configure_adapter_output(adapter, root)
-    started_epoch = _resume_epoch(root, request.candidate_id)
+    started_epoch = _resume_epoch(root, request.candidate_id, request.checkpoint_binding)
     current_resume_epoch = started_epoch
     runtime = TorchTrainingBackend() if backend is None else backend
     attempted: list[int] = []
@@ -396,7 +413,9 @@ def fit_candidate(
             except RuntimeError as error:
                 if not _is_cuda_oom(error):
                     raise
-                current_resume_epoch = _resume_epoch(root, request.candidate_id)
+                current_resume_epoch = _resume_epoch(
+                    root, request.candidate_id, request.checkpoint_binding
+                )
                 if micro > 1:
                     micro //= 2
                     while effective % micro:
@@ -442,6 +461,7 @@ def fit_candidate(
                 (int(epoch), float(elapsed), float(brier))
                 for epoch, elapsed, brier in attempt.validation_time_curve
             ),
+            budget_reached=bool(attempt.budget_reached),
         )
         reporter.emit(
             "CANDIDATE_COMPLETED",
@@ -544,9 +564,12 @@ class TorchTrainingBackend:
         torch.backends.cuda.matmul.allow_tf32 = True
         torch.backends.cudnn.allow_tf32 = True
 
-        metadata = metadata_from_train(request.train)
+        metadata = request.model_metadata or metadata_from_train(request.train)
         prepare_adapter_context(adapter, request.train)
         model = adapter.build(request.model_config, metadata, device)
+        hardware["parameter_count"] = int(
+            sum(parameter.numel() for parameter in model.parameters())
+        )
         if activation_checkpointing and hasattr(model, "enable_activation_checkpointing"):
             model.enable_activation_checkpointing()
         optimizer = adapter.optimizer(model, request.training_config)
@@ -753,6 +776,7 @@ class TorchTrainingBackend:
                     "epoch": epoch,
                     "checkpoint": checkpoint_path.name,
                     "adapter_state": current_adapter_state,
+                    "checkpoint_binding": dict(request.checkpoint_binding),
                 },
                 output_dir / "checkpoint_meta.json",
             )
@@ -766,7 +790,7 @@ class TorchTrainingBackend:
                 epoch_seconds=time.monotonic() - epoch_started,
                 checkpoint=checkpoint_path,
             )
-            if stale_epochs >= patience:
+            if epoch + 1 >= request.min_epochs and stale_epochs >= patience:
                 break
 
         if best_epoch < 0 or not best_path.is_file():
@@ -774,6 +798,7 @@ class TorchTrainingBackend:
         best_payload = torch.load(best_path, map_location=device, weights_only=True)
         model.load_state_dict(best_payload["model"])
         refresh_retrieval_cache(adapter, model, device)
+        inference_started = time.monotonic()
         predictions = self._predict(
             torch,
             request.valid,
@@ -785,6 +810,13 @@ class TorchTrainingBackend:
             reporter=reporter,
             stream="validation_best_checkpoint",
         )
+        hardware["inference_seconds"] = time.monotonic() - inference_started
+        hardware["peak_gpu_allocated_bytes"] = int(torch.cuda.max_memory_allocated())
+        hardware["peak_gpu_reserved_bytes"] = int(torch.cuda.max_memory_reserved())
+        peak_rss = int(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)
+        hardware["process_peak_rss_bytes"] = (
+            peak_rss if os.uname().sysname == "Darwin" else peak_rss * 1024
+        )
         return BackendAttemptResult(
             best_epoch=best_epoch,
             best_brier=best_brier,
@@ -794,6 +826,7 @@ class TorchTrainingBackend:
             completed_epochs=len(validation_curve),
             validation_curve=tuple(validation_curve),
             validation_time_curve=tuple(validation_time_curve),
+            budget_reached=budget_reached,
         )
 
     @staticmethod

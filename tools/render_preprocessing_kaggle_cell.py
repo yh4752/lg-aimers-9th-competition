@@ -10,22 +10,25 @@ import subprocess
 
 
 ROOT = Path(__file__).resolve().parents[1]
-RUNTIME_COMMIT = "9a88d2e2ad482a637a72179bb2fc65df72e79704"
 OUTPUT = ROOT / "experiments/preprocessing_campaign/KAGGLE_CELL.py"
 
 
-def _archive() -> bytes:
+def _archive() -> tuple[str, bytes]:
+    commit = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=ROOT, check=True,
+        stdout=subprocess.PIPE, text=True,
+    ).stdout.strip()
     completed = subprocess.run(
-        ["git", "archive", "--format=tar", RUNTIME_COMMIT, "experiments"],
+        ["git", "archive", "--format=tar", commit, "competition_rules", "experiments"],
         cwd=ROOT,
         check=True,
         stdout=subprocess.PIPE,
     )
-    return gzip.compress(completed.stdout, compresslevel=9, mtime=0)
+    return commit, gzip.compress(completed.stdout, compresslevel=9, mtime=0)
 
 
 def main() -> None:
-    archive = _archive()
+    commit, archive = _archive()
     encoded = base64.b64encode(archive).decode("ascii")
     digest = sha256(archive).hexdigest()
     template = '''from __future__ import annotations
@@ -49,7 +52,7 @@ MAX_JOBS_PER_SESSION = 1
 MAX_SESSION_SECONDS = 30000
 INPUT_ROOT = Path("/kaggle/input")
 WORKING_ROOT = Path("/kaggle/working")
-REPO_DIR = WORKING_ROOT / "preprocessing_embedded_code_9a88d2e"
+REPO_DIR = WORKING_ROOT / "preprocessing_embedded_code___SHORT_COMMIT__"
 REQUIRED_CODE_COMMIT = "__COMMIT__"
 RUNTIME_DIR = WORKING_ROOT / "preprocessing_runtime_v1"
 CAMPAIGN_OUTPUT_DIR = WORKING_ROOT / "preprocessing_campaign_v1"
@@ -263,7 +266,8 @@ except BaseException as error:
     raise
 '''
     rendered = (
-        template.replace("__COMMIT__", RUNTIME_COMMIT)
+        template.replace("__COMMIT__", commit)
+        .replace("__SHORT_COMMIT__", commit[:7])
         .replace("__ARCHIVE__", encoded)
         .replace("__SHA256__", digest)
     )
