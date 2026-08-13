@@ -17,6 +17,8 @@ from zipfile import BadZipFile, ZipFile
 import numpy as np
 import pandas as pd
 
+from competition_rules.contract import assert_experiment_runnable
+
 from .budgeted_contracts import BudgetedCampaign, BudgetedJob, load_budgeted_campaign
 from .budgeted_decisions import (
     DecisionError,
@@ -31,6 +33,10 @@ from .budgeted_scheduler import BudgetedScheduler, SchedulerSummary
 
 class StageNeedsReview(RuntimeError):
     """Raised when automatic stage selection would require guessing."""
+
+
+_PROJECT_ROOT = Path(__file__).resolve().parents[2]
+_RULES_CONTRACT = Path(__file__).with_name("experiment_contract.json")
 
 
 @dataclass(frozen=True)
@@ -1328,6 +1334,7 @@ def _parser() -> argparse.ArgumentParser:
     auto.add_argument("--output-root", required=True)
     auto.add_argument("--session-started-unix", required=True, type=float)
     worker = subparsers.add_parser("worker")
+    worker.add_argument("--config", default=os.environ.get("PREPROCESSING_CONFIG_PATH"))
     worker.add_argument("--job-json", required=True)
     worker.add_argument("--output-dir", required=True)
     worker.add_argument("--deadline-unix", required=True, type=float)
@@ -1343,6 +1350,12 @@ def _parser() -> argparse.ArgumentParser:
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     if args.action == "auto":
+        assert_experiment_runnable(
+            project_root=_PROJECT_ROOT,
+            contract_path=_RULES_CONTRACT,
+            config_path=args.config,
+        )
+        os.environ["PREPROCESSING_CONFIG_PATH"] = str(Path(args.config).resolve())
         os.environ["PREPROCESSING_DATA_DIR"] = str(Path(args.data_dir).resolve())
         cache_root = Path(args.output_root).resolve() / "cache"
         os.environ["PREPROCESSING_CACHE_ROOT"] = str(cache_root)
@@ -1355,8 +1368,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         return 0
     if args.action == "worker":
-        if not args.data_dir or not args.cache_root:
-            raise ValueError("worker data and cache roots are required")
+        if not args.config or not args.data_dir or not args.cache_root:
+            raise ValueError("worker config, data, and cache roots are required")
+        assert_experiment_runnable(
+            project_root=_PROJECT_ROOT,
+            contract_path=_RULES_CONTRACT,
+            config_path=args.config,
+        )
         run_worker(
             job_json=args.job_json,
             output_dir=args.output_dir,

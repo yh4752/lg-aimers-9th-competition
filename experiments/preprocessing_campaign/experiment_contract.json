@@ -3,14 +3,15 @@
   "contract_id": "budgeted_preprocessing_rules_v1",
   "rules_version": "dacon-236743-2026-08-13",
   "scope": "config_bound_campaign",
-  "candidate_source": "budgeted_jobs",
-  "candidate_count": 12,
-  "candidate_ids_sha256": "12bf59aed862a197402aef55c8ef34ed28f6ae04980a659496b044e2ae4d66e5",
+  "candidate_source": "preprocessing_and_budgeted_jobs",
+  "candidate_count": 772,
+  "candidate_ids_sha256": "da370524ee593e184b4b5b0aaaafe4a98c4ae083c935e1319ad2abb7d4267c23",
   "allowed_derivations": [
     "wave_promotion"
   ],
   "config_sha256": {
-    "experiments/preprocessing_campaign/configs/budgeted_campaign_v1.json": "99deaa32e5d9616a0f50625ac38eda73df2d472dd54d75ff26fda00ef9f3958b"
+    "experiments/preprocessing_campaign/configs/budgeted_campaign_v1.json": "99deaa32e5d9616a0f50625ac38eda73df2d472dd54d75ff26fda00ef9f3958b",
+    "experiments/independent_dl/configs/preprocessing_ablation_v1.json": "e322a0d5b8e0759ad189528c24a353d2dfa9342d6115cc4b361a1cd77939c09f"
   },
   "inference_source_paths": [
     "experiments/preprocessing_campaign/budgeted_runtime.py",

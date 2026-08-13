@@ -2,6 +2,7 @@
 
 from .contract import (
     RulesContractError,
+    assert_experiment_runnable,
     load_policy,
     load_policy_review,
     policy_digest,
@@ -16,6 +17,7 @@ from .code_gate import (
 
 __all__ = [
     "RulesContractError",
+    "assert_experiment_runnable",
     "load_policy",
     "load_policy_review",
     "policy_digest",

@@ -360,6 +360,20 @@ def _derived_candidate_ids(
             for stage_id in sorted(campaign.stages)
             for job in campaign.stages[stage_id]
         ]
+    if source == "preprocessing_and_budgeted_jobs":
+        preprocessing = _derived_candidate_ids(
+            "preprocessing_wave_a",
+            root=root,
+            config_paths=config_paths,
+            explicit=None,
+        )
+        budgeted = _derived_candidate_ids(
+            "budgeted_jobs",
+            root=root,
+            config_paths=config_paths,
+            explicit=None,
+        )
+        return [*preprocessing, *budgeted]
     raise RulesContractError("candidate_source is invalid")
 
 
@@ -453,4 +467,46 @@ def validate_experiment_contract(
         raise RulesContractError("candidate_ids_sha256 does not match derived candidates")
     if candidate_id is not None and candidate_id not in candidate_ids:
         raise RulesContractError(f"candidate is not covered: {candidate_id}")
-    return payload
+    report = dict(payload)
+    report["covered_candidate_ids"] = candidate_ids
+    return report
+
+
+def assert_experiment_runnable(
+    *,
+    project_root: str | Path,
+    contract_path: str | Path,
+    config_path: str | Path,
+    candidate_ids: list[str] | tuple[str, ...] | None = None,
+) -> dict[str, object]:
+    """Validate current policy, experiment contract, candidates, and source."""
+
+    root = Path(project_root).expanduser().resolve(strict=True)
+    policy = load_policy(root / "competition_rules/policy.json", project_root=root)
+    contract = validate_experiment_contract(
+        contract_path,
+        project_root=root,
+        config_path=config_path,
+    )
+    if contract["rules_version"] != policy["policy_version"]:
+        raise RulesContractError("experiment contract does not match current policy")
+    covered = contract["covered_candidate_ids"]
+    if candidate_ids is not None:
+        if not isinstance(candidate_ids, (list, tuple)) or any(
+            not isinstance(item, str) or not item for item in candidate_ids
+        ):
+            raise RulesContractError("candidate_ids are invalid")
+        missing = sorted(set(candidate_ids) - set(covered))
+        if missing:
+            raise RulesContractError(f"candidate is not covered: {missing[0]}")
+    from .code_gate import inspect_inference_source
+
+    source_gate = inspect_inference_source(
+        contract["inference_source_paths"], project_root=root
+    )
+    return {
+        **contract,
+        "status": "passed",
+        "policy_sha256": policy_digest(policy),
+        "source_gate": source_gate,
+    }

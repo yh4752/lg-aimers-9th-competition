@@ -14,6 +14,8 @@ from typing import Mapping
 
 import pandas as pd
 
+from competition_rules.contract import assert_experiment_runnable
+
 from experiments.catboost_preprocessing.campaign import (
     CatBoostPreprocessingRuntime,
     expand_catboost_jobs,
@@ -28,6 +30,13 @@ from experiments.independent_dl.preprocessing_contracts import (
     PreprocessingJob,
     PreprocessingSetting,
     load_preprocessing_campaign,
+)
+
+
+_PROJECT_ROOT = Path(__file__).resolve().parents[2]
+_RULES_CONTRACT = Path(__file__).with_name("experiment_contract.json")
+_DEFAULT_CONFIG = (
+    _PROJECT_ROOT / "experiments/independent_dl/configs/preprocessing_ablation_v1.json"
 )
 
 
@@ -358,6 +367,11 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps({"waves": counts, "output_root": str(root)}, indent=2))
         return 0
     if args.action == "summarize":
+        assert_experiment_runnable(
+            project_root=_PROJECT_ROOT,
+            contract_path=_RULES_CONTRACT,
+            config_path=_DEFAULT_CONFIG,
+        )
         root = Path(args.output_dir).resolve()
         manifest = _read_json(root / "campaign_manifest.json")
         entries = manifest.get("jobs", {})
@@ -373,6 +387,11 @@ def main(argv: list[str] | None = None) -> int:
         _atomic_json(root / "campaign_summary.json", payload)
         print(json.dumps(payload, indent=2))
         return 0
+    assert_experiment_runnable(
+        project_root=_PROJECT_ROOT,
+        contract_path=_RULES_CONTRACT,
+        config_path=args.config,
+    )
     campaign = load_preprocessing_campaign(args.config)
     root = Path(args.output_dir).resolve()
     if args.action == "promote":

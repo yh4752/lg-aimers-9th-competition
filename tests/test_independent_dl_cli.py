@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
 from pathlib import Path
 
 from experiments.independent_dl import run_campaign as module
@@ -11,7 +12,11 @@ def test_run_cli_forwards_family_and_single_candidate_limit(
     monkeypatch, tmp_path: Path, capsys
 ) -> None:
     captured: dict[str, object] = {}
-    campaign = object()
+    @dataclass(frozen=True)
+    class Campaign:
+        candidates: tuple[object, ...] = ()
+
+    campaign = Campaign()
     summary = CampaignSummary(
         campaign_id="tiny",
         completed=(),
@@ -22,6 +27,11 @@ def test_run_cli_forwards_family_and_single_candidate_limit(
     )
     monkeypatch.setattr(module, "load_campaign", lambda path: campaign)
     monkeypatch.setattr(module, "OfficialCampaignRuntime", lambda *args, **kwargs: object())
+    monkeypatch.setattr(
+        module,
+        "assert_experiment_runnable",
+        lambda **kwargs: {"covered_candidate_ids": ()},
+    )
 
     def fake_run_campaign(*args, **kwargs):
         captured.update(kwargs)

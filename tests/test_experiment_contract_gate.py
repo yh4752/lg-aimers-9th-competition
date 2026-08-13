@@ -26,6 +26,8 @@ def test_active_experiment_contracts_are_current_and_hash_bound() -> None:
         "experiments/preprocessing_campaign/experiment_contract.json": {
             "experiments/preprocessing_campaign/configs/budgeted_campaign_v1.json":
                 "99deaa32e5d9616a0f50625ac38eda73df2d472dd54d75ff26fda00ef9f3958b",
+            "experiments/independent_dl/configs/preprocessing_ablation_v1.json":
+                "e322a0d5b8e0759ad189528c24a353d2dfa9342d6115cc4b361a1cd77939c09f",
         },
         "experiments/catboost_preprocessing/experiment_contract.json": {
             "experiments/independent_dl/configs/preprocessing_ablation_v1.json":
