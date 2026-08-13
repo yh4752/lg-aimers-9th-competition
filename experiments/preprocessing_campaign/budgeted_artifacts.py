@@ -351,19 +351,6 @@ def _write_resume_zip(
     path: Path,
     root: Path, *, stage_id: int, campaign_id: str
 ) -> None:
-    manifest_path = root / "campaign_manifest.json"
-    if not manifest_path.is_file():
-        manifest_bytes = _json_bytes({"schema_version": 1, "jobs": {}})
-    else:
-        manifest_bytes = manifest_path.read_bytes()
-    small_members = {
-        "campaign_manifest.json": manifest_bytes,
-        "stage_state.json": (
-            (root / "stage_state.json").read_bytes()
-            if (root / "stage_state.json").is_file()
-            else _json_bytes({"completed_stage": 0})
-        ),
-    }
     resumable_paths: list[Path] = []
     jobs_root = root / "jobs"
     if jobs_root.is_dir():
@@ -379,6 +366,36 @@ def _write_resume_zip(
         resumable_paths.extend(
             source for source in workers_root.rglob("*") if source.is_file()
         )
+    resumable_names = {
+        source.relative_to(root).as_posix() for source in resumable_paths
+    }
+    manifest = _read_json(
+        root / "campaign_manifest.json", {"schema_version": 1, "jobs": {}}
+    )
+    if not isinstance(manifest, dict):
+        manifest = {"schema_version": 1, "jobs": {}}
+    jobs = manifest.get("jobs")
+    if isinstance(jobs, dict):
+        for entry in jobs.values():
+            if not isinstance(entry, dict) or not isinstance(
+                entry.get("artifacts"), list
+            ):
+                continue
+            entry["artifacts"] = [
+                artifact
+                for artifact in entry["artifacts"]
+                if isinstance(artifact, dict)
+                and str(artifact.get("path", "")) in resumable_names
+            ]
+    manifest_bytes = _json_bytes(manifest)
+    small_members = {
+        "campaign_manifest.json": manifest_bytes,
+        "stage_state.json": (
+            (root / "stage_state.json").read_bytes()
+            if (root / "stage_state.json").is_file()
+            else _json_bytes({"completed_stage": 0})
+        ),
+    }
     file_records = [
         {
             "path": name,

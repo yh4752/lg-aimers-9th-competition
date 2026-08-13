@@ -33,6 +33,7 @@ class TabNetAdapter:
                 input_dim = metadata.n_num_features + embedding_dim * len(
                     metadata.categorical_cardinalities
                 )
+                group_attention_matrix = torch.eye(input_dim, device=device)
                 self.tabnet = tab_network.TabNetNoEmbeddings(
                     input_dim=input_dim,
                     output_dim=1,
@@ -42,6 +43,7 @@ class TabNetAdapter:
                     gamma=float(model_config["gamma"]),
                     momentum=float(model_config["momentum"]),
                     mask_type=str(model_config["mask_type"]),
+                    group_attention_matrix=group_attention_matrix,
                 )
 
             def forward(self, x_num: object, x_cat: object) -> tuple[object, object]:

@@ -66,6 +66,14 @@ def _fixture_campaign(root: Path, *, completed_stage: int = 1) -> Path:
                         "sha256": sha256(
                             (job_root / "metrics.json").read_bytes()
                         ).hexdigest(),
+                        "size_bytes": (job_root / "metrics.json").stat().st_size,
+                    },
+                    {
+                        "path": f"jobs/{job_id}/best_checkpoint.pt",
+                        "sha256": sha256(
+                            (job_root / "best_checkpoint.pt").read_bytes()
+                        ).hexdigest(),
+                        "size_bytes": (job_root / "best_checkpoint.pt").stat().st_size,
                     }
                 ],
             }
@@ -127,6 +135,12 @@ def test_stage_writes_separate_resume_and_small_review_bundles(
             name.startswith("jobs/") and name.endswith(".pt")
             for name in archive.namelist()
         )
+        resume_manifest = json.loads(archive.read("campaign_manifest.json"))
+        artifact_paths = {
+            artifact["path"]
+            for artifact in resume_manifest["jobs"]["s1__tabm_fixture"]["artifacts"]
+        }
+        assert artifact_paths == {"jobs/s1__tabm_fixture/metrics.json"}
 
 
 def test_review_contains_wide_aligned_predictions(tmp_path: Path) -> None:
