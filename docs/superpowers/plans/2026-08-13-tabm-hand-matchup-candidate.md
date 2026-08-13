@@ -1,5 +1,9 @@
 # TabM Hand-Matchup Candidate Implementation Plan
 
+> **Status: Superseded. Do not execute this plan.** The approved replacement
+> design is `docs/superpowers/specs/2026-08-13-tabm-champion-campaign-design.md`.
+> A new implementation plan will be written only after that design is reviewed.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Build one rules-compliant candidate using only the approved `dl_standard + hand_matchup` preprocessing and the validated TabM P2 model, stopping at a review bundle until all submission gates pass.
