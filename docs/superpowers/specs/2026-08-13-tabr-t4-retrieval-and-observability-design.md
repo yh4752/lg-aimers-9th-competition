@@ -1,8 +1,8 @@
-# TabR T4 Retrieval and Observability Design
+# T4 TabR Retrieval and Independent DL Observability Design
 
 ## 목적
 
-현재 TabR은 약 122만 학습 행 전체를 매 배치마다 PyTorch 완전탐색하여 첫 배치도 현실적인 시간 안에 끝내지 못한다. 모델 용량과 retrieval 수를 축소하지 않고 검색 경로를 고쳐, Tesla T4에서 P1 후보를 4~6시간 안에 실행 가능하게 만든다. 사용자는 Colab 화면과 Drive 로그에서 실제 진행 여부를 확인할 수 있어야 한다.
+현재 TabR은 약 122만 학습 행 전체를 매 배치마다 PyTorch 완전탐색하여 첫 배치도 현실적인 시간 안에 끝내지 못한다. 모델 용량과 retrieval 수를 축소하지 않고 검색 경로를 고쳐, Tesla T4에서 P1 후보를 4~6시간 안에 실행 가능하게 만든다. 또한 TabM, MLP/ResNet, FT-Transformer, TabR의 모든 일반 학습 후보에서 사용자가 Colab 화면과 Drive 로그로 실제 진행 여부를 확인할 수 있게 한다.
 
 ## 고정 조건
 
@@ -11,7 +11,7 @@
 - validation/test 행은 서로를 검색 후보로 사용하지 않는다.
 - 출력 행을 단독·역순·셔플·다른 배치 크기로 추론해도 같은 확률이어야 한다.
 - Codex는 코드와 작은 합성 테스트만 실행한다. 전체 데이터 GPU 학습은 사용자가 실행한다.
-- 이번 변경은 TabR 검색과 관측성에 한정하며 다른 모델 구조를 바꾸지 않는다.
+- 이번 변경은 TabR 검색과 공통 학습 관측성에 한정하며 다른 모델 구조를 바꾸지 않는다.
 
 ## 검색 구조
 
@@ -26,21 +26,26 @@ FAISS GPU를 사용할 수 없으면 느린 전체 완전탐색으로 자동 후
 - 공식 구현: `yandex-research/tabular-dl-tabr`, commit `17baa9082506f8e7a0f8d11bb1e08212926a1507`
 - 논문: <https://openreview.net/pdf?id=rhgIgTSSxW>
 
-## 관측 가능한 실행 로그
+## 모든 DL 후보의 공통 실행 로그
 
-같은 구조의 한 줄 JSON heartbeat를 Colab 표준 출력과 후보 폴더의 `progress.jsonl`에 동시에 기록한다. 각 줄은 즉시 flush한다.
+TabM, MLP/ResNet, FT-Transformer, TabR이 공유하는 학습 backend에 한 줄 JSON heartbeat를 둔다. 같은 이벤트를 Colab 표준 출력과 각 후보 폴더의 `progress.jsonl`에 동시에 기록하고 즉시 flush한다. 따라서 특정 모델 adapter가 로그를 빠뜨릴 수 없다.
 
-필수 이벤트:
+모든 네 계열의 필수 이벤트:
+
+- `CANDIDATE_RUNTIME_READY`: 모델 계열, device, 학습/검증 행 수, epoch 수, batch 설정
+- `TRAINING_PROGRESS`: epoch/batch, 현재 loss, 처리 행 수, rows/sec, epoch ETA, GPU allocated/reserved/peak memory
+- `VALIDATION_PROGRESS`: 검증 완료 행 수, 전체 행 수, rows/sec, ETA, GPU 메모리
+- `EPOCH_CHECKPOINTED`: validation Brier, best Brier, epoch 시간, 체크포인트 경로
+- `CANDIDATE_COMPLETED`, `TRAINING_TIME_BUDGET_REACHED` 또는 원본 오류 traceback
+
+TabR 추가 이벤트:
 
 - `TABR_CONTEXT_ENCODING_PROGRESS`: 인코딩한 학습 행 수, 전체 행 수, rows/sec, ETA
 - `TABR_INDEX_READY`: 인덱스 종류, 벡터 수, 차원, 생성 시간, GPU 메모리
 - `TABR_SEARCH_PROGRESS`: 현재 epoch/batch, 검색한 query 수, queries/sec, ETA
-- `TRAINING_PROGRESS`: epoch/batch, loss, 처리 행 수, rows/sec, GPU allocated/reserved/peak memory
-- `EPOCH_CHECKPOINTED`: validation Brier, best Brier, epoch 시간, 체크포인트 경로
 - `TABR_CONTEXTS_FROZEN`: 고정 시점과 고정 이웃 shape/hash
-- `TRAINING_TIME_BUDGET_REACHED` 또는 원본 오류 traceback
 
-긴 연산은 행 chunk마다 진행량을 갱신하며, 화면 로그는 최대 60초 간격을 넘기지 않는다. 별도 생존 메시지만 출력하지 않고 완료 행 수와 처리량을 함께 출력한다. 처리량이 0이거나 같은 완료 행 수가 5분 이상 유지되면 `TABR_STALL_WARNING`을 출력한다. 첫 `TABR_INDEX_READY` 또는 실질 처리 로그가 10분 안에 나오지 않으면 안전하게 실패시킨다.
+긴 연산은 행 chunk마다 진행량을 갱신하며, 화면 로그는 최대 60초 간격을 넘기지 않는다. 별도 생존 메시지만 출력하지 않고 완료 행 수와 처리량을 함께 출력한다. 처리량이 0이거나 같은 완료 행 수가 5분 이상 유지되면 `TRAINING_STALL_WARNING`을 출력한다. 시작 후 10분 안에 실질 처리 로그가 없으면 안전하게 실패시킨다. TabR은 `TABR_INDEX_READY`도 초기 진행 조건에 포함한다.
 
 `progress.jsonl`은 append-only이며 재개 시 기존 기록을 보존한다. 각 이벤트에는 UTC 시각, candidate ID, fold, process ID와 checkpoint epoch를 포함해 이전 실행과 현재 실행을 구분한다.
 
@@ -59,7 +64,8 @@ FAISS GPU를 사용할 수 없으면 느린 전체 완전탐색으로 자동 후
 - FAISS 후보를 정확 거리로 재정렬한 결과가 작은 전체 완전탐색 결과와 같다.
 - self-neighbor가 제외되고 학습 fold 밖 행은 인덱스에 들어가지 않는다.
 - singleton/reverse/shuffle/rebatch 예측이 일치한다.
-- heartbeat가 진행량·처리량·GPU 메모리·ETA를 포함하고 `progress.jsonl`에도 동일하게 기록된다.
+- TabM, MLP/ResNet, FT-Transformer, TabR의 공통 heartbeat가 진행량·처리량·GPU 메모리·ETA를 포함하고 `progress.jsonl`에도 동일하게 기록된다.
+- FT-Transformer의 학습과 검증 양쪽에서 60초 이내 간격으로 실질 진행 이벤트가 발생한다.
 - 정체와 10분 초기 진행 제한이 fail-closed로 작동한다.
 - 체크포인트 재개 시 잘못된 검색 identity는 거부하고 올바른 identity는 재사용한다.
 
