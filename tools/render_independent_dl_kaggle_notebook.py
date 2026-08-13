@@ -26,7 +26,8 @@ def _git(*arguments: str) -> bytes:
 def _archive() -> tuple[str, bytes]:
     commit = _git("rev-parse", "HEAD").decode().strip()
     tar_bytes = _git(
-        "archive", "--format=tar", commit, "experiments/independent_dl"
+        "archive", "--format=tar", commit,
+        "competition_rules", "experiments/independent_dl"
     )
     return commit, gzip.compress(tar_bytes, compresslevel=9, mtime=0)
 

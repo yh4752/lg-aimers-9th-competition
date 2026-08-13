@@ -157,3 +157,13 @@ def test_uncontracted_tabicl_is_filtered_without_blocking_tabm(
 
     assert "tabm__raw_typed__p1__s42" in captured["ids"]
     assert all("tabicl_v2" not in candidate_id for candidate_id in captured["ids"])
+
+
+def test_renderers_embed_the_rules_package() -> None:
+    for relative in (
+        "tools/render_preprocessing_kaggle_cell.py",
+        "tools/render_budgeted_preprocessing_kaggle_cell.py",
+        "tools/render_independent_dl_kaggle_notebook.py",
+    ):
+        text = (ROOT / relative).read_text(encoding="utf-8")
+        assert '"competition_rules"' in text

@@ -12,13 +12,16 @@ import tarfile
 
 
 ROOT = Path(__file__).resolve().parents[1]
-RUNTIME_COMMIT = "77ed7646b62c1bcb5ab528e74abf0fe90941547d"
 OUTPUT = ROOT / "experiments/preprocessing_campaign/KAGGLE_BUDGETED_CELL.py"
 
 
-def _archive() -> bytes:
+def _archive() -> tuple[str, bytes]:
+    commit = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=ROOT, check=True,
+        stdout=subprocess.PIPE, text=True,
+    ).stdout.strip()
     completed = subprocess.run(
-        ["git", "archive", "--format=tar", RUNTIME_COMMIT, "experiments"],
+        ["git", "archive", "--format=tar", commit, "competition_rules", "experiments"],
         cwd=ROOT,
         check=True,
         stdout=subprocess.PIPE,
@@ -32,11 +35,11 @@ def _archive() -> bytes:
                     continue
                 payload = source.extractfile(member) if member.isfile() else None
                 target.addfile(member, payload)
-    return gzip.compress(filtered.getvalue(), compresslevel=9, mtime=0)
+    return commit, gzip.compress(filtered.getvalue(), compresslevel=9, mtime=0)
 
 
 def main() -> None:
-    archive = _archive()
+    commit, archive = _archive()
     encoded = base64.b64encode(archive).decode("ascii")
     digest = sha256(archive).hexdigest()
     template = '''from __future__ import annotations
@@ -59,7 +62,7 @@ SESSION_STARTED_UNIX = time.time()
 MAX_SESSION_SECONDS = 6300
 INPUT_ROOT = Path("/kaggle/input")
 WORKING_ROOT = Path("/kaggle/working")
-CODE_ROOT = WORKING_ROOT / "budgeted_preprocessing_embedded_code_77ed764"
+CODE_ROOT = WORKING_ROOT / "budgeted_preprocessing_embedded_code___SHORT_COMMIT__"
 RUNTIME_ROOT = WORKING_ROOT / "budgeted_preprocessing_runtime"
 CAMPAIGN_ROOT = WORKING_ROOT / "budgeted_preprocessing_campaign_v1"
 CONFIG_PATH = CODE_ROOT / "experiments/preprocessing_campaign/configs/budgeted_campaign_v1.json"
@@ -276,7 +279,8 @@ except BaseException as error:
     raise
 '''
     rendered = (
-        template.replace("__COMMIT__", RUNTIME_COMMIT)
+        template.replace("__COMMIT__", commit)
+        .replace("__SHORT_COMMIT__", commit[:7])
         .replace("__ARCHIVE__", encoded)
         .replace("__SHA256__", digest)
     )
