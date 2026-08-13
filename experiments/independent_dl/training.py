@@ -62,6 +62,18 @@ def progress_message(
     )
 
 
+def require_finite_validation_brier(
+    *, candidate_id: str, epoch: int, brier: float
+) -> None:
+    """Fail before persisting a checkpoint with non-finite validation evidence."""
+
+    if not math.isfinite(brier):
+        raise RuntimeError(
+            "non-finite validation Brier "
+            f"candidate={candidate_id} epoch={epoch + 1} brier={brier}"
+        )
+
+
 def _session_deadline() -> float | None:
     raw = os.environ.get("PREPROCESSING_SESSION_DEADLINE_UNIX")
     if raw is None or not raw.strip():
@@ -528,6 +540,9 @@ class TorchTrainingBackend:
             )
             target = np.asarray(request.valid.y, dtype="float64")
             brier = float(np.mean(np.square(predictions - target)))
+            require_finite_validation_brier(
+                candidate_id=request.candidate_id, epoch=epoch, brier=brier
+            )
             validation_curve.append((epoch, brier))
             elapsed_seconds = elapsed_before_resume + time.monotonic() - attempt_started
             validation_time_curve.append((epoch, elapsed_seconds, brier))

@@ -476,6 +476,16 @@ def build_stage_jobs(
         selected = _selected_model(state)
         jobs = [_bind_selected(job, selected) for job in campaign.stage_jobs(stage_id)]
         if stage_id == 3:
+            jobs = [
+                replace(
+                    job,
+                    training=MappingProxyType({**dict(job.training), "amp": False}),
+                )
+                if job.family == "tabm"
+                and job.setting_id == "id_frequency_and_oov"
+                else job
+                for job in jobs
+            ]
             cat_base = _catboost_template(campaign)
             candidates = (
                 ("pitcher_smoothing_k100", ("pitcher_smooth_k100",)),

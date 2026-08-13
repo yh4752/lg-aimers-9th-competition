@@ -196,6 +196,32 @@ def test_stage_three_includes_dl_and_catboost_single_ablations() -> None:
     assert sum(job.max_seconds for job in jobs if job.family == "catboost") / 2 <= 1200
 
 
+def test_stage_three_id_frequency_tabm_disables_amp_only_for_that_job() -> None:
+    campaign = load_budgeted_campaign(CONFIG)
+    selected = campaign.stage_jobs(1)[0]
+    state = {
+        "selected_model": {
+            "family": selected.family,
+            "profile_id": selected.profile_id,
+            "model": dict(selected.model),
+            "training": dict(selected.training),
+        }
+    }
+
+    jobs = build_stage_jobs(campaign, 3, state)
+    dl_jobs = [job for job in jobs if job.family == "tabm"]
+    treatment = next(
+        job for job in dl_jobs if job.setting_id == "id_frequency_and_oov"
+    )
+
+    assert treatment.training["amp"] is False
+    assert all(
+        job.training["amp"] is True
+        for job in dl_jobs
+        if job.setting_id != "id_frequency_and_oov"
+    )
+
+
 def test_stage_four_worst_case_fits_before_archive_reserve() -> None:
     campaign = load_budgeted_campaign(CONFIG)
     selected = campaign.stage_jobs(1)[0]
