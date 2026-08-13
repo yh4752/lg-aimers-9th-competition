@@ -25,3 +25,19 @@ def test_official_submission_archive_has_one_writer() -> None:
             ):
                 offenders.append(relative)
     assert offenders == ["submission/package.py"]
+
+
+def test_rules_contract_names_all_four_transition_gates() -> None:
+    text = (ROOT / "docs/EXPERIMENT_CONTRACT.md").read_text(encoding="utf-8")
+    positions = [
+        text.index(phrase)
+        for phrase in (
+            "실험 시작 gate",
+            "사용자 실행 gate",
+            "후보 수용 gate",
+            "패키징 gate",
+        )
+    ]
+    assert positions == sorted(positions)
+    assert "자동 업로드" in text
+    assert "평가 행의 수나 분포" in text

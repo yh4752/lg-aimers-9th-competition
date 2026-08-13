@@ -16,7 +16,8 @@
 - Calibration 고정 세 변형 감사: exact variants rejected, family open
 - XGBoost v3: exploratory accepted
 - XGBoost original preprocessing rescue: verified ready
-- XGBoost 공격적 구조·seed ensemble: Public `820.9583317093`
+- XGBoost 공격적 구조·seed ensemble: Public `820.9583317093`, 평가 분포 평균 이동
+  보정 때문에 현재 규칙 재검토 전 패키지 차단
 - 새 저장소의 실행 계약, 장부와 작은 판정 evidence 정리
 
 ## 다음 주력 순서
@@ -57,6 +58,10 @@
 - 동료 저장소 연구의 출처·누출·행 독립성 검토 후 선별 이식
 
 보조 트랙은 독립 DL 준비나 사용자 GPU 실행을 지연시키지 않는 범위에서 진행한다.
+
+모든 트랙은 `competition_rules` 정책과 후보별 `experiment_contract.json`을 먼저
+통과한다. 과거 XGBoost ZIP과 평균 이동 후처리는 새 후보의 성능 참고 자료일 뿐
+현재 제출 후보나 ensemble 구성요소로 재사용하지 않는다.
 
 Calibration은 기존 세 변형의 평균 개선과 실패 gate를 진단 근거로 사용하고, 다음
 후보의 segment·범위·수용 기준은 실행 전에 고정한다. XGBoost v3와 rescue는

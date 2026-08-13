@@ -12,6 +12,30 @@
 - Public 결과에 맞춘 사후 미세 조정을 검증된 개선으로 취급하지 않는다.
 - 비용은 실행 순서와 자원 안내에만 사용하며 후보 배제 기준으로 사용하지 않는다.
 
+## DACON 규칙 전이 gate
+
+현재 정책은 `competition_rules/policy.json`의
+`dacon-236743-2026-08-13`이다. 각 실험은 자기 설정과 후보 범위를 고정한
+`experiment_contract.json`을 가져야 하며, 평가 범위는 `current_row_only`다.
+
+1. **실험 시작 gate**: 공식 train·TrackMan만 사용하고, training rows only,
+   pre-pitch only, 외부 API 미사용, 사전학습 가중치의 출처·버전·라이선스·해시를
+   계약에 고정한다.
+2. **사용자 실행 gate**: `competition_rules`의 소스 검사에서 평가 파일 직접 읽기,
+   원격 통신, 평가 행 사이의 groupby·rank·rolling·shift와 평가 행의 수나 분포에
+   따른 분기를 거부한다.
+3. **후보 수용 gate**: 시간 전이 성능, provenance, 전체 검증 행의 repeat·reverse·
+   shuffle·rebatch·singleton 일치와 data/code/config/preprocessing/model/adapter/runtime
+   해시가 모두 맞아야 `passed`가 된다.
+4. **패키징 gate**: 당일 공식 규칙 검토, 완전한 candidate-local acceptance,
+   전체행 감사 manifest, 설치·추론·메모리·크기 benchmark와 실물 해시를 다시
+   확인한다. 생성기는 `submission/package.py` 하나뿐이다.
+
+허용되는 추론은 각 평가 행 자체의 feature, 학습 시 고정한 통계·segment·calibration,
+고정 ensemble과 row-id로 고정한 per-row TTA다. 같은 평가 배치의 다른 행을 이용한
+집계·순위·평균 이동 보정, test 파일에 대한 fit, 행 수별 특수 분기는 금지한다.
+규칙을 통과하지 못하면 해당 후보의 패키지만 차단하며 독립 후보 연구는 계속한다.
+
 ## 성능 우선 사전 확인
 
 - smoke는 import, CUDA, 데이터 흐름과 출력 형태의 기술 확인 전용이며 성능을
@@ -70,6 +94,11 @@ JSON은 중복 키, `NaN`과 `Infinity`를 허용하지 않는다. evidence와 �
 다시 검사한다. 하나라도 다르면 파일을 만들기 전에 중단한다. `passed`와 현재 해시
 검사가 모두 통과하기 전에는 제출 패키지를 만들지 않는다. 제출은 자동화하지 않으며
 사람이 evidence와 독립 추론 결과를 확인한 뒤 사용자가 수동으로 수행한다.
+
+저장소는 자동 업로드 또는 자동 제출을 제공하지 않는다. 자동화할 수 없는 최종
+확인은 팀·계정과 중복 등록 여부, 당일 일일 제출 잔여량, 대회 마감 여부, 업로드
+화면에서 고른 ZIP의 파일명·SHA-256이다. 이는 기계 gate의 `passed`로 기록하지
+않고 사용자가 제출 직전에 직접 확인한다.
 
 ## 기록
 

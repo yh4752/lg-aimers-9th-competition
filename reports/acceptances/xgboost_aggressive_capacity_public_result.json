@@ -39,5 +39,8 @@
     "comparison_report": "https://drive.google.com/file/d/1UvRG_J0Sh6Tk0Muz57Qt2fYYb0Klb751/view",
     "submission_zip": "https://drive.google.com/file/d/1ZOll0MQZXIn3nvZruAAWpxh4U55OWtwD/view"
   },
-  "public_evidence": "User-provided DACON submission history screenshot verified on 2026-08-12"
+  "public_evidence": "User-provided DACON submission history screenshot verified on 2026-08-12",
+  "rules_review_required": true,
+  "package_blocked": true,
+  "blocked_reason": "evaluation_prediction_mean_shift"
 }

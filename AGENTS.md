@@ -1,5 +1,19 @@
 # Competition execution rules
 
+## DACON 규칙 안전선
+
+- 현재 규칙은 `competition_rules/policy.json`의
+  `dacon-236743-2026-08-13`이다. 모든 실험은 코드 작성 전에 해당 디렉터리와
+  자기 범위의 `experiment_contract.json`을 읽고 검증한다.
+- 계약은 공식 train·Trackman만 사용하고, 학습은 training rows only, 평가는
+  `current_row_only`, 시간 정보는 pre-pitch only, 외부 API는 false여야 한다.
+- 사용자 전체 실행 전에는 소스 gate를, 후보 수용 전에는 전체행 독립성 evidence와
+  현재 해시를, 패키징 전에는 당일 규칙 검토·acceptance·런타임 receipt를 확인한다.
+- 공식 ZIP 생성 경로는 `submission/package.py` 하나뿐이다. 규칙을 통과하지 못하면
+  우회 코드, 수동 ZIP 코드 또는 다른 패키저를 만들지 않는다.
+- 저장소는 자동 업로드·자동 제출하지 않는다. 팀·계정, 중복 참가, 일일 제출 잔여량,
+  마감 여부와 업로드 화면에서 선택한 파일은 사용자가 최종 확인한다.
+
 - 변경 전에 `docs/EXPERIMENT_CONTRACT.md`, `docs/ROADMAP.md`,
   `reports/EXPERIMENT_LEDGER.md`를 읽는다.
 - 최우선 목표는 누출 없는 검증으로 확인한 성능 향상이다.

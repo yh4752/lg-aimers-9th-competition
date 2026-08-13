@@ -13,9 +13,10 @@
 | 닫힌 계열 | FwFM standalone 및 F 제한 blend |
 | 기각된 구성 | TabM residual, calibration의 고정 세 변형 |
 | 열린 계열 | segment-aware calibration, 독립 TabM 후보, XGBoost |
-| XGBoost v3 | 공격적 4-member ensemble, Public `820.9583317093` |
+| XGBoost v3 | Public `820.9583317093`; 현재 규칙 재검토 전 패키지 차단 |
 | XGBoost rescue | 2024 `0.24826687414041645`, technical verified, Public 미확인 |
 | 다음 주력 | Colab Pro의 독립 DL 프런티어 캠페인 |
+| 규칙 안전선 | `competition_rules` → `experiment_contract.json` → 전체행 evidence → `submission/package.py` |
 
 점수가 같은 표에 있어도 검증 프로토콜이 다르면 직접 순위를 매기지 않는다. R9은
 세 개 시즌 전이, XGBoost v3는 네 개 역사 fold 선택 후 2024 holdout을 사용했다.
@@ -30,6 +31,16 @@
 - XGBoost v3의 depth 6·63 leaves 4-member ensemble은 Public
   `820.9583317093`을 기록했다. 더 큰 depth 8·127·255 leaves가 자동으로 더 좋지는
   않았으며, 넓은 탐색 후 중간 용량·seed ensemble·시즌 보정을 함께 선택한 결과다.
+  다만 평가 분포 평균 이동 보정이 포함되어 현재 독립 예측 규칙 아래에서는 재사용·
+  재패키징하지 않는다. 점수는 역사 기록으로만 보존한다.
+
+## 규칙 안전선
+
+모든 ML·DL 후보는 현재 정책 `dacon-236743-2026-08-13`, 후보별
+`experiment_contract.json`, `current_row_only` 소스 gate와 전체행 독립성 감사를
+순서대로 통과해야 한다. 실제 제출 ZIP은 `submission/package.py`만 만들 수 있으며,
+규칙을 통과하지 못하면 파일 생성 전에 중단한다. 저장소는 업로드하지 않는다.
+팀·계정, 중복 참가, 일일 제출 잔여량, 마감과 업로드 파일 선택은 사용자가 확인한다.
 
 ## 문서
 
