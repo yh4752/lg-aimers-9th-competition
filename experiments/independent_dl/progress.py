@@ -223,7 +223,6 @@ class ProgressReporter:
         )
         if (
             state.last_completed_rows == 0
-            and completed == 0
             and checked_at - state.started_at >= 600.0
         ):
             raise ProgressTimeoutError(

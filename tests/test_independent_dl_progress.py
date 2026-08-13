@@ -156,6 +156,8 @@ def test_emit_interval_stall_warning_and_initial_progress_timeout(
     timeout_clock.value += 600.0
     with pytest.raises(ProgressTimeoutError, match="no substantive progress"):
         timeout_reporter.should_emit(completed_rows=0)
+    with pytest.raises(ProgressTimeoutError, match="no substantive progress"):
+        timeout_reporter.should_emit(completed_rows=1)
 
 
 @pytest.mark.parametrize(

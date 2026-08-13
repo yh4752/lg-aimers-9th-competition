@@ -186,6 +186,52 @@ def refresh_retrieval_cache(adapter: object, model: object, device: str) -> None
         refresh(model, device)
 
 
+def configure_adapter_output(adapter: object, output_dir: Path) -> None:
+    setter = getattr(adapter, "set_output_dir", None)
+    if setter is not None:
+        setter(output_dir)
+
+
+def prepare_initial_retrieval_cache(
+    adapter: object, model: object, device: str
+) -> None:
+    prepare = getattr(adapter, "prepare_initial_retrieval_cache", None)
+    if prepare is None:
+        refresh_retrieval_cache(adapter, model, device)
+    else:
+        prepare(model, device)
+
+
+def on_adapter_epoch_start(
+    adapter: object, model: object, epoch: int, device: str
+) -> None:
+    hook = getattr(adapter, "on_epoch_start", None)
+    if hook is not None:
+        hook(model, epoch, device)
+
+
+def on_adapter_epoch_end(
+    adapter: object, model: object, epoch: int, device: str
+) -> None:
+    hook = getattr(adapter, "on_epoch_end", None)
+    if hook is not None:
+        hook(model, epoch, device)
+
+
+def adapter_checkpoint_state(adapter: object) -> object | None:
+    getter = getattr(adapter, "checkpoint_state", None)
+    return None if getter is None else getter()
+
+
+def restore_adapter_checkpoint_state(
+    adapter: object, payload: object, model: object, device: str
+) -> bool:
+    restore = getattr(adapter, "restore_checkpoint_state", None)
+    if restore is None:
+        return False
+    return bool(restore(payload, model, device))
+
+
 def _fold_label(request: TrainRequest) -> str:
     train_years = np.asarray(request.train.season, dtype="int64")
     valid_years = np.unique(np.asarray(request.valid.season, dtype="int64"))
@@ -325,6 +371,7 @@ def fit_candidate(
         root,
     )
     attach_progress_reporter(adapter, reporter)
+    configure_adapter_output(adapter, root)
     started_epoch = _resume_epoch(root, request.candidate_id)
     current_resume_epoch = started_epoch
     runtime = TorchTrainingBackend() if backend is None else backend
@@ -549,8 +596,11 @@ class TorchTrainingBackend:
             np.random.set_state(payload["numpy_rng"])
             torch.set_rng_state(payload["torch_rng"])
             torch.cuda.set_rng_state_all(payload["cuda_rng"])
+            restore_adapter_checkpoint_state(
+                adapter, payload.get("adapter_state"), model, device
+            )
 
-        refresh_retrieval_cache(adapter, model, device)
+        prepare_initial_retrieval_cache(adapter, model, device)
         patience = int(request.training_config["patience"])
         stale_epochs = 0 if best_epoch < 0 else max(0, resume_epoch - 1 - best_epoch)
         deadline = _session_deadline()
@@ -561,6 +611,7 @@ class TorchTrainingBackend:
                 budget_reached = True
                 break
             epoch_started = time.monotonic()
+            on_adapter_epoch_start(adapter, model, epoch, device)
             model.train()
             order = np.random.default_rng(request.seed + epoch).permutation(
                 len(request.train.row_id)
@@ -674,6 +725,8 @@ class TorchTrainingBackend:
                 scheduler.step(brier)
             elif scheduler_mode == "epoch":
                 scheduler.step()
+            on_adapter_epoch_end(adapter, model, epoch, device)
+            current_adapter_state = adapter_checkpoint_state(adapter)
 
             state = {
                 "candidate_id": request.candidate_id,
@@ -691,6 +744,7 @@ class TorchTrainingBackend:
                 "numpy_rng": np.random.get_state(),
                 "torch_rng": torch.get_rng_state(),
                 "cuda_rng": torch.cuda.get_rng_state_all(),
+                "adapter_state": current_adapter_state,
             }
             _atomic_torch_save(torch, state, checkpoint_path)
             _atomic_json(
@@ -698,6 +752,7 @@ class TorchTrainingBackend:
                     "candidate_id": request.candidate_id,
                     "epoch": epoch,
                     "checkpoint": checkpoint_path.name,
+                    "adapter_state": current_adapter_state,
                 },
                 output_dir / "checkpoint_meta.json",
             )

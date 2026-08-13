@@ -408,3 +408,106 @@ def test_tabr_probes_faiss_gpu_before_encoding_fold_rows() -> None:
         runtime.refresh_keys(model, device="cpu")
 
     assert model.full_context_encode_calls == 0
+
+
+def test_tabr_freezes_train_neighbors_and_reuses_them_without_search(
+    tmp_path: Path,
+) -> None:
+    context = FeatureBatch(
+        row_id=np.array(["r0", "r1", "r2", "r3"]),
+        season=np.array([2023, 2023, 2023, 2023], dtype="int64"),
+        game_type=np.array(["R", "R", "F", "F"]),
+        x_num=np.array([[0.0], [1.0], [3.0], [7.0]], dtype="float32"),
+        x_cat=np.zeros((4, 1), dtype="int64"),
+        y=np.array([0.0, 1.0, 0.0, 1.0], dtype="float32"),
+    )
+    reporter = _Reporter()
+    runtime = _TorchTabRRuntime(
+        context, retrieval=2, faiss_module=_FakeFaiss(), reporter=reporter
+    )
+    runtime.configure_checkpoint(
+        tmp_path,
+        {"architecture": "tabr", "retrieval": 2, "width": 256, "blocks": 3},
+    )
+    model = _CountingKeyModel()
+    runtime.refresh_keys(model, device="cpu")
+
+    runtime.freeze_contexts(model, epoch=0, device="cpu")
+
+    frozen = np.load(tmp_path / "frozen_neighbors.npy")
+    assert frozen.shape == (4, 2)
+    assert all(row not in frozen[row].tolist() for row in range(4))
+    state = runtime.checkpoint_state()
+    assert state["policy_version"] == TABR_SEARCH_POLICY["version"]
+    assert state["frozen_neighbors_shape"] == [4, 2]
+    assert len(state["frozen_neighbors_sha256"]) == 64
+    frozen_event = [
+        fields
+        for event, fields in reporter.events
+        if event == "TABR_CONTEXTS_FROZEN"
+    ][0]
+    assert set(frozen_event) == {"epoch", "shape", "sha256"}
+
+    class _NoSearch:
+        @staticmethod
+        def search_and_rerank(*args, **kwargs):
+            raise AssertionError("frozen training rows must not call FAISS")
+
+    runtime._search_index = _NoSearch()
+    reused = runtime._search_keys(
+        torch.tensor([[0.0], [3.0]]), row_indices=torch.tensor([0, 2])
+    )
+    assert reused.tolist() == frozen[[0, 2]].tolist()
+
+
+def test_tabr_restores_only_matching_frozen_neighbor_identity(tmp_path: Path) -> None:
+    context = FeatureBatch(
+        row_id=np.array(["r0", "r1", "r2", "r3"]),
+        season=np.array([2023, 2023, 2023, 2023], dtype="int64"),
+        game_type=np.array(["R", "R", "F", "F"]),
+        x_num=np.array([[0.0], [1.0], [3.0], [7.0]], dtype="float32"),
+        x_cat=np.zeros((4, 1), dtype="int64"),
+        y=np.array([0.0, 1.0, 0.0, 1.0], dtype="float32"),
+    )
+    config = {
+        "architecture": "tabr",
+        "retrieval": 2,
+        "width": 256,
+        "blocks": 3,
+    }
+    source = _TorchTabRRuntime(
+        context, retrieval=2, faiss_module=_FakeFaiss()
+    )
+    source.configure_checkpoint(tmp_path, config)
+    model = _CountingKeyModel()
+    source.refresh_keys(model, device="cpu")
+    source.freeze_contexts(model, epoch=0, device="cpu")
+    state = source.checkpoint_state()
+
+    matching = _TorchTabRRuntime(
+        context, retrieval=2, faiss_module=_FakeFaiss()
+    )
+    matching.configure_checkpoint(tmp_path, config)
+    assert matching.restore_checkpoint_state(state, model, "cpu") is True
+    assert matching.has_frozen_contexts is True
+
+    changed = _TorchTabRRuntime(
+        context, retrieval=2, faiss_module=_FakeFaiss()
+    )
+    changed.configure_checkpoint(tmp_path, {**config, "width": 512})
+    assert changed.restore_checkpoint_state(state, model, "cpu") is False
+    assert changed.has_frozen_contexts is False
+
+    changed_rows = FeatureBatch(
+        row_id=np.array(["other0", "other1", "other2", "other3"]),
+        season=context.season,
+        game_type=context.game_type,
+        x_num=context.x_num,
+        x_cat=context.x_cat,
+        y=context.y,
+    )
+    changed_context = _TorchTabRRuntime(
+        changed_rows, retrieval=2, faiss_module=_FakeFaiss()
+    )
+    changed_context.configure_checkpoint(tmp_path, config)
+    assert changed_context.restore_checkpoint_state(state, model, "cpu") is False

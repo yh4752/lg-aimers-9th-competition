@@ -34,6 +34,12 @@ from experiments.independent_dl.training import (
     load_resume_payload,
     report_training_window,
     TorchTrainingBackend,
+    adapter_checkpoint_state,
+    configure_adapter_output,
+    on_adapter_epoch_end,
+    on_adapter_epoch_start,
+    prepare_initial_retrieval_cache,
+    restore_adapter_checkpoint_state,
 )
 
 
@@ -575,3 +581,47 @@ def test_prediction_reports_completed_validation_chunks() -> None:
     assert result.tolist() == [0.5] * 5
     assert [call[1]["completed_rows"] for call in reporter.calls] == [2, 4, 5]
     assert all(call[0] == "VALIDATION_PROGRESS" for call in reporter.calls)
+
+
+def test_optional_adapter_lifecycle_binds_output_epoch_and_checkpoint_state(
+    tmp_path: Path,
+) -> None:
+    class Adapter:
+        def set_output_dir(self, output_dir: Path) -> None:
+            self.output_dir = output_dir
+
+        def prepare_initial_retrieval_cache(self, model, device) -> None:
+            self.initial = (model, device)
+
+        def on_epoch_start(self, model, epoch, device) -> None:
+            self.started = (model, epoch, device)
+
+        def on_epoch_end(self, model, epoch, device) -> None:
+            self.ended = (model, epoch, device)
+
+        def checkpoint_state(self):
+            return {"search": "frozen"}
+
+        def restore_checkpoint_state(self, payload, model, device):
+            self.restored = (payload, model, device)
+            return True
+
+    adapter = Adapter()
+    model = object()
+
+    configure_adapter_output(adapter, tmp_path)
+    prepare_initial_retrieval_cache(adapter, model, "cuda")
+    on_adapter_epoch_start(adapter, model, 1, "cuda")
+    on_adapter_epoch_end(adapter, model, 1, "cuda")
+    state = adapter_checkpoint_state(adapter)
+    restored = restore_adapter_checkpoint_state(
+        adapter, state, model, "cuda"
+    )
+
+    assert adapter.output_dir == tmp_path
+    assert adapter.initial == (model, "cuda")
+    assert adapter.started == (model, 1, "cuda")
+    assert adapter.ended == (model, 1, "cuda")
+    assert state == {"search": "frozen"}
+    assert restored is True
+    assert adapter.restored == (state, model, "cuda")
