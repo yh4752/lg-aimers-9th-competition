@@ -15,7 +15,9 @@ from experiments.independent_dl.models.ft_transformer import ft_transformer_kwar
 from experiments.independent_dl.models.mlp_resnet import mlp_resnet_kwargs
 from experiments.independent_dl.models.common import quantile_bin_edges
 from experiments.independent_dl.models import common as model_common
+from experiments.independent_dl.models.common import attach_progress_reporter
 from experiments.independent_dl.models.tabm import SUPPORTED_NUM_EMBEDDINGS
+from experiments.independent_dl.progress import ProgressReporter
 from experiments.independent_dl.training import (
     BackendAttemptResult,
     TrainRequest,
@@ -29,6 +31,15 @@ from experiments.independent_dl.training import (
     enforce_session_deadline,
     progress_message,
     require_finite_validation_brier,
+    load_resume_payload,
+    report_training_window,
+    TorchTrainingBackend,
+    adapter_checkpoint_state,
+    configure_adapter_output,
+    on_adapter_epoch_end,
+    on_adapter_epoch_start,
+    prepare_initial_retrieval_cache,
+    restore_adapter_checkpoint_state,
 )
 
 
@@ -160,6 +171,23 @@ def test_resume_starts_after_last_complete_checkpoint(tmp_path: Path) -> None:
 
     assert result.started_epoch == 8
     assert backend.calls[0]["resume_epoch"] == 8
+
+
+def test_resume_checkpoint_is_loaded_on_cpu_before_rng_restore(tmp_path: Path) -> None:
+    checkpoint = tmp_path / "checkpoint.pt"
+    checkpoint.write_bytes(b"checkpoint")
+
+    class FakeTorch:
+        @staticmethod
+        def load(path, *, map_location, weights_only):
+            assert path == checkpoint
+            assert map_location == "cpu"
+            assert weights_only is False
+            return {"torch_rng": "cpu-byte-tensor"}
+
+    assert load_resume_payload(FakeTorch(), checkpoint) == {
+        "torch_rng": "cpu-byte-tensor"
+    }
 
 
 def test_expired_session_deadline_stops_at_a_safe_boundary() -> None:
@@ -383,3 +411,217 @@ def test_oom_retry_resumes_newly_completed_checkpoint(tmp_path: Path) -> None:
 
     assert result.started_epoch == 0
     assert [call["resume_epoch"] for call in backend.calls] == [0, 4]
+
+
+@pytest.mark.parametrize("family", ["tabm", "mlp_resnet", "ft_transformer", "tabr"])
+def test_fit_candidate_wires_append_only_reporter_for_every_family(
+    tmp_path: Path, family: str
+) -> None:
+    request = _request()
+    request = TrainRequest(
+        candidate_id=f"{family}__raw_typed__p1__s42",
+        family=family,
+        seed=request.seed,
+        epochs=request.epochs,
+        model_config=request.model_config,
+        training_config=request.training_config,
+        train=request.train,
+        valid=request.valid,
+    )
+    backend = _RecordingBackend()
+
+    fit_candidate(request, _FakeAdapter(), tmp_path / family, backend=backend)
+
+    reporter = backend.calls[0]["reporter"]
+    assert isinstance(reporter, ProgressReporter)
+    assert reporter.family == family
+    events = [
+        json.loads(line)["event"]
+        for line in (tmp_path / family / "progress.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
+    assert events == ["CANDIDATE_COMPLETED"]
+
+
+def test_fit_candidate_logs_failure_and_preserves_original_exception(
+    tmp_path: Path,
+) -> None:
+    class FailingBackend:
+        def run_attempt(self, **kwargs: object) -> BackendAttemptResult:
+            raise KeyError("original failure")
+
+    with pytest.raises(KeyError, match="original failure"):
+        fit_candidate(_request(), _FakeAdapter(), tmp_path, backend=FailingBackend())
+
+    event = json.loads((tmp_path / "progress.jsonl").read_text(encoding="utf-8"))
+    assert event["event"] == "CANDIDATE_FAILED"
+    assert event["error_type"] == "KeyError"
+    assert "original failure" in event["error_message"]
+    assert "Traceback" in event["traceback"]
+
+
+def test_optional_adapter_receives_the_shared_reporter(tmp_path: Path) -> None:
+    class Adapter:
+        def set_progress_reporter(self, reporter: object) -> None:
+            self.reporter = reporter
+
+    adapter = Adapter()
+    reporter = ProgressReporter(
+        "tabr__raw_typed__p1__s42",
+        "tabr",
+        "2023->2024",
+        tmp_path,
+    )
+
+    attach_progress_reporter(adapter, reporter)
+
+    assert adapter.reporter is reporter
+
+
+def test_training_window_reports_loss_throughput_eta_and_gpu_memory() -> None:
+    class Reporter:
+        def should_emit(self, *, completed_rows: int, stream: str) -> bool:
+            assert completed_rows == 128
+            assert stream == "training_epoch_2"
+            return True
+
+        def progress(self, event: str, **fields: object) -> None:
+            self.call = (event, fields)
+
+    class Cuda:
+        @staticmethod
+        def synchronize() -> None:
+            pass
+
+        @staticmethod
+        def memory_allocated() -> int:
+            return 10
+
+        @staticmethod
+        def memory_reserved() -> int:
+            return 20
+
+        @staticmethod
+        def max_memory_allocated() -> int:
+            return 30
+
+    reporter = Reporter()
+
+    report_training_window(
+        reporter=reporter,
+        torch=SimpleNamespace(cuda=Cuda()),
+        completed_rows=128,
+        total_rows=512,
+        started_at=time.monotonic() - 2.0,
+        epoch=2,
+        epochs=20,
+        batch=4,
+        batches=16,
+        loss=0.625,
+    )
+
+    event, fields = reporter.call
+    assert event == "TRAINING_PROGRESS"
+    assert fields["epoch"] == 2
+    assert fields["batch"] == 4
+    assert fields["loss"] == 0.625
+    assert fields["gpu"] == {
+        "allocated_bytes": 10,
+        "reserved_bytes": 20,
+        "peak_bytes": 30,
+    }
+
+
+def test_prediction_reports_completed_validation_chunks() -> None:
+    torch = pytest.importorskip("torch")
+
+    class Adapter:
+        @staticmethod
+        def probabilities(model, x_num, x_cat):
+            return torch.full((len(x_num),), 0.5, device=x_num.device)
+
+    class Model:
+        @staticmethod
+        def eval() -> None:
+            pass
+
+    class Reporter:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, dict[str, object]]] = []
+
+        def should_emit(self, *, completed_rows: int, stream: str) -> bool:
+            assert stream == "validation"
+            return True
+
+        def progress(self, event: str, **fields: object) -> None:
+            self.calls.append((event, fields))
+
+    batch = FeatureBatch(
+        row_id=np.array(["a", "b", "c", "d", "e"]),
+        season=np.full(5, 2024, dtype="int64"),
+        game_type=np.array(["R"] * 5),
+        x_num=np.zeros((5, 2), dtype="float32"),
+        x_cat=np.zeros((5, 1), dtype="int64"),
+        y=np.zeros(5, dtype="float32"),
+    )
+    reporter = Reporter()
+
+    result = TorchTrainingBackend._predict(
+        torch,
+        batch,
+        Model(),
+        Adapter(),
+        micro_batch_size=2,
+        amp_enabled=False,
+        device="cpu",
+        reporter=reporter,
+    )
+
+    assert result.tolist() == [0.5] * 5
+    assert [call[1]["completed_rows"] for call in reporter.calls] == [2, 4, 5]
+    assert all(call[0] == "VALIDATION_PROGRESS" for call in reporter.calls)
+
+
+def test_optional_adapter_lifecycle_binds_output_epoch_and_checkpoint_state(
+    tmp_path: Path,
+) -> None:
+    class Adapter:
+        def set_output_dir(self, output_dir: Path) -> None:
+            self.output_dir = output_dir
+
+        def prepare_initial_retrieval_cache(self, model, device) -> None:
+            self.initial = (model, device)
+
+        def on_epoch_start(self, model, epoch, device) -> None:
+            self.started = (model, epoch, device)
+
+        def on_epoch_end(self, model, epoch, device) -> None:
+            self.ended = (model, epoch, device)
+
+        def checkpoint_state(self):
+            return {"search": "frozen"}
+
+        def restore_checkpoint_state(self, payload, model, device):
+            self.restored = (payload, model, device)
+            return True
+
+    adapter = Adapter()
+    model = object()
+
+    configure_adapter_output(adapter, tmp_path)
+    prepare_initial_retrieval_cache(adapter, model, "cuda")
+    on_adapter_epoch_start(adapter, model, 1, "cuda")
+    on_adapter_epoch_end(adapter, model, 1, "cuda")
+    state = adapter_checkpoint_state(adapter)
+    restored = restore_adapter_checkpoint_state(
+        adapter, state, model, "cuda"
+    )
+
+    assert adapter.output_dir == tmp_path
+    assert adapter.initial == (model, "cuda")
+    assert adapter.started == (model, 1, "cuda")
+    assert adapter.ended == (model, 1, "cuda")
+    assert state == {"search": "frozen"}
+    assert restored is True
+    assert adapter.restored == (state, model, "cuda")
