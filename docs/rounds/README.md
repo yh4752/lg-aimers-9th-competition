@@ -8,6 +8,7 @@
 - [TabM residual](03-tabm-residual.md)
 - [R9 calibration](04-calibration.md)
 - [XGBoost v3와 original preprocessing rescue](05-xgboost.md)
+- [예산 제한 전처리 캠페인: Stage 1~5](06-budgeted-preprocessing-campaign.md)
 
 세부 수치와 작은 판정 근거는 [실험 장부](../../reports/EXPERIMENT_LEDGER.md)에서
 확인한다.
