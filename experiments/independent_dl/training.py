@@ -114,6 +114,7 @@ class BackendAttemptResult:
     completed_epochs: int = 0
     validation_curve: tuple[tuple[int, float], ...] = ()
     validation_time_curve: tuple[tuple[int, float, float], ...] = ()
+    budget_reached: bool = False
 
 
 @dataclass(frozen=True)
@@ -131,6 +132,7 @@ class TrainResult:
     completed_epochs: int = 0
     validation_curve: tuple[tuple[int, float], ...] = ()
     validation_time_curve: tuple[tuple[int, float, float], ...] = ()
+    budget_reached: bool = False
 
 
 class TrainingBackend(Protocol):
@@ -326,6 +328,7 @@ def fit_candidate(
             (int(epoch), float(elapsed), float(brier))
             for epoch, elapsed, brier in attempt.validation_time_curve
         ),
+        budget_reached=bool(attempt.budget_reached),
     )
 
 
@@ -405,6 +408,9 @@ class TorchTrainingBackend:
         metadata = metadata_from_train(request.train)
         prepare_adapter_context(adapter, request.train)
         model = adapter.build(request.model_config, metadata, device)
+        hardware["parameter_count"] = int(
+            sum(parameter.numel() for parameter in model.parameters())
+        )
         if activation_checkpointing and hasattr(model, "enable_activation_checkpointing"):
             model.enable_activation_checkpointing()
         optimizer = adapter.optimizer(model, request.training_config)
@@ -624,6 +630,7 @@ class TorchTrainingBackend:
             completed_epochs=len(validation_curve),
             validation_curve=tuple(validation_curve),
             validation_time_curve=tuple(validation_time_curve),
+            budget_reached=budget_reached,
         )
 
     @staticmethod

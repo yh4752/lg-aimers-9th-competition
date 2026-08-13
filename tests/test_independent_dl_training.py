@@ -82,6 +82,23 @@ class _RecordingBackend:
         )
 
 
+def test_backend_deadline_outcome_is_preserved_in_train_result(tmp_path: Path) -> None:
+    class DeadlineBackend(_RecordingBackend):
+        def run_attempt(self, **kwargs: object) -> BackendAttemptResult:
+            base = super().run_attempt(**kwargs)
+            return BackendAttemptResult(
+                best_epoch=base.best_epoch,
+                best_brier=base.best_brier,
+                checkpoint=base.checkpoint,
+                predictions=base.predictions,
+                completed_epochs=3,
+                budget_reached=True,
+            )
+
+    result = fit_candidate(_request(), _FakeAdapter(), tmp_path, backend=DeadlineBackend())
+    assert result.budget_reached is True
+
+
 class _FakeAdapter:
     pass
 
