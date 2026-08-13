@@ -12,7 +12,7 @@ import tarfile
 
 
 ROOT = Path(__file__).resolve().parents[1]
-RUNTIME_COMMIT = "77ed7646b62c1bcb5ab528e74abf0fe90941547d"
+RUNTIME_COMMIT = "0e7f7732c265bfaf398da99cea8b4fa9341a3ba1"
 OUTPUT = ROOT / "experiments/preprocessing_campaign/KAGGLE_BUDGETED_CELL.py"
 
 
@@ -59,7 +59,7 @@ SESSION_STARTED_UNIX = time.time()
 MAX_SESSION_SECONDS = 6300
 INPUT_ROOT = Path("/kaggle/input")
 WORKING_ROOT = Path("/kaggle/working")
-CODE_ROOT = WORKING_ROOT / "budgeted_preprocessing_embedded_code_77ed764"
+CODE_ROOT = WORKING_ROOT / "budgeted_preprocessing_embedded_code_0e7f773"
 RUNTIME_ROOT = WORKING_ROOT / "budgeted_preprocessing_runtime"
 CAMPAIGN_ROOT = WORKING_ROOT / "budgeted_preprocessing_campaign_v1"
 CONFIG_PATH = CODE_ROOT / "experiments/preprocessing_campaign/configs/budgeted_campaign_v1.json"
