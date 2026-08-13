@@ -101,6 +101,7 @@ class TrainRequest:
     training_config: Mapping[str, object]
     train: FeatureBatch
     valid: FeatureBatch
+    min_epochs: int = 1
 
 
 @dataclass(frozen=True)
@@ -203,6 +204,9 @@ def _validate_request(request: TrainRequest) -> tuple[int, int]:
         raise TrainingContractError("candidate_id must not be empty")
     if request.train.y is None or request.valid.y is None:
         raise TrainingContractError("train and validation targets are required")
+    minimum = _positive_integer(request.min_epochs, "min_epochs")
+    if minimum > request.epochs:
+        raise TrainingContractError("min_epochs must not exceed epochs")
     if len(request.train.x_num) != len(request.train.y):
         raise TrainingContractError("training features and targets are not aligned")
     if len(request.valid.x_num) != len(request.valid.y):
@@ -594,7 +598,7 @@ class TorchTrainingBackend:
                 f"elapsed_seconds={round(time.monotonic() - epoch_started)}",
                 flush=True,
             )
-            if stale_epochs >= patience:
+            if epoch + 1 >= request.min_epochs and stale_epochs >= patience:
                 break
 
         if best_epoch < 0 or not best_path.is_file():
