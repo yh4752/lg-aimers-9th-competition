@@ -67,6 +67,23 @@ def test_auto_mode_selects_highest_hash_valid_resume_bundle(tmp_path: Path) -> N
     assert result.path == second
 
 
+def test_auto_mode_selects_kaggle_extracted_resume_dataset(tmp_path: Path) -> None:
+    archive_path = _write_resume(
+        tmp_path / "upload" / "preprocessing_stage_00_fixed_resume_bundle",
+        stage=0,
+    )
+    dataset = tmp_path / "input" / "preprocessing_stage_00_fixed_resume_bundle"
+    dataset.mkdir(parents=True)
+    with ZipFile(archive_path) as archive:
+        archive.extractall(dataset)
+
+    result = inspect_resume_bundles(tmp_path / "input")
+
+    assert result is not None
+    assert result.completed_stage == 0
+    assert result.path == dataset
+
+
 def test_conflicting_same_stage_bundles_need_review(tmp_path: Path) -> None:
     left = _write_resume(tmp_path / "a_resume_bundle", stage=2)
     right = tmp_path / "b_resume_bundle.zip"

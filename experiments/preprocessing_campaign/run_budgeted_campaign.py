@@ -188,6 +188,61 @@ def inspect_resume_bundles(
         ):
             continue
         selections.append(ResumeSelection(path, completed_stage, manifest_hash))
+    for metadata_path in sorted(Path(input_root).rglob("resume_metadata.json")):
+        path = metadata_path.parent
+        if "resume_bundle" not in path.name:
+            continue
+        try:
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+            manifest_path = path / "campaign_manifest.json"
+            manifest = manifest_path.read_bytes()
+            file_records = metadata.get("files") if isinstance(metadata, dict) else None
+            if not isinstance(file_records, list) or not file_records:
+                continue
+            expected_names = {"resume_metadata.json"}
+            files_valid = True
+            for record in file_records:
+                if (
+                    not isinstance(record, dict)
+                    or set(record) != {"path", "size_bytes", "sha256"}
+                ):
+                    files_valid = False
+                    break
+                name = str(record["path"])
+                expected_names.add(name)
+                candidate = path / name
+                if (
+                    not candidate.is_file()
+                    or int(record["size_bytes"]) != candidate.stat().st_size
+                    or str(record["sha256"]) != _file_sha256(candidate)
+                ):
+                    files_valid = False
+                    break
+            observed_names = {
+                candidate.relative_to(path).as_posix()
+                for candidate in path.rglob("*")
+                if candidate.is_file()
+            }
+            if not files_valid or expected_names != observed_names:
+                continue
+        except (KeyError, OSError, UnicodeDecodeError, json.JSONDecodeError):
+            continue
+        if (
+            metadata.get("schema_version") != 1
+            or metadata.get("campaign_id") != campaign_id
+        ):
+            continue
+        completed_stage = metadata.get("completed_stage")
+        manifest_hash = metadata.get("manifest_sha256")
+        if (
+            isinstance(completed_stage, bool)
+            or not isinstance(completed_stage, int)
+            or completed_stage not in range(0, 6)
+            or not isinstance(manifest_hash, str)
+            or sha256(manifest).hexdigest() != manifest_hash
+        ):
+            continue
+        selections.append(ResumeSelection(path, completed_stage, manifest_hash))
     if not selections:
         return None
     highest = max(item.completed_stage for item in selections)
@@ -1074,6 +1129,17 @@ def _job_from_payload(payload: Mapping[str, object]) -> BudgetedJob:
 
 def _safe_restore(selection: ResumeSelection, output_root: Path) -> None:
     output_root.mkdir(parents=True, exist_ok=True)
+    if selection.path.is_dir():
+        for source in selection.path.rglob("*"):
+            if not source.is_file() or source.name == "resume_metadata.json":
+                continue
+            relative = source.relative_to(selection.path)
+            destination = output_root / relative
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            temporary = destination.with_suffix(destination.suffix + ".tmp")
+            temporary.write_bytes(source.read_bytes())
+            os.replace(temporary, destination)
+        return
     with ZipFile(selection.path) as archive:
         for info in archive.infolist():
             relative = PurePosixPath(info.filename)
