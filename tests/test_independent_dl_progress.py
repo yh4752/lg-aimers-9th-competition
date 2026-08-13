@@ -84,6 +84,33 @@ def test_progress_file_is_preserved_across_reporter_restarts(tmp_path: Path) -> 
     ]
 
 
+def test_training_and_validation_progress_use_independent_streams(
+    tmp_path: Path,
+) -> None:
+    clock = _Clock()
+    reporter = _reporter(tmp_path, clock)
+    gpu = {"allocated_bytes": 0, "reserved_bytes": 0, "peak_bytes": 0}
+    reporter.progress(
+        "TRAINING_PROGRESS",
+        completed_rows=1_000,
+        total_rows=1_000,
+        started_at=99.0,
+        gpu=gpu,
+        stream="training_epoch_0",
+    )
+
+    assert reporter.should_emit(completed_rows=1, stream="validation_epoch_0") is True
+    reporter.progress(
+        "VALIDATION_PROGRESS",
+        completed_rows=1,
+        total_rows=100,
+        started_at=99.0,
+        gpu=gpu,
+        stream="validation_epoch_0",
+    )
+    assert reporter.should_emit(completed_rows=1, stream="validation_epoch_0") is False
+
+
 def test_emit_interval_stall_warning_and_initial_progress_timeout(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -91,6 +118,7 @@ def test_emit_interval_stall_warning_and_initial_progress_timeout(
     reporter = _reporter(tmp_path, clock)
 
     assert reporter.should_emit(completed_rows=0) is False
+    assert reporter.should_emit(completed_rows=1) is True
     clock.value += 60.0
     assert reporter.should_emit(completed_rows=0) is True
 

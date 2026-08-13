@@ -56,6 +56,14 @@ class ModelAdapter(Protocol):
     ) -> object: ...
 
 
+def attach_progress_reporter(adapter: object, reporter: object) -> None:
+    """Attach observability to adapters that expose model-specific progress."""
+
+    setter = getattr(adapter, "set_progress_reporter", None)
+    if setter is not None:
+        setter(reporter)
+
+
 def import_runtime_module(name: str) -> object:
     try:
         return importlib.import_module(name)

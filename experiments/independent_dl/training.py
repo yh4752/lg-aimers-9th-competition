@@ -9,13 +9,20 @@ import os
 from pathlib import Path
 import random
 import time
+import traceback
 from types import MappingProxyType
 from typing import Mapping, Protocol
 
 import numpy as np
 
 from .features import FeatureBatch
-from .models.common import ModelAdapter, import_runtime_module, metadata_from_train
+from .models.common import (
+    ModelAdapter,
+    attach_progress_reporter,
+    import_runtime_module,
+    metadata_from_train,
+)
+from .progress import ProgressReporter
 
 
 class TrainingContractError(ValueError):
@@ -143,6 +150,7 @@ class TrainingBackend(Protocol):
         accumulation_steps: int,
         activation_checkpointing: bool,
         resume_epoch: int,
+        reporter: ProgressReporter,
     ) -> BackendAttemptResult: ...
 
 
@@ -176,6 +184,58 @@ def refresh_retrieval_cache(adapter: object, model: object, device: str) -> None
     refresh = getattr(adapter, "refresh_retrieval_cache", None)
     if refresh is not None:
         refresh(model, device)
+
+
+def _fold_label(request: TrainRequest) -> str:
+    train_years = np.asarray(request.train.season, dtype="int64")
+    valid_years = np.unique(np.asarray(request.valid.season, dtype="int64"))
+    if len(train_years) == 0 or len(valid_years) != 1:
+        raise TrainingContractError("training fold requires one validation season")
+    return f"{int(train_years.max())}->{int(valid_years[0])}"
+
+
+def _gpu_memory(torch: object) -> dict[str, int]:
+    return {
+        "allocated_bytes": int(torch.cuda.memory_allocated()),
+        "reserved_bytes": int(torch.cuda.memory_reserved()),
+        "peak_bytes": int(torch.cuda.max_memory_allocated()),
+    }
+
+
+def report_training_window(
+    *,
+    reporter: object,
+    torch: object,
+    completed_rows: int,
+    total_rows: int,
+    started_at: float,
+    epoch: int,
+    epochs: int,
+    batch: int,
+    batches: int,
+    loss: object,
+) -> None:
+    """Synchronize and report only when a meaningful heartbeat is due."""
+
+    stream = f"training_epoch_{epoch}"
+    if not reporter.should_emit(completed_rows=completed_rows, stream=stream):
+        return
+    torch.cuda.synchronize()
+    detached = getattr(loss, "detach", None)
+    loss_value = float(detached() if detached is not None else loss)
+    reporter.progress(
+        "TRAINING_PROGRESS",
+        completed_rows=completed_rows,
+        total_rows=total_rows,
+        started_at=started_at,
+        gpu=_gpu_memory(torch),
+        epoch=epoch,
+        epochs=epochs,
+        batch=batch,
+        batches=batches,
+        loss=loss_value,
+        stream=stream,
+    )
 
 
 def call_adapter_loss(
@@ -258,71 +318,103 @@ def fit_candidate(
     effective, micro = _validate_request(request)
     root = Path(output_dir)
     root.mkdir(parents=True, exist_ok=True)
+    reporter = ProgressReporter(
+        request.candidate_id,
+        request.family,
+        _fold_label(request),
+        root,
+    )
+    attach_progress_reporter(adapter, reporter)
     started_epoch = _resume_epoch(root, request.candidate_id)
     current_resume_epoch = started_epoch
     runtime = TorchTrainingBackend() if backend is None else backend
     attempted: list[int] = []
     activation_checkpointing = False
 
-    while True:
-        attempted.append(micro)
-        try:
-            attempt = runtime.run_attempt(
-                request=request,
-                adapter=adapter,
-                output_dir=root,
-                micro_batch_size=micro,
-                accumulation_steps=effective // micro,
-                activation_checkpointing=activation_checkpointing,
-                resume_epoch=current_resume_epoch,
-            )
-            break
-        except RuntimeError as error:
-            if not _is_cuda_oom(error):
-                raise
-            current_resume_epoch = _resume_epoch(root, request.candidate_id)
-            if micro > 1:
-                micro //= 2
-                while effective % micro:
+    try:
+        while True:
+            attempted.append(micro)
+            try:
+                attempt = runtime.run_attempt(
+                    request=request,
+                    adapter=adapter,
+                    output_dir=root,
+                    micro_batch_size=micro,
+                    accumulation_steps=effective // micro,
+                    activation_checkpointing=activation_checkpointing,
+                    resume_epoch=current_resume_epoch,
+                    reporter=reporter,
+                )
+                break
+            except RuntimeError as error:
+                if not _is_cuda_oom(error):
+                    raise
+                current_resume_epoch = _resume_epoch(root, request.candidate_id)
+                if micro > 1:
                     micro //= 2
-                continue
-            if not activation_checkpointing:
-                activation_checkpointing = True
-                continue
-            raise
+                    while effective % micro:
+                        micro //= 2
+                    continue
+                if not activation_checkpointing:
+                    activation_checkpointing = True
+                    continue
+                raise
 
-    predictions = np.asarray(attempt.predictions, dtype="float64")
-    if predictions.shape != (len(request.valid.row_id),):
-        raise TrainingContractError("validation predictions have the wrong shape")
-    if not np.isfinite(predictions).all() or ((predictions < 0) | (predictions > 1)).any():
-        raise TrainingContractError("validation predictions must be finite probabilities")
-    if not math.isfinite(float(attempt.best_brier)):
-        raise TrainingContractError("best_brier must be finite")
-    return TrainResult(
-        candidate_id=request.candidate_id,
-        best_epoch=attempt.best_epoch,
-        best_brier=float(attempt.best_brier),
-        checkpoint=Path(attempt.checkpoint),
-        predictions=predictions,
-        attempted_micro_batches=tuple(attempted),
-        effective_batch_size=effective,
-        model_config=MappingProxyType(dict(request.model_config)),
-        started_epoch=started_epoch,
-        hardware=MappingProxyType(dict(attempt.hardware)),
-        completed_epochs=(
-            int(attempt.completed_epochs)
-            if int(attempt.completed_epochs) > 0
-            else int(attempt.best_epoch) + 1
-        ),
-        validation_curve=tuple(
-            (int(epoch), float(brier))
-            for epoch, brier in attempt.validation_curve
-        ),
-        validation_time_curve=tuple(
-            (int(epoch), float(elapsed), float(brier))
-            for epoch, elapsed, brier in attempt.validation_time_curve
-        ),
-    )
+        predictions = np.asarray(attempt.predictions, dtype="float64")
+        if predictions.shape != (len(request.valid.row_id),):
+            raise TrainingContractError("validation predictions have the wrong shape")
+        if not np.isfinite(predictions).all() or (
+            (predictions < 0) | (predictions > 1)
+        ).any():
+            raise TrainingContractError(
+                "validation predictions must be finite probabilities"
+            )
+        if not math.isfinite(float(attempt.best_brier)):
+            raise TrainingContractError("best_brier must be finite")
+        result = TrainResult(
+            candidate_id=request.candidate_id,
+            best_epoch=attempt.best_epoch,
+            best_brier=float(attempt.best_brier),
+            checkpoint=Path(attempt.checkpoint),
+            predictions=predictions,
+            attempted_micro_batches=tuple(attempted),
+            effective_batch_size=effective,
+            model_config=MappingProxyType(dict(request.model_config)),
+            started_epoch=started_epoch,
+            hardware=MappingProxyType(dict(attempt.hardware)),
+            completed_epochs=(
+                int(attempt.completed_epochs)
+                if int(attempt.completed_epochs) > 0
+                else int(attempt.best_epoch) + 1
+            ),
+            validation_curve=tuple(
+                (int(epoch), float(brier))
+                for epoch, brier in attempt.validation_curve
+            ),
+            validation_time_curve=tuple(
+                (int(epoch), float(elapsed), float(brier))
+                for epoch, elapsed, brier in attempt.validation_time_curve
+            ),
+        )
+        reporter.emit(
+            "CANDIDATE_COMPLETED",
+            best_epoch=result.best_epoch,
+            best_brier=result.best_brier,
+            completed_epochs=result.completed_epochs,
+            checkpoint=result.checkpoint,
+        )
+        return result
+    except Exception as error:
+        try:
+            reporter.emit(
+                "CANDIDATE_FAILED",
+                error_type=type(error).__name__,
+                error_message=str(error),
+                traceback=traceback.format_exc(),
+            )
+        except Exception:
+            pass
+        raise
 
 
 def _atomic_torch_save(torch: object, payload: object, path: Path) -> None:
@@ -390,6 +482,7 @@ class TorchTrainingBackend:
         accumulation_steps: int,
         activation_checkpointing: bool,
         resume_epoch: int,
+        reporter: ProgressReporter,
     ) -> BackendAttemptResult:
         os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
         torch = import_runtime_module("torch")
@@ -417,6 +510,17 @@ class TorchTrainingBackend:
         )
         amp_enabled = bool(request.training_config["amp"])
         scaler = torch.amp.GradScaler("cuda", enabled=amp_enabled)
+        reporter.emit(
+            "CANDIDATE_RUNTIME_READY",
+            device=device,
+            hardware=hardware,
+            train_rows=len(request.train.row_id),
+            validation_rows=len(request.valid.row_id),
+            epochs=request.epochs,
+            micro_batch_size=micro_batch_size,
+            accumulation_steps=accumulation_steps,
+            activation_checkpointing=activation_checkpointing,
+        )
         checkpoint_path = output_dir / "checkpoint.pt"
         best_path = output_dir / "best_checkpoint.pt"
         best_brier = math.inf
@@ -462,7 +566,6 @@ class TorchTrainingBackend:
                 len(request.train.row_id)
             )
             total_windows = math.ceil(len(order) / effective_batch)
-            heartbeat_every = max(1, total_windows // 20)
             for window_number, window_start in enumerate(
                 range(0, len(order), effective_batch), start=1
             ):
@@ -472,6 +575,7 @@ class TorchTrainingBackend:
                 window = order[window_start : window_start + effective_batch]
                 n_micro = math.ceil(len(window) / micro_batch_size)
                 optimizer.zero_grad(set_to_none=True)
+                window_loss = None
                 for start in range(0, len(window), micro_batch_size):
                     indices = window[start : start + micro_batch_size]
                     x_num = torch.as_tensor(
@@ -504,33 +608,35 @@ class TorchTrainingBackend:
                             row_indices=row_indices,
                         ) / n_micro
                     scaler.scale(loss).backward()
+                    detached_loss = loss.detach()
+                    window_loss = (
+                        detached_loss
+                        if window_loss is None
+                        else window_loss + detached_loss
+                    )
                 scaler.step(optimizer)
                 scaler.update()
                 if scheduler_mode == "update":
                     scheduler.step()
-                if (
-                    window_number == 1
-                    or window_number == total_windows
-                    or window_number % heartbeat_every == 0
-                ):
-                    print(
-                        progress_message(
-                            candidate_id=request.candidate_id,
-                            epoch=epoch,
-                            epochs=request.epochs,
-                            batch=window_number,
-                            batches=total_windows,
-                            elapsed_seconds=time.monotonic() - epoch_started,
-                        ),
-                        flush=True,
-                    )
+                if window_loss is None:
+                    raise RuntimeError("training window did not contain a microbatch")
+                report_training_window(
+                    reporter=reporter,
+                    torch=torch,
+                    completed_rows=window_start + len(window),
+                    total_rows=len(order),
+                    started_at=epoch_started,
+                    epoch=epoch,
+                    epochs=request.epochs,
+                    batch=window_number,
+                    batches=total_windows,
+                    loss=window_loss,
+                )
 
             if budget_reached:
-                print(
-                    "TRAINING_TIME_BUDGET_REACHED "
-                    f"candidate={request.candidate_id} "
-                    f"completed_epochs={len(validation_curve)}",
-                    flush=True,
+                reporter.emit(
+                    "TRAINING_TIME_BUDGET_REACHED",
+                    completed_epochs=len(validation_curve),
                 )
                 break
 
@@ -543,6 +649,8 @@ class TorchTrainingBackend:
                 micro_batch_size,
                 amp_enabled,
                 device,
+                reporter=reporter,
+                stream=f"validation_epoch_{epoch}",
             )
             target = np.asarray(request.valid.y, dtype="float64")
             brier = float(np.mean(np.square(predictions - target)))
@@ -593,12 +701,15 @@ class TorchTrainingBackend:
                 },
                 output_dir / "checkpoint_meta.json",
             )
-            print(
-                "EPOCH_CHECKPOINTED "
-                f"candidate={request.candidate_id} epoch={epoch + 1}/{request.epochs} "
-                f"brier={brier:.10f} best_brier={best_brier:.10f} "
-                f"elapsed_seconds={round(time.monotonic() - epoch_started)}",
-                flush=True,
+            reporter.emit(
+                "EPOCH_CHECKPOINTED",
+                epoch=epoch,
+                epochs=request.epochs,
+                brier=brier,
+                best_brier=best_brier,
+                best_epoch=best_epoch,
+                epoch_seconds=time.monotonic() - epoch_started,
+                checkpoint=checkpoint_path,
             )
             if stale_epochs >= patience:
                 break
@@ -616,6 +727,8 @@ class TorchTrainingBackend:
             micro_batch_size,
             amp_enabled,
             device,
+            reporter=reporter,
+            stream="validation_best_checkpoint",
         )
         return BackendAttemptResult(
             best_epoch=best_epoch,
@@ -637,9 +750,13 @@ class TorchTrainingBackend:
         micro_batch_size: int,
         amp_enabled: bool,
         device: str,
+        *,
+        reporter: object | None = None,
+        stream: str = "validation",
     ) -> np.ndarray:
         model.eval()
         outputs: list[np.ndarray] = []
+        validation_started = time.monotonic()
         with torch.no_grad():
             for start in range(0, len(batch.row_id), micro_batch_size):
                 stop = start + micro_batch_size
@@ -660,4 +777,18 @@ class TorchTrainingBackend:
                 outputs.append(
                     probabilities.detach().to(dtype=torch.float64, device="cpu").numpy()
                 )
+                completed_rows = min(stop, len(batch.row_id))
+                if reporter is not None and reporter.should_emit(
+                    completed_rows=completed_rows, stream=stream
+                ):
+                    if str(device).startswith("cuda"):
+                        torch.cuda.synchronize()
+                    reporter.progress(
+                        "VALIDATION_PROGRESS",
+                        completed_rows=completed_rows,
+                        total_rows=len(batch.row_id),
+                        started_at=validation_started,
+                        gpu=_gpu_memory(torch),
+                        stream=stream,
+                    )
         return np.concatenate(outputs).reshape(-1)

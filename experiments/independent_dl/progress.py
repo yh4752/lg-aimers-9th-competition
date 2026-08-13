@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from dataclasses import dataclass
 from datetime import datetime, timezone
 import json
 import math
@@ -15,6 +16,15 @@ import uuid
 
 class ProgressTimeoutError(RuntimeError):
     """Raised when a candidate produces no substantive work for ten minutes."""
+
+
+@dataclass
+class _StreamState:
+    started_at: float
+    last_emit_at: float
+    last_progress_at: float
+    last_completed_rows: int = 0
+    stall_warning_at: float | None = None
 
 
 _EVENTS = frozenset(
@@ -106,10 +116,21 @@ class ProgressReporter:
         self.process_id = int(os.getpid() if process_id is None else process_id)
         self.run_id = run_id or uuid.uuid4().hex
         self._started_at = float(clock())
-        self._last_emit_at = self._started_at
-        self._last_progress_at = self._started_at
-        self._last_completed_rows = 0
-        self._stall_warning_at: float | None = None
+        self._streams = {
+            "default": _StreamState(
+                self._started_at, self._started_at, self._started_at
+            )
+        }
+
+    def _stream_state(self, stream: str) -> _StreamState:
+        if not stream:
+            raise ValueError("stream must not be empty")
+        state = self._streams.get(stream)
+        if state is None:
+            now = float(self._clock())
+            state = _StreamState(now, now, now)
+            self._streams[stream] = state
+        return state
 
     def emit(self, event: str, **fields: object) -> dict[str, object]:
         if event not in _EVENTS:
@@ -139,7 +160,6 @@ class ProgressReporter:
             handle.write(line + "\n")
             handle.flush()
         print(line, flush=True)
-        self._last_emit_at = float(self._clock())
         return payload
 
     def progress(
@@ -150,6 +170,7 @@ class ProgressReporter:
         total_rows: int,
         started_at: float,
         gpu: Mapping[str, int],
+        stream: str = "default",
         **fields: object,
     ) -> dict[str, object]:
         completed = _nonnegative_integer(completed_rows, "completed_rows")
@@ -168,11 +189,12 @@ class ProgressReporter:
         eta_seconds = (
             (total - completed) / rows_per_second if rows_per_second > 0 else None
         )
-        if completed > self._last_completed_rows:
-            self._last_completed_rows = completed
-            self._last_progress_at = now
-            self._stall_warning_at = None
-        return self.emit(
+        state = self._stream_state(stream)
+        if completed > state.last_completed_rows:
+            state.last_completed_rows = completed
+            state.last_progress_at = now
+            state.stall_warning_at = None
+        payload = self.emit(
             event,
             completed_rows=completed,
             total_rows=total,
@@ -180,35 +202,52 @@ class ProgressReporter:
             rows_per_second=rows_per_second,
             eta_seconds=eta_seconds,
             gpu=safe_gpu,
+            stream=stream,
             **fields,
         )
+        state.last_emit_at = float(self._clock())
+        return payload
 
     def should_emit(
-        self, *, completed_rows: int, now: float | None = None
+        self,
+        *,
+        completed_rows: int,
+        now: float | None = None,
+        stream: str = "default",
     ) -> bool:
         completed = _nonnegative_integer(completed_rows, "completed_rows")
         checked_at = float(self._clock() if now is None else now)
+        state = self._stream_state(stream)
+        first_substantive_progress = (
+            state.last_completed_rows == 0 and completed > 0
+        )
         if (
-            self._last_completed_rows == 0
+            state.last_completed_rows == 0
             and completed == 0
-            and checked_at - self._started_at >= 600.0
+            and checked_at - state.started_at >= 600.0
         ):
             raise ProgressTimeoutError(
                 "no substantive progress was recorded within 600 seconds"
             )
-        stalled_seconds = checked_at - self._last_progress_at
+        stalled_seconds = checked_at - state.last_progress_at
         emitted_stall_warning = False
         if (
-            completed <= self._last_completed_rows
-            and self._last_completed_rows > 0
+            completed <= state.last_completed_rows
+            and state.last_completed_rows > 0
             and stalled_seconds >= 300.0
-            and self._stall_warning_at is None
+            and state.stall_warning_at is None
         ):
             self.emit(
                 "TRAINING_STALL_WARNING",
-                completed_rows=self._last_completed_rows,
+                completed_rows=state.last_completed_rows,
                 stalled_seconds=stalled_seconds,
+                stream=stream,
             )
-            self._stall_warning_at = checked_at
+            state.stall_warning_at = checked_at
+            state.last_emit_at = checked_at
             emitted_stall_warning = True
-        return emitted_stall_warning or checked_at - self._last_emit_at >= 60.0
+        return (
+            first_substantive_progress
+            or emitted_stall_warning
+            or checked_at - state.last_emit_at >= 60.0
+        )
