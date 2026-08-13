@@ -84,6 +84,35 @@ def test_auto_mode_selects_kaggle_extracted_resume_dataset(tmp_path: Path) -> No
     assert result.path == dataset
 
 
+def test_auto_mode_selects_slugified_kaggle_resume_dataset(tmp_path: Path) -> None:
+    archive_path = _write_resume(
+        tmp_path / "upload" / "preprocessing_stage_00_fixed_resume_bundle",
+        stage=0,
+    )
+    dataset = tmp_path / "input" / "preprocessing-stage-00-fixed-resume-bundle"
+    dataset.mkdir(parents=True)
+    with ZipFile(archive_path) as archive:
+        archive.extractall(dataset)
+
+    result = inspect_resume_bundles(tmp_path / "input")
+
+    assert result is not None
+    assert result.path == dataset
+
+
+def test_invalid_extracted_resume_dataset_never_starts_fresh(tmp_path: Path) -> None:
+    dataset = tmp_path / "input" / "preprocessing-stage-00-resume-bundle"
+    dataset.mkdir(parents=True)
+    (dataset / "resume_metadata.json").write_text("{}", encoding="utf-8")
+
+    try:
+        inspect_resume_bundles(tmp_path / "input")
+    except StageNeedsReview as error:
+        assert "invalid extracted resume" in str(error)
+    else:
+        raise AssertionError("an attached invalid resume must block a fresh campaign")
+
+
 def test_conflicting_same_stage_bundles_need_review(tmp_path: Path) -> None:
     left = _write_resume(tmp_path / "a_resume_bundle", stage=2)
     right = tmp_path / "b_resume_bundle.zip"

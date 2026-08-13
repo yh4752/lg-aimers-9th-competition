@@ -188,10 +188,10 @@ def inspect_resume_bundles(
         ):
             continue
         selections.append(ResumeSelection(path, completed_stage, manifest_hash))
-    for metadata_path in sorted(Path(input_root).rglob("resume_metadata.json")):
+    metadata_paths = sorted(Path(input_root).rglob("resume_metadata.json"))
+    valid_extracted_paths: set[Path] = set()
+    for metadata_path in metadata_paths:
         path = metadata_path.parent
-        if "resume_bundle" not in path.name:
-            continue
         try:
             metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
             manifest_path = path / "campaign_manifest.json"
@@ -243,6 +243,16 @@ def inspect_resume_bundles(
         ):
             continue
         selections.append(ResumeSelection(path, completed_stage, manifest_hash))
+        valid_extracted_paths.add(path)
+    invalid_extracted = [
+        metadata_path.parent
+        for metadata_path in metadata_paths
+        if metadata_path.parent not in valid_extracted_paths
+    ]
+    if invalid_extracted:
+        raise StageNeedsReview(
+            f"invalid extracted resume dataset(s): {invalid_extracted}"
+        )
     if not selections:
         return None
     highest = max(item.completed_stage for item in selections)
@@ -1172,6 +1182,14 @@ def run_auto(
     selection = inspect_resume_bundles(
         input_root, campaign_id=campaign.campaign_id
     )
+    if selection is None:
+        print("RESUME_NOT_FOUND starting_fresh_campaign=true", flush=True)
+    else:
+        print(
+            f"RESUME_SELECTED path={selection.path} "
+            f"completed_stage={selection.completed_stage}",
+            flush=True,
+        )
     if selection is not None and not (root / "campaign_manifest.json").is_file():
         _safe_restore(selection, root)
     manifest_path = root / "campaign_manifest.json"
