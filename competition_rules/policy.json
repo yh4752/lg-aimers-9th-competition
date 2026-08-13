@@ -1,0 +1,64 @@
+{
+  "schema_version": 1,
+  "policy_version": "dacon-236743-2026-08-13",
+  "competition_id": "236743",
+  "official_sources": [
+    {
+      "title": "대회 규칙",
+      "url": "https://dacon.io/competitions/official/236743/overview/rules"
+    },
+    {
+      "title": "평가 및 코드 제출 안내",
+      "url": "https://dacon.io/competitions/official/236743/overview/evaluation"
+    },
+    {
+      "title": "평가 데이터 독립 예측 원칙",
+      "url": "https://dacon.io/competitions/official/236743/talkboard/417123?page=1&dtype=recent"
+    },
+    {
+      "title": "데이터 설명",
+      "url": "https://dacon.io/competitions/official/236743/data"
+    },
+    {
+      "title": "대회 설명",
+      "url": "https://dacon.io/competitions/official/236743/overview/description"
+    },
+    {
+      "title": "부정 제출 및 치팅 행위에 관하여",
+      "url": "https://dacon.io/notice/notice/13"
+    }
+  ],
+  "allowed_data_sources": [
+    "official_train",
+    "official_trackman"
+  ],
+  "prohibited_external_apis": true,
+  "decimal_places": 8,
+  "runtime_safety_seconds": 480,
+  "limits": {
+    "install_seconds": 600,
+    "inference_seconds": 600,
+    "package_bytes": 10000000000,
+    "extracted_bytes": 32000000000,
+    "evaluation_rows": 245789
+  },
+  "manual_rules": {
+    "team_max_members": 5,
+    "duplicate_registration_allowed": false,
+    "daily_submission_limit": 5
+  },
+  "environment": {
+    "python": "3.11.15",
+    "os": "Ubuntu 22.04",
+    "gpu": "NVIDIA L4 22.4 GiB",
+    "cpu_count": 6,
+    "ram_gib": 28,
+    "offline_after_install": true
+  },
+  "archive_members": [
+    "script.py",
+    "requirements.txt",
+    "model/"
+  ],
+  "output_path": "output/submission.csv"
+}
