@@ -58,6 +58,7 @@ def test_runtime_requirements_pin_only_the_approved_packages() -> None:
         "rtdl-revisiting-models==0.0.2",
         "rtdl-num-embeddings==0.0.12",
         "tabicl==2.1.1",
+        "faiss-gpu-cu12==1.14.1.post1",
     ]
     assert all(not line.startswith("torch") for line in lines)
 
