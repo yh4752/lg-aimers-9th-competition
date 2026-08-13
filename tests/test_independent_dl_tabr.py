@@ -1,10 +1,194 @@
 from __future__ import annotations
 
 import numpy as np
+from pathlib import Path
+import pytest
 import torch
 
 from experiments.independent_dl.features import FeatureBatch
+from experiments.independent_dl.models.common import DLRuntimeDependencyError
 from experiments.independent_dl.models.tabr import TabRAdapter, _TorchTabRRuntime
+from experiments.independent_dl.models.tabr_search import (
+    FoldTrainFaissIndex,
+    TABR_SEARCH_POLICY,
+    probe_faiss_gpu,
+)
+
+
+class _FakeFlatIndex:
+    def __init__(self, dimension: int) -> None:
+        self.dimension = dimension
+        self.keys = np.empty((0, dimension), dtype="float32")
+        self.ids = np.empty(0, dtype="int64")
+
+    def add(self, keys: np.ndarray) -> None:
+        self.keys = np.asarray(keys, dtype="float32").copy()
+        self.ids = np.arange(len(keys), dtype="int64")
+
+    def add_with_ids(self, keys: np.ndarray, ids: np.ndarray) -> None:
+        self.keys = np.asarray(keys, dtype="float32").copy()
+        self.ids = np.asarray(ids, dtype="int64").copy()
+
+    def search(self, queries: np.ndarray, k: int) -> tuple[np.ndarray, np.ndarray]:
+        self.last_search_k = k
+        distances = np.square(
+            np.asarray(queries, dtype="float32")[:, None, :] - self.keys[None, :, :]
+        ).sum(axis=2)
+        order = np.argsort(distances, axis=1, kind="stable")[:, :k]
+        return np.take_along_axis(distances, order, axis=1), self.ids[order]
+
+
+class _FakeIvfIndex(_FakeFlatIndex):
+    def __init__(self, quantizer, dimension, nlist, metric) -> None:
+        super().__init__(dimension)
+        self.nlist = nlist
+        self.metric = metric
+        self.nprobe = None
+        self.trained_on = None
+
+    def train(self, values: np.ndarray) -> None:
+        self.trained_on = np.asarray(values).copy()
+
+
+class _FakeFaiss:
+    METRIC_L2 = 1
+
+    def __init__(self) -> None:
+        self.last_gpu_index = None
+        self.gpu_transfer_calls = 0
+
+    class StandardGpuResources:
+        pass
+
+    IndexFlatL2 = _FakeFlatIndex
+    IndexIVFFlat = _FakeIvfIndex
+
+    @staticmethod
+    def get_num_gpus() -> int:
+        return 1
+
+    def index_cpu_to_gpu(self, resources, gpu_id, index):
+        assert gpu_id == 0
+        self.gpu_transfer_calls += 1
+        self.last_gpu_index = index
+        return index
+
+
+class _Reporter:
+    def __init__(self) -> None:
+        self.events: list[tuple[str, dict[str, object]]] = []
+
+    def emit(self, event: str, **fields: object) -> None:
+        self.events.append((event, fields))
+
+    def should_emit(self, *, completed_rows: int, stream: str) -> bool:
+        return True
+
+    def progress(self, event: str, **fields: object) -> None:
+        self.events.append((event, fields))
+
+
+def _build_search(
+    keys: np.ndarray, *, retrieval: int = 2
+) -> tuple[FoldTrainFaissIndex, _FakeFaiss]:
+    fake = _FakeFaiss()
+    search = FoldTrainFaissIndex.build(
+        keys,
+        np.arange(len(keys), dtype="int64"),
+        retrieval=retrieval,
+        faiss_module=fake,
+        reporter=_Reporter(),
+    )
+    return search, fake
+
+
+def test_faiss_gpu_probe_requires_real_gpu_api() -> None:
+    with pytest.raises(DLRuntimeDependencyError, match="FAISS GPU"):
+        probe_faiss_gpu(faiss_module=object())
+
+    fake = _FakeFaiss()
+    probe_faiss_gpu(faiss_module=fake)
+    assert fake.gpu_transfer_calls == 1
+
+
+def test_colab_requirements_pin_the_t4_faiss_gpu_runtime() -> None:
+    requirements = (
+        Path(__file__).resolve().parents[1]
+        / "experiments/independent_dl/requirements-colab.txt"
+    ).read_text(encoding="utf-8")
+
+    assert "faiss-gpu-cu12==1.14.1.post1" in requirements.splitlines()
+
+
+def test_fold_index_contains_only_supplied_train_keys_and_uses_oversampling() -> None:
+    keys = np.arange(24, dtype="float32").reshape(8, 3)
+    reporter = _Reporter()
+    fake = _FakeFaiss()
+    search = FoldTrainFaissIndex.build(
+        keys,
+        np.arange(8, dtype="int64"),
+        retrieval=1,
+        faiss_module=fake,
+        reporter=reporter,
+    )
+
+    result = search.search_and_rerank(
+        torch.tensor([[0.0, 1.0, 2.0]]),
+        query_absolute_indices=torch.tensor([0]),
+    )
+
+    assert fake.last_gpu_index.ids.tolist() == list(range(8))
+    assert fake.last_gpu_index.last_search_k == min(
+        len(keys), TABR_SEARCH_POLICY["oversample_factor"] + 1
+    )
+    assert result.tolist() == [[1]]
+    assert reporter.events[-1][0] == "TABR_INDEX_READY"
+
+
+def test_exact_rerank_matches_bruteforce_and_is_query_order_invariant() -> None:
+    keys = np.array([[0.0], [1.0], [3.0], [7.0]], dtype="float32")
+    search, _ = _build_search(keys, retrieval=2)
+    queries = torch.tensor([[0.0], [3.0]])
+    self_ids = torch.tensor([0, 2])
+
+    paired = search.search_and_rerank(
+        queries, query_absolute_indices=self_ids
+    )
+    reversed_result = search.search_and_rerank(
+        queries.flip(0), query_absolute_indices=self_ids.flip(0)
+    ).flip(0)
+    singleton = torch.cat(
+        [
+            search.search_and_rerank(
+                queries[index : index + 1],
+                query_absolute_indices=self_ids[index : index + 1],
+            )
+            for index in range(2)
+        ]
+    )
+
+    assert paired.tolist() == [[1, 2], [1, 0]]
+    assert torch.equal(reversed_result, paired)
+    assert torch.equal(singleton, paired)
+
+
+@pytest.mark.parametrize(
+    ("keys", "ids", "match"),
+    [
+        (np.array([[0.0], [np.nan]], dtype="float32"), np.arange(2), "finite"),
+        (np.array([[0.0], [1.0]], dtype="float32"), np.array([0, 0]), "unique"),
+        (np.array([0.0, 1.0], dtype="float32"), np.arange(2), "two-dimensional"),
+    ],
+)
+def test_fold_index_rejects_malformed_fold_keys(keys, ids, match) -> None:
+    with pytest.raises(ValueError, match=match):
+        FoldTrainFaissIndex.build(
+            keys,
+            ids,
+            retrieval=1,
+            faiss_module=_FakeFaiss(),
+            reporter=_Reporter(),
+        )
 
 
 def _batch(prefix: str, *, target: bool) -> FeatureBatch:
@@ -93,7 +277,10 @@ def test_tabr_reuses_refreshed_fold_keys_and_matches_exact_topk() -> None:
         x_cat=np.zeros((4, 1), dtype="int64"),
         y=np.array([0.0, 1.0, 0.0, 1.0], dtype="float32"),
     )
-    runtime = _TorchTabRRuntime(context, retrieval=2)
+    reporter = _Reporter()
+    runtime = _TorchTabRRuntime(
+        context, retrieval=2, faiss_module=_FakeFaiss(), reporter=reporter
+    )
     model = _CountingKeyModel()
     query_num = torch.tensor([[0.0], [3.0]])
     query_cat = torch.zeros((2, 1), dtype=torch.long)
@@ -115,6 +302,41 @@ def test_tabr_reuses_refreshed_fold_keys_and_matches_exact_topk() -> None:
     assert model.full_context_encode_calls == 1
     assert first.tolist() == [[1, 2], [1, 0]]
     assert second.tolist() == first.tolist()
+    assert "TABR_CONTEXT_ENCODING_PROGRESS" in [event for event, _ in reporter.events]
+    assert "TABR_INDEX_READY" in [event for event, _ in reporter.events]
+    assert "TABR_SEARCH_PROGRESS" in [event for event, _ in reporter.events]
+    search_counts = [
+        fields["completed_rows"]
+        for event, fields in reporter.events
+        if event == "TABR_SEARCH_PROGRESS"
+    ]
+    assert search_counts == [2, 4]
+
+
+def test_each_tabr_index_refresh_has_an_independent_progress_stream() -> None:
+    context = FeatureBatch(
+        row_id=np.array(["r0", "r1", "r2"]),
+        season=np.array([2023, 2023, 2023], dtype="int64"),
+        game_type=np.array(["R", "R", "F"]),
+        x_num=np.array([[0.0], [1.0], [2.0]], dtype="float32"),
+        x_cat=np.zeros((3, 1), dtype="int64"),
+        y=np.array([0.0, 1.0, 0.0], dtype="float32"),
+    )
+    reporter = _Reporter()
+    runtime = _TorchTabRRuntime(
+        context, retrieval=1, faiss_module=_FakeFaiss(), reporter=reporter
+    )
+    model = _CountingKeyModel()
+
+    runtime.refresh_keys(model, device="cpu")
+    runtime.refresh_keys(model, device="cpu")
+
+    streams = [
+        fields["stream"]
+        for event, fields in reporter.events
+        if event == "TABR_CONTEXT_ENCODING_PROGRESS"
+    ]
+    assert streams == ["tabr_context_encoding_1", "tabr_context_encoding_2"]
 
 
 def test_tabr_rejects_search_before_key_refresh() -> None:
@@ -126,7 +348,9 @@ def test_tabr_rejects_search_before_key_refresh() -> None:
         x_cat=np.zeros((3, 1), dtype="int64"),
         y=np.array([0.0, 1.0, 0.0], dtype="float32"),
     )
-    runtime = _TorchTabRRuntime(context, retrieval=1)
+    runtime = _TorchTabRRuntime(
+        context, retrieval=1, faiss_module=_FakeFaiss()
+    )
 
     try:
         runtime.search(
@@ -150,7 +374,9 @@ def test_tabr_rejects_keys_from_another_model_object() -> None:
         x_cat=np.zeros((3, 1), dtype="int64"),
         y=np.array([0.0, 1.0, 0.0], dtype="float32"),
     )
-    runtime = _TorchTabRRuntime(context, retrieval=1)
+    runtime = _TorchTabRRuntime(
+        context, retrieval=1, faiss_module=_FakeFaiss()
+    )
     runtime.refresh_keys(_CountingKeyModel(), device="cpu")
 
     try:
@@ -164,3 +390,21 @@ def test_tabr_rejects_keys_from_another_model_object() -> None:
         assert "model" in str(error).casefold()
     else:
         raise AssertionError("TabR accepted keys from another model")
+
+
+def test_tabr_probes_faiss_gpu_before_encoding_fold_rows() -> None:
+    context = FeatureBatch(
+        row_id=np.array(["r0", "r1", "r2"]),
+        season=np.array([2023, 2023, 2023], dtype="int64"),
+        game_type=np.array(["R", "R", "F"]),
+        x_num=np.array([[0.0], [1.0], [2.0]], dtype="float32"),
+        x_cat=np.zeros((3, 1), dtype="int64"),
+        y=np.array([0.0, 1.0, 0.0], dtype="float32"),
+    )
+    model = _CountingKeyModel()
+    runtime = _TorchTabRRuntime(context, retrieval=1, faiss_module=object())
+
+    with pytest.raises(DLRuntimeDependencyError, match="FAISS GPU"):
+        runtime.refresh_keys(model, device="cpu")
+
+    assert model.full_context_encode_calls == 0

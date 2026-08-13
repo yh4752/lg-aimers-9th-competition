@@ -1,19 +1,21 @@
-"""Fold-safe, chunked TabR adapter.
+"""Fold-safe TabR adapter with FAISS GPU retrieval and exact reranking.
 
 The E/R/P structure and self-neighbor masking follow the official TabR source
-at commit 17baa9082506f8e7a0f8d11bb1e08212926a1507. This adapter replaces the
-upstream experiment harness and FAISS dependency with exact chunked PyTorch
-top-k search so the candidate pool remains the current fold's training rows.
+at commit 17baa9082506f8e7a0f8d11bb1e08212926a1507. The candidate pool remains
+the current fold's training rows and every approximate shortlist is reranked
+with the original exact squared-L2 expression.
 """
 
 from __future__ import annotations
 
+import time
 from typing import Mapping
 
 import numpy as np
 
 from ..features import FeatureBatch
 from .common import ModelMetadata, import_runtime_module
+from .tabr_search import FoldTrainFaissIndex, probe_faiss_gpu
 
 
 class TabRContractError(ValueError):
@@ -21,7 +23,14 @@ class TabRContractError(ValueError):
 
 
 class _TorchTabRRuntime:
-    def __init__(self, context: FeatureBatch, retrieval: int) -> None:
+    def __init__(
+        self,
+        context: FeatureBatch,
+        retrieval: int,
+        *,
+        faiss_module: object | None = None,
+        reporter: object | None = None,
+    ) -> None:
         if context.y is None:
             raise TabRContractError("TabR context requires training targets")
         if len(context.row_id) <= retrieval:
@@ -29,14 +38,36 @@ class _TorchTabRRuntime:
         self.context = context
         self.retrieval = retrieval
         self.candidate_chunk_size = 8192
-        self._cached_keys: object | None = None
+        self._faiss_module = faiss_module
+        self._reporter = reporter
+        self._search_index: FoldTrainFaissIndex | None = None
         self._cached_model: object | None = None
+        self._refresh_generation = 0
+        self._searched_queries = 0
+        self._search_started = 0.0
+
+    def set_progress_reporter(self, reporter: object) -> None:
+        self._reporter = reporter
+
+    @staticmethod
+    def _gpu_memory(torch: object) -> dict[str, int]:
+        if not torch.cuda.is_available():
+            return {"allocated_bytes": 0, "reserved_bytes": 0, "peak_bytes": 0}
+        return {
+            "allocated_bytes": int(torch.cuda.memory_allocated()),
+            "reserved_bytes": int(torch.cuda.memory_reserved()),
+            "peak_bytes": int(torch.cuda.max_memory_allocated()),
+        }
 
     def refresh_keys(self, model: object, device: str) -> None:
+        probe_faiss_gpu(faiss_module=self._faiss_module)
         torch = import_runtime_module("torch")
+        self._refresh_generation += 1
+        self._searched_queries = 0
         was_training = bool(model.training)
         model.eval()
         keys: list[object] = []
+        encoding_started = time.monotonic()
         with torch.no_grad():
             for start in range(0, len(self.context.row_id), self.candidate_chunk_size):
                 stop = min(start + self.candidate_chunk_size, len(self.context.row_id))
@@ -52,8 +83,31 @@ class _TorchTabRRuntime:
                 )
                 _, candidate_keys = model.encode(candidate_num, candidate_cat)
                 keys.append(candidate_keys.detach().to(dtype=torch.float32, device="cpu"))
+                completed_rows = stop
+                stream = f"tabr_context_encoding_{self._refresh_generation}"
+                if self._reporter is not None and self._reporter.should_emit(
+                    completed_rows=completed_rows, stream=stream
+                ):
+                    if str(device).startswith("cuda"):
+                        torch.cuda.synchronize()
+                    self._reporter.progress(
+                        "TABR_CONTEXT_ENCODING_PROGRESS",
+                        completed_rows=completed_rows,
+                        total_rows=len(self.context.row_id),
+                        started_at=encoding_started,
+                        gpu=self._gpu_memory(torch),
+                        stream=stream,
+                    )
         model.train(was_training)
-        self._cached_keys = torch.cat(keys, dim=0).contiguous()
+        cached_keys = torch.cat(keys, dim=0).contiguous()
+        self._search_index = FoldTrainFaissIndex.build(
+            cached_keys.numpy(),
+            np.arange(len(self.context.row_id), dtype="int64"),
+            retrieval=self.retrieval,
+            reporter=self._reporter,
+            faiss_module=self._faiss_module,
+        )
+        self._search_started = time.monotonic()
         self._cached_model = model
 
     def search(
@@ -64,7 +118,7 @@ class _TorchTabRRuntime:
         *,
         row_indices: object | None,
     ) -> object:
-        if self._cached_keys is None:
+        if self._search_index is None:
             raise RuntimeError("TabR retrieval keys require refresh before search")
         if model is not self._cached_model:
             raise RuntimeError("TabR retrieval keys belong to another model")
@@ -73,39 +127,30 @@ class _TorchTabRRuntime:
 
     def _search_keys(self, query_keys: object, *, row_indices: object | None) -> object:
         torch = import_runtime_module("torch")
-        if self._cached_keys is None:
+        if self._search_index is None:
             raise RuntimeError("TabR retrieval keys require refresh before search")
-        device = query_keys.device
-        top_scores = None
-        top_indices = None
         with torch.no_grad():
-            for start in range(0, len(self.context.row_id), self.candidate_chunk_size):
-                stop = min(start + self.candidate_chunk_size, len(self.context.row_id))
-                candidate_keys = self._cached_keys[start:stop].to(device=device)
-                scores = (
-                    -query_keys.square().sum(-1, keepdim=True)
-                    + 2.0 * (query_keys @ candidate_keys.T)
-                    - candidate_keys.square().sum(-1).unsqueeze(0)
+            top_indices = self._search_index.search_and_rerank(
+                query_keys,
+                query_absolute_indices=row_indices,
+            )
+        if self._reporter is not None:
+            stream = f"tabr_search_{self._refresh_generation}"
+            self._searched_queries += len(query_keys)
+            completed_rows = self._searched_queries
+            if self._reporter.should_emit(
+                completed_rows=completed_rows, stream=stream
+            ):
+                if str(query_keys.device).startswith("cuda"):
+                    torch.cuda.synchronize()
+                self._reporter.progress(
+                    "TABR_SEARCH_PROGRESS",
+                    completed_rows=completed_rows,
+                    total_rows=max(len(self.context.row_id), completed_rows),
+                    started_at=self._search_started,
+                    gpu=self._gpu_memory(torch),
+                    stream=stream,
                 )
-                candidate_indices = torch.arange(start, stop, device=device)
-                if row_indices is not None:
-                    scores = scores.masked_fill(
-                        candidate_indices.unsqueeze(0).eq(row_indices.unsqueeze(1)),
-                        float("-inf"),
-                    )
-                expanded_indices = candidate_indices.unsqueeze(0).expand(
-                    len(query_keys), -1
-                )
-                if top_scores is not None:
-                    scores = torch.cat([top_scores, scores], dim=1)
-                    expanded_indices = torch.cat([top_indices, expanded_indices], dim=1)
-                keep = min(self.retrieval, scores.shape[1])
-                top_scores, positions = torch.topk(
-                    scores, k=keep, dim=1, largest=True, sorted=True
-                )
-                top_indices = expanded_indices.gather(1, positions)
-        if top_indices is None or top_indices.shape[1] != self.retrieval:
-            raise RuntimeError("TabR search did not produce the requested contexts")
         return top_indices
 
     def probabilities(self, model: object, x_num: object, x_cat: object) -> object:
@@ -258,6 +303,14 @@ class TabRAdapter:
     def __init__(self, runtime: object | None = None) -> None:
         self._runtime = runtime
         self._context: FeatureBatch | None = None
+        self._reporter: object | None = None
+
+    def set_progress_reporter(self, reporter: object) -> None:
+        self._reporter = reporter
+        if self._runtime is not None and hasattr(
+            self._runtime, "set_progress_reporter"
+        ):
+            self._runtime.set_progress_reporter(reporter)
 
     def fit_context(self, batch: FeatureBatch) -> None:
         if batch.y is None:
@@ -278,7 +331,9 @@ class TabRAdapter:
             raise TabRContractError("fit_context must run before TabR build")
         if self._runtime is None:
             self._runtime = _TorchTabRRuntime(
-                self._context, int(model_config["retrieval"])
+                self._context,
+                int(model_config["retrieval"]),
+                reporter=self._reporter,
             )
         return _build_torch_model(model_config, metadata, device)
 
