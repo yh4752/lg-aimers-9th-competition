@@ -113,6 +113,8 @@ def _safe_regular_file(path: str | Path, project_root: str | Path) -> Path:
             mode = current.lstat().st_mode
             if stat.S_ISLNK(mode):
                 raise RulesContractError(f"symlink is not allowed: {current}")
+    except RulesContractError:
+        raise
     except (OSError, ValueError) as error:
         raise RulesContractError(f"cannot inspect rules file: {candidate}") from error
     if not stat.S_ISREG(current.lstat().st_mode):
@@ -135,6 +137,8 @@ def _safe_project_path(path: str | Path, project_root: str | Path) -> Path:
             current = current / part
             if stat.S_ISLNK(current.lstat().st_mode):
                 raise RulesContractError(f"symlink is not allowed: {current}")
+    except RulesContractError:
+        raise
     except (OSError, ValueError) as error:
         raise RulesContractError(f"cannot inspect project path: {candidate}") from error
     return current
