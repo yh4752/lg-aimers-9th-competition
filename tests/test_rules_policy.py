@@ -17,6 +17,7 @@ from competition_rules.contract import (
 
 ROOT = Path(__file__).resolve().parents[1]
 POLICY = ROOT / "competition_rules/policy.json"
+FINAL_REVIEW = ROOT / "reports/rules/2026-08-15-final-policy-review.json"
 
 
 def test_checked_in_policy_matches_official_rules() -> None:
@@ -110,3 +111,18 @@ def test_policy_digest_is_canonical() -> None:
     right = {"a": {"x": True}, "b": [2, 1]}
 
     assert policy_digest(left) == policy_digest(right)
+
+
+def test_final_policy_review_matches_current_official_policy() -> None:
+    policy = load_policy(POLICY, project_root=ROOT)
+    package_time = datetime(2026, 8, 15, 23, 59, tzinfo=ZoneInfo("Asia/Seoul"))
+
+    review = load_policy_review(
+        FINAL_REVIEW,
+        policy=policy,
+        package_time=package_time,
+    )
+
+    assert review["verdict"] == "unchanged"
+    assert review["policy_sha256"] == policy_digest(policy)
+    assert review["sources"] == policy["official_sources"]
