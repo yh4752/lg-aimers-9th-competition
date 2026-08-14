@@ -369,8 +369,9 @@ PHASES = (
 )
 ```
 
-Select 256 production canaries solely from the accepted runtime hash and
-`row_id`. Each exclusive canonical phase JSON records identity, phase, selected
+Run the production phase audit on all five locally supplied official sample
+rows and use every one of them as a singleton. Each exclusive canonical phase
+JSON records identity, phase, selected
 ID digest, feature digest, probability digest, state digest before/after,
 elapsed seconds, status, and its own hash. Reuse requires all fields and hashes
 to match. Compare all row-aligned values against baseline before publishing a
@@ -444,9 +445,15 @@ is validation-only and is not counted as submitted-requirements install time.
 Record the actual GPU host versions separately. Render and bind the exact
 script, run the same five-row probe on the T4, and require probabilities to
 match the exact CPU probe within `1e-6`. Then run the phased audit and execute
-the script in an isolated sandbox with `data/` paths. Verify the CSV against
-sample schema, IDs, order, row count, and probability bounds. Measure the two
-submitted requirements separately after the exact base environment exists.
+the script in an isolated sandbox with `data/` paths. Verify the five-row CSV
+against sample schema, IDs, order, row count, and probability bounds.
+
+Build a deterministic 245,789-row capacity frame by repeating the five official
+sample rows and replacing only `row_id` with unique `SCALE_000001`-style IDs.
+Run the exact script against a matching synthetic sample submission to measure
+time, RAM, and VRAM. Record `audit_scope="official_sample_plus_synthetic_scale"`
+and never call this hidden-evaluation evidence. Measure the two submitted
+requirements separately after the exact base environment exists.
 
 Construct one `AuditIdentity` before either probe. Bind the refreshed policy
 version, SHA-256 of the official test and sample inputs, delivery lineage,

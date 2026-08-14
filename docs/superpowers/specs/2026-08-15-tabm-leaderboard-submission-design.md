@@ -141,16 +141,21 @@ in a GPU batch, but it must not compute evaluation-set means, standard
 deviations, frequencies, ranks, groups, rolling state, calibration parameters,
 or OOV statistics.
 
-The full audit uses the actual candidate script or the byte-identical runtime
-logic and the complete official test frame. It compares all rows in original
-order, reverse order, deterministic shuffle, and several batch partitions. It
-also checks 256 singleton rows selected solely by a fixed hash of `row_id` and
-the policy seed. The preprocessing features must be bit-identical by `row_id`;
-probabilities must agree within the documented floating-point tolerance; the
-adapter state digest must not change. Testing every one of 245,789 rows as a
-separate GPU call is deliberately excluded because it adds substantial runtime
-without materially strengthening the combination of source review, full-frame
-reordering, full-frame rebatching, and fixed singleton canaries.
+The locally supplied official `test.csv` contains five sample rows. The hidden
+245,789-row evaluation frame exists only inside the DACON evaluator and cannot
+be audited before submission. Evidence must state this limitation plainly.
+
+The pre-submission audit uses the actual candidate script or byte-identical
+runtime logic on all five official sample rows. It compares original order,
+reverse order, deterministic shuffle, several batch partitions, and every row
+as a singleton. Preprocessing features must be bit-identical by `row_id`,
+probabilities must agree within the documented floating-point tolerance, and
+the adapter state digest must not change.
+
+Capacity testing uses a deterministic 245,789-row scale fixture made by
+repeating the five official sample rows and assigning unique synthetic
+`row_id` values. This fixture measures runtime and memory only; it is not
+described as hidden-test accuracy or full hidden-test independence evidence.
 
 The runtime also runs deterministic singleton canaries before writing the final
 CSV. A canary mismatch blocks output publication.
@@ -168,10 +173,11 @@ environment with PyTorch 2.7.1 CPU, pandas 2.0.3, and NumPy 1.26.4. In that
 environment, install the two submitted requirements, deserialize the real
 checkpoint, and produce the deterministic five-row prediction. This proves
 Python and library compatibility without pretending that a Colab or Kaggle
-image is the evaluator. Second, run full 245,789-row inference and the
-row-independence audit on the T4 GPU host, recording its actual Python, PyTorch,
-CUDA, pandas, and NumPy versions. Compare the exact-environment CPU probe and
-GPU-host five-row probabilities within the documented floating-point tolerance.
+image is the evaluator. Second, run the complete five-row independence audit
+and the 245,789-row synthetic capacity fixture on the T4 GPU host, recording
+its actual Python, PyTorch, CUDA, pandas, and NumPy versions. Compare the
+exact-environment CPU probe and GPU-host five-row probabilities within the
+documented floating-point tolerance.
 
 The user runs one complete validation cell on a GPU service. The cell receives
 the candidate handoff and official data as uploaded inputs, installs only the
@@ -184,10 +190,11 @@ Validation must record:
   and numerical-embedding versions;
 - dependency installation command, return code, elapsed seconds, and logs;
 - successful checkpoint deserialization and a deterministic five-row probe;
-- full 245,789-row inference time, peak RAM, peak allocated VRAM, and output
-  digest;
+- five-row official sample audit and 245,789-row synthetic capacity time, peak
+  RAM, peak allocated VRAM, and output digest;
 - exact output schema, row count, row order, and probability checks;
-- restartable full row-independence audit evidence;
+- restartable five-row row-independence audit evidence labeled
+  `official_sample_plus_synthetic_scale`;
 - candidate, model, adapter, rendered-runtime, preprocessing, config, and data
   hashes.
 
