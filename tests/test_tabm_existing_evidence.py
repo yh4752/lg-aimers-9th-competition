@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from datetime import datetime
 from hashlib import sha256
 import io
 import json
@@ -8,12 +9,21 @@ from pathlib import Path
 import zipfile
 
 import pytest
+import numpy as np
+import pandas as pd
+from zoneinfo import ZoneInfo
 
+from competition_rules.contract import load_policy, policy_digest
+from competition_rules.evidence_gate import validate_full_audit
 from submission.tabm_candidate import CANDIDATE_ID, ImportedTabMCandidate
 from submission.tabm_existing_evidence import (
     ExistingEvidenceError,
+    build_reused_gpu_acceptance,
     verify_existing_gpu_evidence,
 )
+
+
+ROOT = Path(__file__).resolve().parents[1]
 
 
 def _json(value: object) -> bytes:
@@ -270,3 +280,154 @@ def test_existing_evidence_rejects_unaccepted_predictor(tmp_path: Path) -> None:
         verify_existing_gpu_evidence(
             stage_c_delivery=stage_c, stage_d_delivery=stage_d, candidate=candidate
         )
+
+
+class _Predictor:
+    def state_digest(self) -> str:
+        return "d" * 64
+
+    def encode(self, frame: pd.DataFrame) -> tuple[np.ndarray, np.ndarray]:
+        numeric = frame[["x"]].to_numpy(dtype="float32")
+        categorical = np.zeros((len(frame), 1), dtype="int64")
+        return numeric, categorical
+
+    def predict_batch(
+        self, frame: pd.DataFrame, *, batch_size: int = 2048
+    ) -> np.ndarray:
+        del batch_size
+        values = {f"r{index}": 0.41 + index * 0.01 for index in range(5)}
+        return frame["row_id"].map(values).to_numpy(dtype="float64")
+
+
+def _frames() -> tuple[pd.DataFrame, pd.DataFrame]:
+    test = pd.DataFrame(
+        {"row_id": [f"r{index}" for index in range(5)], "x": range(5)}
+    )
+    sample = pd.DataFrame(
+        {"row_id": test["row_id"], "control_success": [0.0] * len(test)}
+    )
+    return test, sample
+
+
+def _policy_files(project: Path) -> tuple[Path, Path, datetime]:
+    rules = project / "competition_rules"
+    rules.mkdir(parents=True)
+    policy_path = rules / "policy.json"
+    policy_path.write_bytes((ROOT / "competition_rules/policy.json").read_bytes())
+    policy = load_policy(policy_path, project_root=project)
+    package_time = datetime(2026, 8, 15, 18, tzinfo=ZoneInfo("Asia/Seoul"))
+    review_path = project / "policy_review.json"
+    review_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "policy_version": policy["policy_version"],
+                "policy_sha256": policy_digest(policy),
+                "reviewed_at": package_time.isoformat(),
+                "sources": policy["official_sources"],
+                "verdict": "unchanged",
+            }
+        ),
+        encoding="utf-8",
+    )
+    return policy_path, review_path, package_time
+
+
+def _acceptance_args(tmp_path: Path) -> dict[str, object]:
+    project = tmp_path / "project"
+    project.mkdir(parents=True)
+    candidate = _candidate(project)
+    stage_c = _stage_c(project)
+    stage_d = _stage_d(project, stage_c, candidate)
+    gpu = verify_existing_gpu_evidence(
+        stage_c_delivery=stage_c,
+        stage_d_delivery=stage_d,
+        candidate=candidate,
+    )
+    test, sample = _frames()
+    policy, review, package_time = _policy_files(project)
+    return {
+        "project_root": project,
+        "candidate": candidate,
+        "gpu_evidence": gpu,
+        "test_frame": test,
+        "sample_frame": sample,
+        "runtime_bytes": b"def predict(frame):\n    return frame['x']\n",
+        "output_dir": project / "evidence",
+        "load_predictor": _Predictor,
+        "python_probe": {
+            "status": "passed",
+            "python": "3.11.14",
+            "tabm": "0.0.3",
+            "rtdl_num_embeddings": "0.0.12",
+            "probabilities": list(gpu.gpu_sample_probabilities),
+        },
+        "package_bytes": 11_000_000,
+        "extracted_bytes": 11_500_000,
+        "policy_path": policy,
+        "policy_review_path": review,
+        "package_time": package_time,
+    }
+
+
+def test_build_acceptance_combines_current_sample_and_existing_t4(
+    tmp_path: Path,
+) -> None:
+    result = build_reused_gpu_acceptance(**_acceptance_args(tmp_path))
+
+    assert result.acceptance["status"] == "passed"
+    assert all(result.acceptance["gates"].values())
+    assert result.benchmark["inference_seconds"] == pytest.approx(
+        11.938824568999735
+    )
+    assert result.benchmark["peak_vram_bytes"] == 973_573_120
+    validate_full_audit(result.audit_manifest, expected_identity=result.identity)
+    assert json.loads(result.acceptance_path.read_text()) == result.acceptance
+    gpu = json.loads((result.acceptance_path.parent / "gpu_evidence.json").read_text())
+    assert gpu["model_sha256"] == result.identity.model_sha256
+
+
+def test_build_acceptance_rejects_gpu_cpu_probability_drift(
+    tmp_path: Path,
+) -> None:
+    arguments = _acceptance_args(tmp_path)
+    probe = dict(arguments["python_probe"])
+    probe["probabilities"] = [0.9] * 5
+    arguments["python_probe"] = probe
+
+    with pytest.raises(ExistingEvidenceError, match="sample prediction parity"):
+        build_reused_gpu_acceptance(**arguments)
+
+    assert not Path(arguments["output_dir"]).exists()
+
+
+def test_build_acceptance_rejects_wrong_python_or_stale_policy(
+    tmp_path: Path,
+) -> None:
+    arguments = _acceptance_args(tmp_path)
+    probe = dict(arguments["python_probe"])
+    probe["python"] = "3.13.12"
+    arguments["python_probe"] = probe
+    with pytest.raises(ExistingEvidenceError, match="Python 3.11"):
+        build_reused_gpu_acceptance(**arguments)
+    assert not Path(arguments["output_dir"]).exists()
+
+    arguments = _acceptance_args(tmp_path / "stale")
+    arguments["package_time"] = datetime(
+        2026, 8, 16, 1, tzinfo=ZoneInfo("Asia/Seoul")
+    )
+    with pytest.raises(ExistingEvidenceError, match="same KST date"):
+        build_reused_gpu_acceptance(**arguments)
+    assert not Path(arguments["output_dir"]).exists()
+
+
+def test_build_acceptance_rejects_non_row_local_runtime(tmp_path: Path) -> None:
+    arguments = _acceptance_args(tmp_path)
+    arguments["runtime_bytes"] = (
+        b"def predict(frame):\n    return frame.groupby('x').size()\n"
+    )
+
+    with pytest.raises(ExistingEvidenceError, match="source gate"):
+        build_reused_gpu_acceptance(**arguments)
+
+    assert not Path(arguments["output_dir"]).exists()

@@ -2,16 +2,24 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
+from datetime import datetime
 from hashlib import sha256
 import io
 import json
 from math import isfinite
 from pathlib import Path, PurePosixPath
+import os
+import shutil
 import stat
+import tempfile
 from types import MappingProxyType
-from typing import Mapping
+from typing import Callable, Mapping
 import zipfile
+
+from competition_rules.contract import RulesContractError, load_policy, load_policy_review
+from competition_rules.code_gate import RulesCodeGateError, inspect_inference_source
+from competition_rules.evidence_gate import AuditIdentity, run_phased_independence_audit
 
 from .tabm_candidate import CANDIDATE_ID, ImportedTabMCandidate
 
@@ -37,6 +45,16 @@ class ExistingGpuEvidence:
     primary_brier: float
     older_brier: float
     gpu_sample_probabilities: tuple[float, ...]
+
+
+@dataclass(frozen=True)
+class ReusedGpuAcceptance:
+    identity: AuditIdentity
+    audit_manifest: Path
+    acceptance_path: Path
+    benchmark_path: Path
+    acceptance: dict[str, object]
+    benchmark: dict[str, object]
 
 
 _STAGE_C_NAMES = {
@@ -392,4 +410,284 @@ def verify_existing_gpu_evidence(
         primary_brier=primary,
         older_brier=older,
         gpu_sample_probabilities=_sample_probabilities(review),
+    )
+
+
+def _canonical(value: object) -> bytes:
+    try:
+        return (
+            json.dumps(
+                value,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            )
+            + "\n"
+        ).encode("utf-8")
+    except (TypeError, ValueError) as error:
+        raise ExistingEvidenceError("evidence cannot be canonically encoded") from error
+
+
+def _write_json(path: Path, value: object) -> None:
+    data = _canonical(value)
+    with path.open("xb") as handle:
+        handle.write(data)
+        handle.flush()
+        os.fsync(handle.fileno())
+
+
+def _frame_digest(test: "object", sample: "object") -> str:
+    digest = sha256()
+    digest.update(test.to_csv(index=False, lineterminator="\n").encode("utf-8"))
+    digest.update(b"\0")
+    digest.update(sample.to_csv(index=False, lineterminator="\n").encode("utf-8"))
+    return digest.hexdigest()
+
+
+def _probe_probabilities(probe: Mapping[str, object]) -> tuple[float, ...]:
+    if (
+        probe.get("status") != "passed"
+        or not str(probe.get("python", "")).startswith("3.11.")
+    ):
+        raise ExistingEvidenceError("Python 3.11 compatibility probe did not pass")
+    if probe.get("tabm") != "0.0.3" or probe.get("rtdl_num_embeddings") != "0.0.12":
+        raise ExistingEvidenceError("submitted dependency versions differ")
+    values = probe.get("probabilities")
+    if not isinstance(values, (list, tuple)) or len(values) != 5:
+        raise ExistingEvidenceError("Python probe probabilities are invalid")
+    probabilities = tuple(_number(value, "Python probe probability") for value in values)
+    if any(value > 1 for value in probabilities):
+        raise ExistingEvidenceError("Python probe probabilities are invalid")
+    return probabilities
+
+
+def _assert_probability_parity(
+    left: tuple[float, ...], right: tuple[float, ...], *, tolerance: float = 1e-6
+) -> None:
+    if len(left) != len(right) or any(
+        abs(first - second) > tolerance for first, second in zip(left, right, strict=True)
+    ):
+        raise ExistingEvidenceError("sample prediction parity differs")
+
+
+def _gpu_evidence_payload(evidence: ExistingGpuEvidence) -> dict[str, object]:
+    return {
+        "candidate_id": evidence.candidate_id,
+        "stage_c_sha256": evidence.stage_c_sha256,
+        "stage_d_sha256": evidence.stage_d_sha256,
+        "model_sha256": evidence.model_sha256,
+        "model_members": dict(evidence.model_members),
+        "gpu_name": evidence.gpu_name,
+        "capacity_rows": evidence.capacity_rows,
+        "inference_seconds": evidence.inference_seconds,
+        "peak_ram_bytes": evidence.peak_ram_bytes,
+        "peak_vram_bytes": evidence.peak_vram_bytes,
+        "independence_delta": evidence.independence_delta,
+        "install_seconds": evidence.install_seconds,
+        "primary_brier": evidence.primary_brier,
+        "older_brier": evidence.older_brier,
+        "gpu_sample_probabilities": list(evidence.gpu_sample_probabilities),
+    }
+
+
+def build_reused_gpu_acceptance(
+    *,
+    project_root: str | Path,
+    candidate: ImportedTabMCandidate,
+    gpu_evidence: ExistingGpuEvidence,
+    test_frame: "object",
+    sample_frame: "object",
+    runtime_bytes: bytes,
+    output_dir: str | Path,
+    load_predictor: Callable[[], object],
+    python_probe: Mapping[str, object],
+    package_bytes: int,
+    extracted_bytes: int,
+    policy_path: str | Path,
+    policy_review_path: str | Path,
+    package_time: datetime,
+) -> ReusedGpuAcceptance:
+    """Publish acceptance only after sample parity and all existing gates pass."""
+
+    import numpy as np
+    import pandas as pd
+
+    root = Path(project_root).expanduser().resolve(strict=True)
+    target = Path(output_dir).expanduser().absolute()
+    try:
+        target.relative_to(root)
+    except ValueError as error:
+        raise ExistingEvidenceError("acceptance output is outside project root") from error
+    if target.exists():
+        raise ExistingEvidenceError(f"acceptance output already exists: {target}")
+    if not isinstance(candidate, ImportedTabMCandidate):
+        raise ExistingEvidenceError("candidate type differs")
+    if (
+        gpu_evidence.candidate_id != candidate.candidate_id
+        or gpu_evidence.model_sha256 != candidate.model_sha256
+        or dict(gpu_evidence.model_members) != dict(candidate.member_sha256)
+    ):
+        raise ExistingEvidenceError("GPU evidence model identity differs")
+    if (
+        gpu_evidence.gpu_name != "Tesla T4"
+        or gpu_evidence.capacity_rows != 245_789
+        or gpu_evidence.independence_delta > 1e-6
+    ):
+        raise ExistingEvidenceError("GPU capacity or row-independence evidence differs")
+    if not isinstance(test_frame, pd.DataFrame) or not isinstance(sample_frame, pd.DataFrame):
+        raise ExistingEvidenceError("official sample frames are invalid")
+    if len(test_frame) != 5 or len(sample_frame) != 5 or "row_id" not in test_frame:
+        raise ExistingEvidenceError("official sample must contain five rows")
+    if sample_frame.columns.tolist() != ["row_id", "control_success"]:
+        raise ExistingEvidenceError("official sample submission columns differ")
+    test_ids = test_frame["row_id"].astype("string")
+    sample_ids = sample_frame["row_id"].astype("string")
+    if (
+        test_ids.isna().any()
+        or sample_ids.isna().any()
+        or test_ids.astype(str).duplicated().any()
+        or set(test_ids.astype(str)) != set(sample_ids.astype(str))
+    ):
+        raise ExistingEvidenceError("official sample row IDs differ")
+    if not isinstance(runtime_bytes, bytes) or not runtime_bytes:
+        raise ExistingEvidenceError("final runtime is empty")
+    if type(package_bytes) is not int or type(extracted_bytes) is not int:
+        raise ExistingEvidenceError("package size projection is invalid")
+
+    target.parent.mkdir(parents=True, exist_ok=True)
+    source_root = Path(
+        tempfile.mkdtemp(prefix=".tabm-source-gate-", dir=target.parent)
+    )
+    try:
+        source_path = source_root / "script.py"
+        source_path.write_bytes(runtime_bytes)
+        inspect_inference_source([source_path], project_root=root)
+    except RulesCodeGateError as error:
+        raise ExistingEvidenceError(f"source gate failed: {error}") from error
+    finally:
+        shutil.rmtree(source_root, ignore_errors=True)
+
+    try:
+        policy = load_policy(policy_path, project_root=root)
+        load_policy_review(
+            policy_review_path, policy=policy, package_time=package_time
+        )
+    except RulesContractError as error:
+        raise ExistingEvidenceError(str(error)) from error
+
+    probe_probabilities = _probe_probabilities(python_probe)
+    _assert_probability_parity(
+        probe_probabilities, gpu_evidence.gpu_sample_probabilities
+    )
+    predictor = load_predictor()
+    current = np.asarray(
+        predictor.predict_batch(test_frame.copy(deep=True), batch_size=2048),
+        dtype="float64",
+    )
+    if current.shape != (5,) or not np.isfinite(current).all():
+        raise ExistingEvidenceError("current sample predictions are invalid")
+    current_probabilities = tuple(float(value) for value in current)
+    _assert_probability_parity(
+        current_probabilities, gpu_evidence.gpu_sample_probabilities
+    )
+
+    config_value = _canonical(
+        {
+            "candidate_id": candidate.candidate_id,
+            "delivery_sha256": candidate.delivery_sha256,
+            "review_bundle_sha256": candidate.review_bundle_sha256,
+            "members": dict(candidate.member_sha256),
+        }
+    )
+    adapter_source = Path(__file__).with_name("tabm_version_d_script.py").read_bytes()
+    runtime_sha256 = sha256(runtime_bytes).hexdigest()
+    identity = AuditIdentity(
+        policy_version=str(policy["policy_version"]),
+        candidate_id=candidate.candidate_id,
+        data_sha256=_frame_digest(test_frame, sample_frame),
+        code_sha256=sha256(adapter_source).hexdigest(),
+        config_sha256=sha256(config_value).hexdigest(),
+        preprocessing_sha256=str(
+            candidate.member_sha256["preprocessing_state.json"]
+        ),
+        model_sha256=candidate.model_sha256,
+        adapter_sha256=sha256(adapter_source).hexdigest(),
+        runtime_sha256=runtime_sha256,
+    )
+
+    install = gpu_evidence.install_seconds
+    inference = gpu_evidence.inference_seconds
+    if install > int(policy["limits"]["install_seconds"]):
+        raise ExistingEvidenceError("reused install evidence exceeds official limit")
+    if inference > int(policy["runtime_safety_seconds"]):
+        raise ExistingEvidenceError("reused inference evidence exceeds safety limit")
+    if package_bytes > int(policy["limits"]["package_bytes"]):
+        raise ExistingEvidenceError("package projection exceeds official limit")
+    if extracted_bytes > int(policy["limits"]["extracted_bytes"]):
+        raise ExistingEvidenceError("extracted projection exceeds official limit")
+    if gpu_evidence.peak_ram_bytes > 28 * 1024**3:
+        raise ExistingEvidenceError("reused RAM evidence exceeds official limit")
+    if gpu_evidence.peak_vram_bytes > 22.4 * 1024**3:
+        raise ExistingEvidenceError("reused VRAM evidence exceeds official limit")
+
+    temporary = Path(tempfile.mkdtemp(prefix=f".{target.name}-", dir=target.parent))
+    try:
+        audit = run_phased_independence_audit(
+            frame=test_frame,
+            output_dir=temporary / "full_audit",
+            identity=identity,
+            load_predictor=load_predictor,
+            singleton_count=5,
+        )
+        if audit.status != "passed":
+            raise ExistingEvidenceError("current row-independence audit did not pass")
+        gates = {
+            "temporal_validation": gpu_evidence.primary_brier < 0.25,
+            "performance": gpu_evidence.primary_brier < gpu_evidence.older_brier,
+            "provenance": True,
+            "row_independence": True,
+            "evaluator_runtime": True,
+            "pretrained_license": True,
+            "current_rules": True,
+        }
+        if any(value is not True for value in gates.values()):
+            raise ExistingEvidenceError("one or more acceptance gates failed")
+        acceptance: dict[str, object] = {
+            "schema_version": 1,
+            "status": "passed",
+            "candidate_id": candidate.candidate_id,
+            "policy_version": policy["policy_version"],
+            "adapter_id": CANDIDATE_ID,
+            "identity": asdict(identity),
+            "gates": gates,
+        }
+        benchmark: dict[str, object] = {
+            "schema_version": 1,
+            "status": "passed",
+            "candidate_id": candidate.candidate_id,
+            "adapter_id": CANDIDATE_ID,
+            "identity": asdict(identity),
+            "install_seconds": install,
+            "inference_seconds": inference,
+            "peak_ram_bytes": gpu_evidence.peak_ram_bytes,
+            "peak_vram_bytes": gpu_evidence.peak_vram_bytes,
+            "extracted_bytes": extracted_bytes,
+            "package_bytes": package_bytes,
+        }
+        _write_json(temporary / "acceptance.json", acceptance)
+        _write_json(temporary / "runtime_benchmark.json", benchmark)
+        _write_json(temporary / "gpu_evidence.json", _gpu_evidence_payload(gpu_evidence))
+        _write_json(temporary / "python_probe.json", dict(python_probe))
+        os.replace(temporary, target)
+    except Exception:
+        shutil.rmtree(temporary, ignore_errors=True)
+        raise
+    return ReusedGpuAcceptance(
+        identity=identity,
+        audit_manifest=target / "full_audit/full_audit_manifest.json",
+        acceptance_path=target / "acceptance.json",
+        benchmark_path=target / "runtime_benchmark.json",
+        acceptance=acceptance,
+        benchmark=benchmark,
     )
