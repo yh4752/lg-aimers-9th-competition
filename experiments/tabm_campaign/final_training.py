@@ -188,6 +188,7 @@ def fit_final_member(
         "data_archive_sha256",
         "train_sha256",
         "runtime_sha256",
+        "environment_sha256",
         "training_source_sha256",
     }
     if set(checkpoint_identity) != required_identity or any(

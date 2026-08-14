@@ -202,6 +202,7 @@ def _snapshot_identity() -> dict[str, str]:
         "data_archive_sha256": "2" * 64,
         "train_sha256": "3" * 64,
         "runtime_sha256": "4" * 64,
+        "environment_sha256": "6" * 64,
         "training_source_sha256": "5" * 64,
     }
 
@@ -302,6 +303,25 @@ def test_frozen_snapshot_round_trip_has_no_training_state(tmp_path: Path) -> Non
     assert "rng" not in lowered
 
 
+def test_frozen_restore_replaces_partial_training_state(tmp_path: Path) -> None:
+    from experiments.tabm_campaign.version_d import (
+        restore_frozen_snapshot,
+        write_frozen_snapshot,
+    )
+
+    source = tmp_path / "source"
+    _frozen_artifact(source)
+    snapshot = write_frozen_snapshot(
+        tmp_path / "snapshots", source, _snapshot_identity()
+    )
+    destination = tmp_path / "destination"
+    destination.mkdir()
+    (destination / "preprocessing_state.json").write_bytes(b"partial")
+    restore_frozen_snapshot(snapshot, destination, _snapshot_identity())
+    assert (destination / "inference_manifest.json").is_file()
+    assert not (tmp_path / ".destination.previous").exists()
+
+
 def test_recovery_selects_frozen_before_latest_emergency(tmp_path: Path) -> None:
     from experiments.tabm_campaign.version_d import (
         select_recovery_snapshot,
@@ -323,3 +343,43 @@ def test_recovery_selects_frozen_before_latest_emergency(tmp_path: Path) -> None
     selected = select_recovery_snapshot([emergency], [frozen], _snapshot_identity())
     assert selected.mode == "frozen"
     assert selected.path == frozen
+
+
+def test_review_delivery_is_review_only_and_verifiable(tmp_path: Path) -> None:
+    from experiments.tabm_campaign.version_d import (
+        verify_review_delivery,
+        write_review_delivery,
+    )
+
+    review = write_stage_bundles(
+        tmp_path / "stage_d",
+        StageEvidence(
+            "D",
+            "1" * 64,
+            "4" * 64,
+            {"final_review.json": b"{}"},
+            {},
+        ),
+    ).review
+    log = tmp_path / "version_d.log"
+    log.write_bytes(b"VERSION_D_REVIEW_READY\n")
+    delivery = write_review_delivery(
+        output_dir=tmp_path / "output",
+        review_bundle=review,
+        log_path=log,
+        contract_sha256="1" * 64,
+        data_archive_sha256="2" * 64,
+        stage_c_delivery_sha256="3" * 64,
+        prior_manifest_sha256="4" * 64,
+        frozen_sha256="5" * 64,
+        runtime_versions={"python": "3.12"},
+    )
+    manifest = verify_review_delivery(delivery)
+    assert manifest["review_only"] is True
+    assert manifest["submission_package"] is False
+    with ZipFile(delivery) as archive:
+        assert set(archive.namelist()) == {
+            "delivery_manifest.json",
+            "tabm_hand_matchup_final_review_bundle.zip",
+            "version_d.log",
+        }

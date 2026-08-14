@@ -529,6 +529,83 @@ def verify_frozen_snapshot(
     return VerifiedFrozen(path, file_sha256(path), dict(expected_identity))
 
 
+def restore_emergency_snapshot(
+    path: Path,
+    checkpoint_path: Path,
+    artifact_root: Path,
+    expected_identity: Mapping[str, str],
+) -> VerifiedEmergency:
+    verified = verify_emergency_snapshot(path, expected_identity)
+    with ZipFile(path) as archive:
+        values = {
+            name: archive.read(name)
+            for name in (
+                "checkpoint.pt",
+                "preprocessing_state.json",
+                "numeric_embedding_0.json",
+            )
+        }
+    artifact_root.mkdir(parents=True, exist_ok=True)
+    _atomic_bytes(checkpoint_path, values["checkpoint.pt"])
+    _atomic_bytes(
+        artifact_root / "preprocessing_state.json",
+        values["preprocessing_state.json"],
+    )
+    _atomic_bytes(
+        artifact_root / "numeric_embedding_0.json",
+        values["numeric_embedding_0.json"],
+    )
+    return verified
+
+
+def restore_frozen_snapshot(
+    path: Path,
+    artifact_root: Path,
+    expected_identity: Mapping[str, str],
+) -> VerifiedFrozen:
+    verified = verify_frozen_snapshot(path, expected_identity)
+    with ZipFile(path) as archive:
+        names = set(archive.namelist()) - {"frozen_manifest.json"}
+        values = {name: archive.read(name) for name in names}
+    replace_existing = artifact_root.is_dir()
+    if replace_existing:
+        actual = {
+            item.relative_to(artifact_root).as_posix(): item.read_bytes()
+            for item in artifact_root.rglob("*")
+            if item.is_file()
+        }
+        if actual == values:
+            return verified
+    elif artifact_root.exists():
+        raise VersionDError("frozen artifact destination is unsafe")
+    artifact_root.parent.mkdir(parents=True, exist_ok=True)
+    temporary = Path(
+        tempfile.mkdtemp(prefix=f".{artifact_root.name}-", dir=artifact_root.parent)
+    )
+    try:
+        for name, value in values.items():
+            target = temporary.joinpath(*PurePosixPath(name).parts)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            _atomic_bytes(target, value)
+        if replace_existing:
+            backup = artifact_root.with_name(f".{artifact_root.name}.previous")
+            if backup.exists():
+                raise VersionDError("stale frozen artifact backup exists")
+            os.replace(artifact_root, backup)
+            try:
+                os.replace(temporary, artifact_root)
+            except Exception:
+                os.replace(backup, artifact_root)
+                raise
+            shutil.rmtree(backup)
+        else:
+            os.replace(temporary, artifact_root)
+    except Exception:
+        shutil.rmtree(temporary, ignore_errors=True)
+        raise
+    return verified
+
+
 def select_recovery_snapshot(
     emergency_paths: Sequence[Path],
     frozen_paths: Sequence[Path],
@@ -550,3 +627,100 @@ def select_recovery_snapshot(
     if len({item.sha256 for item in latest}) != 1:
         raise VersionDError("conflicting recovery snapshots")
     return RecoverySelection("emergency", latest[0].path, latest_epoch)
+
+
+def write_review_delivery(
+    *,
+    output_dir: Path,
+    review_bundle: Path,
+    log_path: Path,
+    contract_sha256: str,
+    data_archive_sha256: str,
+    stage_c_delivery_sha256: str,
+    prior_manifest_sha256: str,
+    frozen_sha256: str,
+    runtime_versions: Mapping[str, str],
+) -> Path:
+    if not review_bundle.is_file() or not log_path.is_file():
+        raise VersionDError("Version D delivery source is missing")
+    verified_review = verify_review_bundle(review_bundle)
+    if (
+        verified_review.version != "D"
+        or verified_review.campaign_config_sha256 != contract_sha256
+        or verified_review.prior_manifest_sha256 != prior_manifest_sha256
+    ):
+        raise VersionDError("Version D review bundle lineage differs")
+    members = {
+        "tabm_hand_matchup_final_review_bundle.zip": review_bundle.read_bytes(),
+        "version_d.log": log_path.read_bytes(),
+    }
+    manifest = {
+        "schema_version": 1,
+        "artifact_kind": "tabm_version_D_review_delivery",
+        "review_only": True,
+        "submission_package": False,
+        "contract_sha256": contract_sha256,
+        "data_archive_sha256": data_archive_sha256,
+        "stage_c_delivery_sha256": stage_c_delivery_sha256,
+        "prior_manifest_sha256": prior_manifest_sha256,
+        "frozen_sha256": frozen_sha256,
+        "runtime_versions": dict(runtime_versions),
+        "members": {
+            name: {"size": len(value), "sha256": sha256(value).hexdigest()}
+            for name, value in sorted(members.items())
+        },
+    }
+    members["delivery_manifest.json"] = canonical_json(manifest)
+    value = _deterministic_zip(members)
+    path = output_dir / "tabm_hand_matchup_stage_D_review_delivery.zip"
+    _atomic_bytes(path, value)
+    verify_review_delivery(path)
+    return path
+
+
+def verify_review_delivery(path: Path) -> dict[str, object]:
+    required = {
+        "delivery_manifest.json",
+        "tabm_hand_matchup_final_review_bundle.zip",
+        "version_d.log",
+    }
+    try:
+        with ZipFile(path) as archive:
+            infos = archive.infolist()
+            names = [info.filename for info in infos]
+            if len(names) != len(set(names)) or set(names) != required:
+                raise VersionDError("Version D delivery member set differs")
+            for info in infos:
+                _safe_member(info)
+            manifest = json.loads(archive.read("delivery_manifest.json"))
+            if (
+                manifest.get("artifact_kind") != "tabm_version_D_review_delivery"
+                or manifest.get("review_only") is not True
+                or manifest.get("submission_package") is not False
+            ):
+                raise VersionDError("Version D delivery identity differs")
+            expected = _mapping(manifest.get("members"), "Version D delivery members")
+            if set(expected) != required - {"delivery_manifest.json"}:
+                raise VersionDError("Version D delivery manifest differs")
+            values = {
+                name: archive.read(name) for name in required - {"delivery_manifest.json"}
+            }
+    except VersionDError:
+        raise
+    except Exception as error:
+        raise VersionDError(f"cannot verify Version D delivery: {error}") from error
+    for name, value in values.items():
+        evidence = _mapping(expected[name], f"Version D delivery evidence for {name}")
+        if len(value) != evidence.get("size") or sha256(value).hexdigest() != evidence.get("sha256"):
+            raise VersionDError(f"Version D delivery member differs: {name}")
+    with tempfile.TemporaryDirectory(prefix="version-d-review-") as directory:
+        review_path = Path(directory) / "tabm_hand_matchup_final_review_bundle.zip"
+        review_path.write_bytes(values["tabm_hand_matchup_final_review_bundle.zip"])
+        verified_review = verify_review_bundle(review_path)
+    if (
+        verified_review.version != "D"
+        or verified_review.campaign_config_sha256 != manifest.get("contract_sha256")
+        or verified_review.prior_manifest_sha256 != manifest.get("prior_manifest_sha256")
+    ):
+        raise VersionDError("Version D delivery review lineage differs")
+    return dict(manifest)

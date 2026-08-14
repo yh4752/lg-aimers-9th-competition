@@ -23,6 +23,7 @@ IDENTITY = {
     "data_archive_sha256": "2" * 64,
     "train_sha256": "3" * 64,
     "runtime_sha256": "4" * 64,
+    "environment_sha256": "6" * 64,
     "training_source_sha256": "7" * 64,
 }
 
