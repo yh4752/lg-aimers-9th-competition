@@ -10,6 +10,7 @@ import pytest
 from experiments.tabm_campaign.artifacts import (
     ArtifactError,
     StageEvidence,
+    verify_review_bundle,
     verify_resume_bundle,
     write_stage_bundles,
 )
@@ -35,6 +36,9 @@ def test_bundle_is_reproducible_and_hash_validated(tmp_path: Path) -> None:
     assert sha256(first.resume.read_bytes()).hexdigest() == sha256(second.resume.read_bytes()).hexdigest()
     verified = verify_resume_bundle(first.resume)
     assert verified.version == "A"
+    review = verify_review_bundle(first.review)
+    assert review.version == "A"
+    assert set(review.member_sha256) == {"metrics/candidates.json", "logs/stage.log"}
 
 
 def test_resume_rejects_modified_member(tmp_path: Path) -> None:

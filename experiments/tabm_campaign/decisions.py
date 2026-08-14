@@ -96,6 +96,35 @@ def temporal_verdict(evidence: TemporalEvidence) -> Verdict:
     return Verdict(True, "temporal_gates_passed", evidence.candidate_id)
 
 
+def choose_temporal_champion(
+    fold_briers: Mapping[str, tuple[float, float]],
+    *,
+    reference_id: str,
+) -> tuple[str, float]:
+    """Select against one declared reference using the temporal promotion gates."""
+
+    if reference_id not in fold_briers:
+        raise ValueError(f"temporal reference is missing: {reference_id}")
+    reference_2024, reference_2023 = fold_briers[reference_id]
+    if not math.isfinite(reference_2024) or not math.isfinite(reference_2023):
+        raise ValueError(f"temporal reference is non-finite: {reference_id}")
+    champion = reference_id
+    champion_delta = 0.0
+    for candidate_id in sorted(fold_briers):
+        primary, older = fold_briers[candidate_id]
+        evidence = TemporalEvidence(
+            candidate_id,
+            float(primary) - float(reference_2024),
+            float(older) - float(reference_2023),
+        )
+        verdict = temporal_verdict(evidence)
+        weighted = 0.70 * evidence.delta_2024 + 0.30 * evidence.delta_2023
+        if verdict.accepted and weighted < champion_delta:
+            champion = candidate_id
+            champion_delta = weighted
+    return champion, champion_delta
+
+
 def choose_refined_champion(
     evidence: Mapping[tuple[str, int], float],
     *,

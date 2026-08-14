@@ -15,6 +15,19 @@ from typing import Mapping
 from .runner import CampaignJob, CampaignJobResult
 
 
+_RUNTIME_ROOT = Path(__file__).resolve().parents[2]
+
+
+def _worker_environment(gpu: int) -> dict[str, str]:
+    environment = os.environ.copy()
+    environment["CUDA_VISIBLE_DEVICES"] = str(gpu)
+    existing = environment.get("PYTHONPATH")
+    environment["PYTHONPATH"] = str(_RUNTIME_ROOT) + (
+        os.pathsep + existing if existing else ""
+    )
+    return environment
+
+
 def _canonical_json(value: object) -> bytes:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False).encode("utf-8")
 
@@ -329,8 +342,7 @@ class SubprocessCampaignRuntime:
                 job_dir.mkdir(parents=True, exist_ok=True)
                 job_path = job_dir / "job.json"
                 _atomic_json(job_path, asdict(job))
-                env = os.environ.copy()
-                env["CUDA_VISIBLE_DEVICES"] = str(gpu)
+                env = _worker_environment(gpu)
                 command = [
                     self.python,
                     "-m",

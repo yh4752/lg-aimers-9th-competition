@@ -8,6 +8,7 @@ from experiments.tabm_campaign.decisions import (
     CandidateScore,
     TemporalEvidence,
     choose_refined_champion,
+    choose_temporal_champion,
     choose_version_a_survivors,
     ensemble_verdict,
     temporal_verdict,
@@ -39,6 +40,22 @@ def test_temporal_gate_blocks_primary_regression() -> None:
     verdict = temporal_verdict(evidence)
     assert verdict.accepted is False
     assert verdict.reason == "primary_fold_regression"
+
+
+def test_version_b_champion_uses_declared_reference_not_candidate_sort_order() -> None:
+    evidence = {
+        "piecewise_plateau": (0.2480974092, 0.2525345588),
+        "piecewise_one_cycle": (0.2482091607, 0.2498542210),
+        "periodic_plateau": (0.2482533824, 0.2526993769),
+    }
+
+    champion, weighted_delta = choose_temporal_champion(
+        evidence,
+        reference_id="piecewise_plateau",
+    )
+
+    assert champion == "piecewise_plateau"
+    assert weighted_delta == 0.0
 
 
 def test_incomplete_refinement_retains_version_b_champion() -> None:

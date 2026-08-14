@@ -46,6 +46,16 @@ class VerifiedResume:
     member_sha256: Mapping[str, str]
 
 
+@dataclass(frozen=True)
+class VerifiedReview:
+    path: Path
+    version: str
+    campaign_config_sha256: str
+    prior_manifest_sha256: str | None
+    manifest_sha256: str
+    member_sha256: Mapping[str, str]
+
+
 def _canonical_json(value: object) -> bytes:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False).encode("utf-8")
 
@@ -155,6 +165,49 @@ def write_stage_bundles(output_dir: str | Path, evidence: StageEvidence) -> Bund
         resume_sha = _digest(resume_bytes)
         verify_resume_bundle(resume)
     return BundlePaths(review, resume, _digest(review_bytes), resume_sha, manifest_sha)
+
+
+def verify_review_bundle(path: str | Path) -> VerifiedReview:
+    """Verify every declared member of a review-only evidence bundle."""
+
+    bundle = Path(path)
+    try:
+        with ZipFile(bundle, "r") as archive:
+            names = archive.namelist()
+            if len(names) != len(set(names)) or "manifest.json" not in names:
+                raise ArtifactError("review bundle has duplicate members or no manifest")
+            for name in names:
+                if name != "manifest.json":
+                    _validate_member_name(name)
+            manifest_bytes = archive.read("manifest.json")
+            manifest = json.loads(manifest_bytes)
+            if manifest.get("artifact_kind") != "review" or manifest.get("review_only") is not True:
+                raise ArtifactError("bundle is not review-only review evidence")
+            expected = manifest.get("members")
+            if not isinstance(expected, dict) or set(expected) != set(names) - {"manifest.json"}:
+                raise ArtifactError("review member manifest differs")
+            for name, expected_hash in expected.items():
+                if _digest(archive.read(name)) != expected_hash:
+                    raise ArtifactError(f"review member SHA-256 differs: {name}")
+    except ArtifactError:
+        raise
+    except Exception as exc:
+        raise ArtifactError(f"cannot verify review bundle: {exc}") from exc
+    version = str(manifest.get("version"))
+    config_sha = str(manifest.get("campaign_config_sha256"))
+    prior_sha = manifest.get("prior_manifest_sha256")
+    if version not in set(_VERSIONS):
+        raise ArtifactError("review version must be A, B, C, or D")
+    if not _valid_sha(config_sha) or (version != "A" and not _valid_sha(prior_sha)):
+        raise ArtifactError("review manifest hash binding is invalid")
+    return VerifiedReview(
+        bundle,
+        version,
+        config_sha,
+        None if prior_sha is None else str(prior_sha),
+        _digest(manifest_bytes),
+        {str(name): str(value) for name, value in expected.items()},
+    )
 
 
 def verify_resume_bundle(path: str | Path) -> VerifiedResume:

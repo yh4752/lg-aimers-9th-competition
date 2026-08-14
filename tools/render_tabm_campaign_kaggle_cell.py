@@ -26,7 +26,13 @@ def _source_paths() -> list[Path]:
     independent = ROOT / "experiments/independent_dl"
     paths.extend(
         independent / name
-        for name in ("__init__.py", "features.py", "preprocessing.py", "training.py")
+        for name in (
+            "__init__.py",
+            "features.py",
+            "preprocessing.py",
+            "progress.py",
+            "training.py",
+        )
     )
     paths.extend(sorted((independent / "models").glob("*.py")))
     paths.extend(sorted((independent / "feature_sources").glob("*.py")))
@@ -105,6 +111,8 @@ try:
                 raise RuntimeError(f"cannot read embedded member: {{member.name}}")
             destination.write_bytes(extracted.read())
     print(f"CODE_READY sha256={{actual_sha}} size_bytes={{len(archive_bytes)}}", flush=True)
+    sys.path.insert(0, str(CODE_ROOT))
+    from experiments.tabm_campaign.resume_input import normalize_resume_input
 
     requirements = CODE_ROOT / "experiments/tabm_campaign/requirements-kaggle.txt"
     install = subprocess.run(
@@ -131,15 +139,19 @@ try:
         raise RuntimeError(f"official data root is not the expected lg-aimers-9th-data input: {{data_root}}")
     print(f"DATA_FOUND path={{data_root}}", flush=True)
 
-    resume_files = sorted(
-        path
-        for path in INPUT_ROOT.rglob("tabm_search_stage_*_resume_bundle.zip")
-        if path.is_file()
+    normalized_resume = normalize_resume_input(
+        INPUT_ROOT, WORK_ROOT / "normalized_resume"
     )
-    if len(resume_files) > 1:
-        raise RuntimeError(f"compatible resume bundle count must be 0 or 1; found={{len(resume_files)}}")
-    resume = resume_files[0] if resume_files else None
-    print(f"RESUME_FOUND path={{resume}}", flush=True)
+    resume = normalized_resume.path
+    print(
+        "RESUME_FOUND "
+        f"source={{normalized_resume.source}} "
+        f"path={{normalized_resume.original_path}} "
+        f"normalized={{normalized_resume.path}} "
+        f"version={{normalized_resume.version}} "
+        f"manifest_sha256={{normalized_resume.manifest_sha256}}",
+        flush=True,
+    )
 
     gpu = subprocess.run(
         ["nvidia-smi", "--query-gpu=index,name,memory.total", "--format=csv,noheader"],
@@ -151,7 +163,6 @@ try:
         raise RuntimeError(f"T4 x2 is required; visible_gpus={{gpu_lines}}")
     print(f"GPU_READY device_count=2 status={{' | '.join(gpu_lines)}}", flush=True)
 
-    sys.path.insert(0, str(CODE_ROOT))
     from experiments.tabm_campaign.runner import run_one_version
 
     result = run_one_version(data_root, OUTPUT_ROOT, resume_bundle=resume)

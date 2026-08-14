@@ -14,9 +14,16 @@ from .contracts import Campaign, Candidate, load_campaign
 from .decisions import (
     CandidateScore,
     TemporalEvidence,
+    choose_temporal_champion,
     choose_version_a_survivors,
     ensemble_verdict,
     temporal_verdict,
+)
+
+
+VERSION_B_REFERENCE_CANDIDATE_ID = "a__p2__piecewise_linear__bce__plateau__s42"
+VERSION_C_TEMPORAL_SENTINEL_CANDIDATE_ID = (
+    "a__p2__piecewise_linear__bce__one_cycle__s42"
 )
 
 
@@ -186,6 +193,7 @@ def _run_with_completed_reuse(
     output_dir: Path,
     deadline: float,
     prior: dict[str, object],
+    gpu_count: int,
 ) -> tuple[CampaignJobResult, ...]:
     completed = _prior_completed(prior)
     pending = tuple(job for job in jobs if job.candidate_id not in completed)
@@ -206,7 +214,13 @@ def _run_with_completed_reuse(
                 if path.is_file():
                     shutil.copy2(path, target / path.name)
     fresh = (
-        runtime.run_jobs(version, pending, output_dir, gpu_count=2, job_deadline=deadline)
+        runtime.run_jobs(
+            version,
+            pending,
+            output_dir,
+            gpu_count=gpu_count,
+            job_deadline=deadline,
+        )
         if pending
         else ()
     )
@@ -348,9 +362,12 @@ def _run_a(
     output_dir: Path,
     deadline: float,
     prior: dict[str, object],
+    gpu_count: int,
 ) -> tuple[dict[str, object], tuple[CampaignJobResult, ...], tuple[Path, ...]]:
     jobs = tuple(_job_from_candidate(candidate) for candidate in campaign.version_a_candidates)
-    results = _run_with_completed_reuse(runtime, "A", jobs, output_dir / "jobs", deadline, prior)
+    results = _run_with_completed_reuse(
+        runtime, "A", jobs, output_dir / "jobs", deadline, prior, gpu_count
+    )
     rows = _completed(results)
     if len(rows) < 4:
         state = {
@@ -394,6 +411,7 @@ def _run_b(
     runtime: CampaignRuntime,
     output_dir: Path,
     deadline: float,
+    gpu_count: int,
 ) -> tuple[dict[str, object], tuple[CampaignJobResult, ...], tuple[Path, ...]]:
     survivors = tuple(_candidate_from_payload(item) for item in prior.get("survivors", ()))
     if len(survivors) != 4:
@@ -409,7 +427,7 @@ def _run_b(
         for candidate in survivors
     )
     primary = _run_with_completed_reuse(
-        runtime, "B", primary_jobs, output_dir / "jobs", deadline, prior
+        runtime, "B", primary_jobs, output_dir / "jobs", deadline, prior, gpu_count
     )
     completed_primary = sorted(_completed(primary), key=lambda row: (float(row.brier), row.candidate_id))
     if len(completed_primary) < 2:
@@ -423,9 +441,20 @@ def _run_b(
         return state, primary, tuple(row.checkpoint for row in primary if row.checkpoint is not None)
     original_by_job = {job.candidate_id: candidate for job, candidate in zip(primary_jobs, survivors)}
     older_candidates = [original_by_job[row.candidate_id] for row in completed_primary[:2]]
-    p2 = min((candidate for candidate in survivors if candidate.capacity == "p2"), key=lambda x: x.candidate_id)
-    if p2.candidate_id not in {candidate.candidate_id for candidate in older_candidates}:
-        older_candidates.append(p2)
+    try:
+        reference = next(
+            candidate
+            for candidate in survivors
+            if candidate.candidate_id == VERSION_B_REFERENCE_CANDIDATE_ID
+        )
+    except StopIteration as error:
+        raise CampaignRunnerError(
+            "Version B declared temporal reference is not a survivor"
+        ) from error
+    if reference.candidate_id not in {
+        candidate.candidate_id for candidate in older_candidates
+    }:
+        older_candidates.append(reference)
     older_jobs = tuple(
         _job_from_candidate(
             candidate,
@@ -439,36 +468,40 @@ def _run_b(
         for candidate in older_candidates
     )
     older = _run_with_completed_reuse(
-        runtime, "B", older_jobs, output_dir / "jobs", deadline, prior
+        runtime, "B", older_jobs, output_dir / "jobs", deadline, prior, gpu_count
     )
     all_results = (*primary, *older)
     result_by_id = {row.candidate_id: row for row in _completed(all_results)}
-    p2_primary_id = next(job.candidate_id for job, candidate in zip(primary_jobs, survivors) if candidate.candidate_id == p2.candidate_id)
-    p2_older_id = next(job.candidate_id for job, candidate in zip(older_jobs, older_candidates) if candidate.candidate_id == p2.candidate_id)
-    if p2_primary_id not in result_by_id or p2_older_id not in result_by_id:
+    reference_primary_id = next(job.candidate_id for job, candidate in zip(primary_jobs, survivors) if candidate.candidate_id == reference.candidate_id)
+    reference_older_id = next(job.candidate_id for job, candidate in zip(older_jobs, older_candidates) if candidate.candidate_id == reference.candidate_id)
+    if reference_primary_id not in result_by_id or reference_older_id not in result_by_id:
         state = {
             "version": "B",
             "stage_complete": False,
-            "reason": "p2_temporal_reference_incomplete",
+            "reason": "declared_temporal_reference_incomplete",
             "survivors": [_candidate_payload(candidate) for candidate in survivors],
             "results": [_result_payload(result) for result in all_results],
         }
         return state, all_results, tuple(
             row.checkpoint for row in all_results if row.checkpoint is not None
         )
-    champion = p2
-    champion_score = 0.0
+    fold_briers: dict[str, tuple[float, float]] = {}
     for candidate in older_candidates:
         primary_id = next(job.candidate_id for job, item in zip(primary_jobs, survivors) if item.candidate_id == candidate.candidate_id)
         older_id = next(job.candidate_id for job, item in zip(older_jobs, older_candidates) if item.candidate_id == candidate.candidate_id)
-        if not all(key in result_by_id for key in (primary_id, older_id, p2_primary_id, p2_older_id)):
+        if not all(key in result_by_id for key in (primary_id, older_id)):
             continue
-        delta_2024 = float(result_by_id[primary_id].brier) - float(result_by_id[p2_primary_id].brier)
-        delta_2023 = float(result_by_id[older_id].brier) - float(result_by_id[p2_older_id].brier)
-        verdict = temporal_verdict(TemporalEvidence(candidate.candidate_id, delta_2024, delta_2023))
-        weighted = 0.70 * delta_2024 + 0.30 * delta_2023
-        if verdict.accepted and weighted < champion_score:
-            champion, champion_score = candidate, weighted
+        fold_briers[candidate.candidate_id] = (
+            float(result_by_id[primary_id].brier),
+            float(result_by_id[older_id].brier),
+        )
+    champion_id, champion_score = choose_temporal_champion(
+        fold_briers,
+        reference_id=reference.candidate_id,
+    )
+    champion = next(
+        candidate for candidate in older_candidates if candidate.candidate_id == champion_id
+    )
     checkpoints = tuple(row.checkpoint for row in all_results if row.checkpoint is not None and champion.candidate_id in row.candidate_id)
     champion_primary_id = next(
         job.candidate_id
@@ -477,7 +510,7 @@ def _run_b(
     )
     champion_older_id = next(
         (job.candidate_id for job, candidate in zip(older_jobs, older_candidates) if candidate.candidate_id == champion.candidate_id),
-        p2_older_id,
+        reference_older_id,
     )
     state = {
         "version": "B",
@@ -494,20 +527,62 @@ def _run_b(
     return state, all_results, checkpoints
 
 
+def _version_c_confirmation_jobs(
+    finalists: tuple[Candidate, ...],
+    sentinel: Candidate,
+) -> tuple[CampaignJob, ...]:
+    candidates = (*finalists, sentinel)
+    return tuple(
+        _job_from_candidate(
+            item,
+            candidate_id=f"{item.candidate_id}__tr{train_end}__va{valid}",
+            train_end_year=train_end,
+            valid_year=valid,
+            sample_mode="full",
+            max_epochs=40,
+            patience=10,
+        )
+        for item in candidates
+        for train_end, valid in ((2023, 2024), (2022, 2023))
+    )
+
+
 def _run_c(
     campaign: Campaign,
     prior: dict[str, object],
     runtime: CampaignRuntime,
     output_dir: Path,
     deadline: float,
+    gpu_count: int,
 ) -> tuple[dict[str, object], tuple[CampaignJobResult, ...], tuple[Path, ...]]:
-    champion_raw = prior.get("champion")
+    champion_raw = prior.get("refinement_base_candidate", prior.get("champion"))
     if not isinstance(champion_raw, dict):
         raise CampaignRunnerError("Version C requires a Version B champion")
     champion = _candidate_from_payload(champion_raw)
     baselines = prior.get("champion_fold_briers")
     if not isinstance(baselines, dict) or not {"2024", "2023"}.issubset(baselines):
         raise CampaignRunnerError("Version C requires both Version B champion fold metrics")
+    sentinel_raw = prior.get("temporal_sentinel_candidate")
+    if isinstance(sentinel_raw, dict):
+        sentinel = _candidate_from_payload(sentinel_raw)
+    else:
+        survivor_rows = prior.get("survivors")
+        if not isinstance(survivor_rows, list):
+            raise CampaignRunnerError("Version C requires Version B survivor evidence")
+        try:
+            sentinel = next(
+                _candidate_from_payload(item)
+                for item in survivor_rows
+                if isinstance(item, dict)
+                and item.get("candidate_id")
+                == VERSION_C_TEMPORAL_SENTINEL_CANDIDATE_ID
+            )
+        except StopIteration as error:
+            raise CampaignRunnerError(
+                "Version C temporal one-cycle sentinel is missing"
+            ) from error
+    if sentinel.candidate_id != VERSION_C_TEMPORAL_SENTINEL_CANDIDATE_ID:
+        raise CampaignRunnerError("Version C temporal sentinel identity changed")
     refinements: list[Candidate] = []
     for item in campaign.refinements:
         dropout = min(0.30, max(0.0, champion.dropout + item.dropout_offset))
@@ -522,7 +597,7 @@ def _run_c(
         )
     proxy_jobs = tuple(_job_from_candidate(item) for item in refinements)
     proxy = _run_with_completed_reuse(
-        runtime, "C", proxy_jobs, output_dir / "jobs", deadline, prior
+        runtime, "C", proxy_jobs, output_dir / "jobs", deadline, prior, gpu_count
     )
     proxy_completed = sorted(_completed(proxy), key=lambda row: (float(row.brier), row.candidate_id))
     if len(proxy_completed) < 2:
@@ -531,26 +606,25 @@ def _run_c(
             "stage_complete": False,
             "reason": "fewer_than_two_completed_proxy_refinements",
             "champion": _candidate_payload(champion),
+            "refinement_base_candidate": _candidate_payload(champion),
             "champion_fold_briers": baselines,
+            "temporal_sentinel_candidate": _candidate_payload(sentinel),
             "results": [_result_payload(result) for result in proxy],
         }
         return state, proxy, tuple(row.checkpoint for row in proxy if row.checkpoint is not None)
-    finalists = [next(item for item in refinements if item.candidate_id == row.candidate_id) for row in proxy_completed[:2]]
-    confirmation_jobs = tuple(
-        _job_from_candidate(
-            item,
-            candidate_id=f"{item.candidate_id}__tr{train_end}__va{valid}",
-            train_end_year=train_end,
-            valid_year=valid,
-            sample_mode="full",
-            max_epochs=40,
-            patience=10,
-        )
-        for item in finalists
-        for train_end, valid in ((2023, 2024), (2022, 2023))
+    finalists = tuple(
+        next(item for item in refinements if item.candidate_id == row.candidate_id)
+        for row in proxy_completed[:2]
     )
+    confirmation_jobs = _version_c_confirmation_jobs(finalists, sentinel)
     confirmation = _run_with_completed_reuse(
-        runtime, "C", confirmation_jobs, output_dir / "jobs", deadline, prior
+        runtime,
+        "C",
+        confirmation_jobs,
+        output_dir / "jobs",
+        deadline,
+        prior,
+        gpu_count,
     )
     complete_by_id = {row.candidate_id: row for row in _completed(confirmation)}
     if len(complete_by_id) < len(confirmation_jobs):
@@ -558,29 +632,48 @@ def _run_c(
         state = {
             "version": "C",
             "stage_complete": False,
-            "reason": "both_fold_refinement_confirmation_incomplete",
+            "reason": "both_fold_refinement_or_sentinel_confirmation_incomplete",
             "champion": _candidate_payload(champion),
+            "refinement_base_candidate": _candidate_payload(champion),
             "champion_fold_briers": baselines,
+            "temporal_sentinel_candidate": _candidate_payload(sentinel),
             "results": [_result_payload(result) for result in combined],
         }
         return state, combined, tuple(
             row.checkpoint for row in combined if row.checkpoint is not None
         )
-    selected = champion
-    best_weighted = 0.0
+    alternative_candidates = (*finalists, sentinel)
+    candidate_by_id = {
+        item.candidate_id: item for item in (champion, *alternative_candidates)
+    }
+    fold_briers: dict[str, tuple[float, float]] = {
+        champion.candidate_id: (float(baselines["2024"]), float(baselines["2023"]))
+    }
     confirmed_refinements: list[Candidate] = []
-    for item in finalists:
+    sentinel_verdict = None
+    for item in alternative_candidates:
         primary_id = f"{item.candidate_id}__tr2023__va2024"
         older_id = f"{item.candidate_id}__tr2022__va2023"
         if primary_id in complete_by_id and older_id in complete_by_id:
-            delta_2024 = float(complete_by_id[primary_id].brier) - float(baselines["2024"])
-            delta_2023 = float(complete_by_id[older_id].brier) - float(baselines["2023"])
-            verdict = temporal_verdict(TemporalEvidence(item.candidate_id, delta_2024, delta_2023))
-            weighted = 0.70 * delta_2024 + 0.30 * delta_2023
-            if verdict.accepted:
+            primary_brier = float(complete_by_id[primary_id].brier)
+            older_brier = float(complete_by_id[older_id].brier)
+            fold_briers[item.candidate_id] = (primary_brier, older_brier)
+            verdict = temporal_verdict(
+                TemporalEvidence(
+                    item.candidate_id,
+                    primary_brier - float(baselines["2024"]),
+                    older_brier - float(baselines["2023"]),
+                )
+            )
+            if item in finalists and verdict.accepted:
                 confirmed_refinements.append(item)
-            if verdict.accepted and weighted < best_weighted:
-                best_weighted, selected = weighted, item
+            if item.candidate_id == sentinel.candidate_id:
+                sentinel_verdict = verdict
+    selected_id, _ = choose_temporal_champion(
+        fold_briers,
+        reference_id=champion.candidate_id,
+    )
+    selected = candidate_by_id[selected_id]
     seed_jobs = tuple(
         _job_from_candidate(
             replace(selected, seed=seed),
@@ -592,7 +685,7 @@ def _run_c(
         for seed in campaign.seeds
     )
     seeds = _run_with_completed_reuse(
-        runtime, "C", seed_jobs, output_dir / "jobs", deadline, prior
+        runtime, "C", seed_jobs, output_dir / "jobs", deadline, prior, gpu_count
     )
     seed_completed = sorted(_completed(seeds), key=lambda row: (float(row.brier), row.candidate_id))
     if len(seed_completed) < len(seed_jobs):
@@ -602,7 +695,9 @@ def _run_c(
             "stage_complete": False,
             "reason": "primary_fold_seed_confirmation_incomplete",
             "champion": _candidate_payload(selected),
+            "refinement_base_candidate": _candidate_payload(champion),
             "champion_fold_briers": baselines,
+            "temporal_sentinel_candidate": _candidate_payload(sentinel),
             "results": [_result_payload(result) for result in combined],
         }
         return state, combined, tuple(
@@ -638,7 +733,13 @@ def _run_c(
         if seed in older_needed
     )
     older_seeds = _run_with_completed_reuse(
-        runtime, "C", older_seed_jobs, output_dir / "jobs", deadline, prior
+        runtime,
+        "C",
+        older_seed_jobs,
+        output_dir / "jobs",
+        deadline,
+        prior,
+        gpu_count,
     )
     if len(_completed(older_seeds)) < len(older_seed_jobs):
         combined = (*proxy, *confirmation, *seeds, *older_seeds)
@@ -647,7 +748,9 @@ def _run_c(
             "stage_complete": False,
             "reason": "older_fold_seed_confirmation_incomplete",
             "champion": _candidate_payload(selected),
+            "refinement_base_candidate": _candidate_payload(champion),
             "champion_fold_briers": baselines,
+            "temporal_sentinel_candidate": _candidate_payload(sentinel),
             "results": [_result_payload(result) for result in combined],
         }
         return state, combined, tuple(
@@ -689,6 +792,24 @@ def _run_c(
                     tuple(older_by_seed[seed] for seed in group),
                 )
             )
+    if selected.candidate_id != sentinel.candidate_id:
+        sentinel_primary = complete_by_id[
+            f"{sentinel.candidate_id}__tr2023__va2024"
+        ]
+        sentinel_older = complete_by_id[
+            f"{sentinel.candidate_id}__tr2022__va2023"
+        ]
+        predictor_options.append(
+            (
+                "mean_selected_s42_and_one_cycle_sentinel",
+                (
+                    (selected, 42, primary_by_seed[42]),
+                    (sentinel, 42, sentinel_primary),
+                ),
+                (primary_by_seed[42], sentinel_primary),
+                (older_by_seed[42], sentinel_older),
+            )
+        )
     if len(confirmed_refinements) == 2:
         distinct_primary = tuple(
             complete_by_id[f"{item.candidate_id}__tr2023__va2024"]
@@ -806,9 +927,30 @@ def _run_c(
         "version": "C",
         "stage_complete": True,
         "champion": _candidate_payload(selected),
+        "refinement_base_candidate": _candidate_payload(champion),
         "final_members": final_members,
         "selected_predictor": chosen_name,
         "predictor_evidence": option_evidence,
+        "temporal_sentinel": {
+            "candidate": _candidate_payload(sentinel),
+            "fold_briers": {
+                "2024": fold_briers[sentinel.candidate_id][0],
+                "2023": fold_briers[sentinel.candidate_id][1],
+            },
+            "accepted_as_single": bool(
+                sentinel_verdict is not None and sentinel_verdict.accepted
+            ),
+            "reason": (
+                "missing_verdict"
+                if sentinel_verdict is None
+                else sentinel_verdict.reason
+            ),
+            "ensemble_option": (
+                None
+                if selected.candidate_id == sentinel.candidate_id
+                else "mean_selected_s42_and_one_cycle_sentinel"
+            ),
+        },
         "results": [_result_payload(result) for result in combined_results],
     }
     return state, combined_results, checkpoints
@@ -876,6 +1018,7 @@ def run_one_version(
     resume_bundle: str | Path | None = None,
     runtime: CampaignRuntime | None = None,
     config_path: str | Path = _DEFAULT_CONFIG,
+    gpu_count: int = 2,
     now: Callable[[], float] = time.time,
 ) -> StageRunResult:
     """Advance exactly one trusted A-D stage; never create a submission artifact."""
@@ -889,6 +1032,8 @@ def run_one_version(
         contract_path=Path(__file__).with_name("experiment_contract.json"),
         config_path=config,
     )
+    if isinstance(gpu_count, bool) or not isinstance(gpu_count, int) or gpu_count < 1:
+        raise CampaignRunnerError("gpu_count must be a positive integer")
     campaign = load_campaign(config)
     config_sha = _config_sha(config)
     prior_manifest_sha: str | None = None
@@ -917,11 +1062,17 @@ def run_one_version(
     job_deadline = started + campaign.wall_seconds[version] - campaign.finalization_reserve_seconds
     print(f"STAGE_SELECTED version={version} wall_deadline_unix={int(started + campaign.wall_seconds[version])}", flush=True)
     if version == "A":
-        state, results, checkpoints = _run_a(campaign, runtime, root, job_deadline, prior)
+        state, results, checkpoints = _run_a(
+            campaign, runtime, root, job_deadline, prior, gpu_count
+        )
     elif version == "B":
-        state, results, checkpoints = _run_b(campaign, prior, runtime, root, job_deadline)
+        state, results, checkpoints = _run_b(
+            campaign, prior, runtime, root, job_deadline, gpu_count
+        )
     elif version == "C":
-        state, results, checkpoints = _run_c(campaign, prior, runtime, root, job_deadline)
+        state, results, checkpoints = _run_c(
+            campaign, prior, runtime, root, job_deadline, gpu_count
+        )
     else:
         from .final_review import run_final_review
 
