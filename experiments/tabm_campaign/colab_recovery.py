@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import argparse
 from dataclasses import asdict, dataclass
 from hashlib import sha256
+import importlib.metadata
 import io
 import json
 import os
@@ -12,6 +14,7 @@ import shutil
 import signal
 import stat
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -1017,3 +1020,175 @@ def verify_delivery_bundle(path: Path) -> VerifiedDelivery:
     except Exception as error:
         raise ColabRecoveryError(f"cannot verify delivery bundle: {error}") from error
     return VerifiedDelivery(path, file_sha256(path), hashes, True)
+
+
+def collect_runtime_identity(
+    *,
+    sanitized: SanitizedResume,
+    runtime_sha256: str,
+    target_candidate_id: str,
+) -> RuntimeIdentity:
+    import numpy
+    import pandas
+    import torch
+
+    project_root = Path(__file__).resolve().parents[2]
+    config_path = Path(__file__).with_name("configs") / "champion_v1.json"
+    independent = project_root / "experiments" / "independent_dl"
+    training_source = sha256(
+        (independent / "training.py").read_bytes()
+        + (independent / "models" / "tabm.py").read_bytes()
+    ).hexdigest()
+    return RuntimeIdentity(
+        base_resume_sha256=sanitized.source_sha256,
+        base_manifest_sha256=sanitized.source_manifest_sha256,
+        sanitized_resume_sha256=sanitized.sanitized_sha256,
+        campaign_config_sha256=file_sha256(config_path),
+        runtime_sha256=runtime_sha256,
+        training_source_sha256=training_source,
+        cache_sha256=None,
+        python=sys.version.split()[0],
+        torch=str(torch.__version__),
+        cuda_runtime=str(torch.version.cuda),
+        numpy=str(numpy.__version__),
+        pandas=str(pandas.__version__),
+        tabm=importlib.metadata.version("tabm"),
+        rtdl_num_embeddings=importlib.metadata.version("rtdl-num-embeddings"),
+        gpu_name=str(torch.cuda.get_device_name(0)),
+        target_candidate_id=target_candidate_id,
+    )
+
+
+def _campaign_child(args: argparse.Namespace) -> int:
+    from .runner import run_one_version
+
+    result = run_one_version(
+        args.data_dir,
+        args.output_root,
+        resume_bundle=args.resume,
+        gpu_count=args.gpu_count,
+    )
+    print(
+        f"COLAB_CAMPAIGN_RESULT version={result.version} "
+        f"review={result.bundles.review} resume={result.bundles.resume}",
+        flush=True,
+    )
+    return 0
+
+
+def _run_colab_handoff(args: argparse.Namespace) -> int:
+    contract = load_colab_contract()
+    work_root = Path(args.work_root).resolve()
+    sanitized = sanitize_stage_c_resume(
+        Path(args.base_resume),
+        work_root / "inputs" / "sanitized_stage_C_resume.zip",
+        contract,
+    )
+    target_id = str(contract["target_candidate_id"])
+    identity = collect_runtime_identity(
+        sanitized=sanitized,
+        runtime_sha256=args.runtime_sha256,
+        target_candidate_id=target_id,
+    )
+    resume = sanitized.path
+    resume_source = "stage_C_base"
+    resume_epoch = 0
+    emergencies = tuple(Path(path).resolve() for path in args.emergency)
+    if emergencies:
+        selected = verify_emergency_snapshots(
+            emergencies, sanitized, identity
+        )
+        resume = merge_emergency_snapshot(
+            sanitized,
+            selected,
+            work_root / "inputs" / "prepared_stage_C_resume.zip",
+        )
+        resume_source = "emergency"
+        resume_epoch = selected.epoch + 1
+    print(
+        f"COLAB_RESUME_READY source={resume_source} epoch={resume_epoch} "
+        f"path={resume}",
+        flush=True,
+    )
+    command = [
+        sys.executable,
+        "-m",
+        "experiments.tabm_campaign.colab_recovery",
+        "_campaign",
+        "--data-dir",
+        str(Path(args.data_dir).resolve()),
+        "--output-root",
+        str(work_root / "outputs"),
+        "--resume",
+        str(resume),
+        "--gpu-count",
+        str(args.gpu_count),
+    ]
+    result = supervise_campaign(
+        command=command,
+        work_root=work_root,
+        identity=identity,
+        snapshot_interval_seconds=float(contract["snapshot_interval_seconds"]),
+        interrupt_grace_seconds=float(contract["interrupt_grace_seconds"]),
+    )
+    if result.interrupted:
+        latest = "none" if result.latest_snapshot is None else str(
+            result.latest_snapshot.path
+        )
+        print(
+            f"COLAB_STAGE_C_INTERRUPTED latest_snapshot={latest} rerun_safe=true",
+            flush=True,
+        )
+        return 0
+    stage_root = work_root / "outputs" / "stage_C"
+    delivery = write_delivery_bundle(
+        review=stage_root / "tabm_search_stage_C_review_bundle.zip",
+        resume=stage_root / "tabm_search_stage_C_resume_bundle.zip",
+        log=result.log_path,
+        identity=identity,
+        run_uuid=result.receipt.run_uuid,
+        destination=work_root / "tabm_colab_stage_C_delivery.zip",
+    )
+    print(
+        f"COLAB_DELIVERY_READY path={delivery} sha256={file_sha256(delivery)}",
+        flush=True,
+    )
+    return 0
+
+
+def _parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser()
+    subparsers = parser.add_subparsers(dest="command", required=True)
+    run = subparsers.add_parser("run")
+    run.add_argument("--data-dir", required=True)
+    run.add_argument("--base-resume", required=True)
+    run.add_argument("--work-root", required=True)
+    run.add_argument("--runtime-sha256", required=True)
+    run.add_argument("--gpu-count", type=int, choices=(1,), default=1)
+    run.add_argument("--emergency", action="append", default=[])
+    child = subparsers.add_parser("_campaign")
+    child.add_argument("--data-dir", required=True)
+    child.add_argument("--output-root", required=True)
+    child.add_argument("--resume", required=True)
+    child.add_argument("--gpu-count", type=int, choices=(1,), required=True)
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = _parser().parse_args(argv)
+    try:
+        if args.command == "_campaign":
+            return _campaign_child(args)
+        return _run_colab_handoff(args)
+    except Exception as error:
+        message = str(error).replace(" ", "_").replace("\n", "_")
+        print(
+            f"COLAB_STAGE_C_ERROR stage={args.command} "
+            f"type={type(error).__name__} message={message}",
+            flush=True,
+        )
+        raise
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
