@@ -34,6 +34,7 @@ from experiments.tabm_campaign.artifacts import (
     verify_resume_bundle,
     write_stage_bundles,
 )
+from tools.prepare_tabm_colab_stage_c_handoff import prepare_handoff
 
 
 _MEMBERS = {
@@ -661,3 +662,70 @@ def test_supervisor_interrupt_requests_epoch_boundary_and_exports_snapshot(
     assert stop_marker.is_file()
     assert process_identity(result.receipt.pid) is None
     assert "EPOCH_CHECKPOINTED" in result.log_path.read_text(encoding="utf-8")
+
+
+def _handoff_contract(
+    data_dir: Path, resume: Path
+) -> dict[str, object]:
+    members = {
+        name: {
+            "size": (data_dir / name).stat().st_size,
+            "sha256": file_sha256(data_dir / name),
+        }
+        for name in _MEMBERS
+    }
+    return {
+        "schema_version": 1,
+        "base_resume": {
+            "filename": "tabm_search_stage_C_resume_bundle.zip",
+            "sha256": file_sha256(resume),
+            "version": "C",
+        },
+        "data_archive": {
+            "filename": "lg-aimers-9th-data.zip",
+            "max_member_count": 4,
+            "max_uncompressed_bytes": sum(
+                int(evidence["size"]) for evidence in members.values()
+            ),
+            "members": members,
+        },
+    }
+
+
+def _fixture_official_data(root: Path) -> Path:
+    root.mkdir(parents=True)
+    for name, value in _MEMBERS.items():
+        (root / name).write_bytes(value)
+    return root
+
+
+def test_prepare_handoff_is_deterministic(tmp_path: Path) -> None:
+    data_dir = _fixture_official_data(tmp_path / "data")
+    resume = _stage_c_resume(tmp_path / "resume")[0]
+    contract = _handoff_contract(data_dir, resume)
+
+    first = prepare_handoff(
+        data_dir, resume, tmp_path / "first", contract=contract
+    )
+    second = prepare_handoff(
+        data_dir, resume, tmp_path / "second", contract=contract
+    )
+
+    assert file_sha256(first.data_zip) == file_sha256(second.data_zip)
+    assert json.loads(first.manifest.read_text()) == json.loads(
+        second.manifest.read_text()
+    )
+    assert first.resume_zip.read_bytes() == resume.read_bytes()
+    assert first.cell.name == "COLAB_STAGE_C_RECOVERY_CELL.py"
+
+
+def test_prepare_handoff_refuses_changed_source_file(tmp_path: Path) -> None:
+    data_dir = _fixture_official_data(tmp_path / "data")
+    resume = _stage_c_resume(tmp_path / "resume")[0]
+    contract = _handoff_contract(data_dir, resume)
+    (data_dir / "train.csv").write_bytes(b"changed")
+
+    with pytest.raises(ColabRecoveryError, match="train.csv"):
+        prepare_handoff(
+            data_dir, resume, tmp_path / "out", contract=contract
+        )
