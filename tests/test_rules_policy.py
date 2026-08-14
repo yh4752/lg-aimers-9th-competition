@@ -22,7 +22,7 @@ POLICY = ROOT / "competition_rules/policy.json"
 def test_checked_in_policy_matches_official_rules() -> None:
     policy = load_policy(POLICY, project_root=ROOT)
 
-    assert policy["policy_version"] == "dacon-236743-2026-08-13"
+    assert policy["policy_version"] == "dacon-236743-2026-08-15"
     assert policy["competition_id"] == "236743"
     assert policy["allowed_data_sources"] == [
         "official_train",
@@ -40,11 +40,26 @@ def test_checked_in_policy_matches_official_rules() -> None:
         "duplicate_registration_allowed": False,
         "daily_submission_limit": 5,
     }
-    assert len(policy["official_sources"]) == 6
+    assert len(policy["official_sources"]) == 7
     assert all(
         item["url"].startswith("https://dacon.io/")
         for item in policy["official_sources"]
     )
+    assert any(
+        item["url"].endswith("/talkboard/417082?page=1&dtype=recent")
+        for item in policy["official_sources"]
+    )
+    assert policy["leaderboard_selection"] == "highest_compliant_submission"
+
+
+def test_old_policy_version_is_rejected(tmp_path: Path) -> None:
+    payload = json.loads(POLICY.read_text(encoding="utf-8"))
+    payload["policy_version"] = "dacon-236743-2026-08-13"
+    path = tmp_path / "policy.json"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(RulesContractError, match="unknown policy_version"):
+        load_policy(path, project_root=tmp_path)
 
 
 @pytest.mark.parametrize("raw", ['{"a":1,"a":2}', '{"x":NaN}', '{"x":1e999}'])

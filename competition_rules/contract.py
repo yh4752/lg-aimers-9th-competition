@@ -30,6 +30,7 @@ _POLICY_KEYS = {
     "environment",
     "archive_members",
     "output_path",
+    "leaderboard_selection",
 }
 _LIMITS = {
     "install_seconds": 600,
@@ -172,13 +173,13 @@ def load_policy(path: str | Path, *, project_root: str | Path) -> dict[str, obje
     policy = _exact_mapping(_load_json(path, project_root=project_root), _POLICY_KEYS, "policy")
     if type(policy["schema_version"]) is not int or policy["schema_version"] != 1:
         raise RulesContractError("policy schema_version must be 1")
-    if policy["policy_version"] != "dacon-236743-2026-08-13":
+    if policy["policy_version"] != "dacon-236743-2026-08-15":
         raise RulesContractError("unknown policy_version")
     if policy["competition_id"] != "236743":
         raise RulesContractError("competition_id must be 236743")
     sources = policy["official_sources"]
-    if not isinstance(sources, list) or len(sources) != 6:
-        raise RulesContractError("official_sources must contain six entries")
+    if not isinstance(sources, list) or len(sources) != 7:
+        raise RulesContractError("official_sources must contain seven entries")
     for source in sources:
         item = _exact_mapping(source, {"title", "url"}, "official source")
         if not isinstance(item["title"], str) or not item["title"]:
@@ -203,6 +204,8 @@ def load_policy(path: str | Path, *, project_root: str | Path) -> dict[str, obje
         raise RulesContractError("archive_members are invalid")
     if policy["output_path"] != "output/submission.csv":
         raise RulesContractError("output_path is invalid")
+    if policy["leaderboard_selection"] != "highest_compliant_submission":
+        raise RulesContractError("leaderboard_selection is invalid")
     return policy
 
 
