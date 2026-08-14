@@ -159,8 +159,19 @@ CSV. A canary mismatch blocks output publication.
 
 The existing Version D review ran under Python 3.12.13, PyTorch 2.11.0,
 NumPy 2.0.2, and pandas 2.2.2. It cannot prove official-environment
-compatibility. New evidence must use Python 3.11.x and the official default
-package family, with PyTorch 2.7.1 and CUDA 12.8 recorded explicitly.
+compatibility. Current Colab and Kaggle GPU images may also use Python 3.12, so
+requiring the host kernel itself to match the official environment would make
+the validation handoff unusable.
+
+Use two complementary probes. First, create an isolated Python 3.11.15
+environment with PyTorch 2.7.1 CPU, pandas 2.0.3, and NumPy 1.26.4. In that
+environment, install the two submitted requirements, deserialize the real
+checkpoint, and produce the deterministic five-row prediction. This proves
+Python and library compatibility without pretending that a Colab or Kaggle
+image is the evaluator. Second, run full 245,789-row inference and the
+row-independence audit on the T4 GPU host, recording its actual Python, PyTorch,
+CUDA, pandas, and NumPy versions. Compare the exact-environment CPU probe and
+GPU-host five-row probabilities within the documented floating-point tolerance.
 
 The user runs one complete validation cell on a GPU service. The cell receives
 the candidate handoff and official data as uploaded inputs, installs only the
@@ -169,8 +180,8 @@ creates `submit.zip`.
 
 Validation must record:
 
-- Python, OS, CUDA, GPU, PyTorch, pandas, NumPy, TabM, and numerical-embedding
-  versions;
+- exact-probe and GPU-host Python, OS, CUDA, GPU, PyTorch, pandas, NumPy, TabM,
+  and numerical-embedding versions;
 - dependency installation command, return code, elapsed seconds, and logs;
 - successful checkpoint deserialization and a deterministic five-row probe;
 - full 245,789-row inference time, peak RAM, peak allocated VRAM, and output
@@ -180,13 +191,15 @@ Validation must record:
 - candidate, model, adapter, rendered-runtime, preprocessing, config, and data
   hashes.
 
-The acceptance threshold is stricter than the platform limit: dependency
-installation must be at most 480 seconds, full inference at most 480 seconds,
-peak RAM below 22 GiB, peak allocated VRAM below 20 GiB, ZIP projection below
-10 GB, and extracted projection below 32 GB. A T4 runtime passing the time gate
-is acceptable conservative performance evidence for the faster official L4,
-but the report must label the GPU mismatch rather than claim exact hardware
-equivalence. Python or PyTorch version mismatch blocks compatibility acceptance.
+The acceptance threshold is stricter than the platform limit: submitted
+dependency installation must be at most 480 seconds, full inference at most
+480 seconds, peak RAM below 22 GiB, peak allocated VRAM below 20 GiB, ZIP
+projection below 10 GB, and extracted projection below 32 GB. A T4 runtime
+passing the time gate is acceptable conservative performance evidence for the
+faster official L4, but the report must label both hardware and host-runtime
+mismatches rather than claim exact equivalence. A version mismatch in the
+isolated Python 3.11.15/PyTorch 2.7.1 probe, checkpoint-load failure, or
+five-row prediction disagreement blocks compatibility acceptance.
 
 The validation operation is rerun-safe: completed audit phases and their
 prediction shards are reused only after identity and content-hash verification.
