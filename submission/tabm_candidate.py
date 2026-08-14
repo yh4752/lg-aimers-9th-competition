@@ -36,6 +36,7 @@ _INNER_NAMES = {
     "policy/policy_review.json",
 }
 _MAX_EXPANDED_BYTES = 32_000_000_000
+_SCRIPT_SOURCE = Path(__file__).with_name("tabm_version_d_script.py")
 
 
 class TabMCandidateError(ValueError):
@@ -316,3 +317,31 @@ def import_review_delivery(
         model_sha256=_model_digest(model_members),
         member_sha256=MappingProxyType(member_sha256),
     )
+
+
+def render_validation_script(candidate: ImportedTabMCandidate) -> bytes:
+    """Bind immutable candidate hashes into the standalone evaluator source."""
+
+    if not isinstance(candidate, ImportedTabMCandidate):
+        raise TabMCandidateError("candidate has invalid type")
+    source = _SCRIPT_SOURCE.read_bytes()
+    sentinel = b"EMBEDDED_METADATA = None"
+    if source.count(sentinel) != 1:
+        raise TabMCandidateError("script metadata sentinel differs")
+    metadata = {
+        "candidate_id": candidate.candidate_id,
+        "delivery_sha256": candidate.delivery_sha256,
+        "review_bundle_sha256": candidate.review_bundle_sha256,
+        "model_sha256": candidate.model_sha256,
+        "members": dict(candidate.member_sha256),
+    }
+    payload = _canonical_json(metadata).decode("utf-8").strip()
+    replacement = (
+        "EMBEDDED_METADATA = json.loads(" + repr(payload) + ")"
+    ).encode("utf-8")
+    rendered = source.replace(sentinel, replacement)
+    try:
+        compile(rendered, "script.py", "exec")
+    except SyntaxError as error:
+        raise TabMCandidateError("rendered script is invalid") from error
+    return rendered
