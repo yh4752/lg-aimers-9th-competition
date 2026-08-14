@@ -142,11 +142,15 @@ deviations, frequencies, ranks, groups, rolling state, calibration parameters,
 or OOV statistics.
 
 The full audit uses the actual candidate script or the byte-identical runtime
-logic and the complete official test frame. For every restartable chunk it
-compares predictions for original order, reverse order, deterministic shuffle,
-several batch partitions, and singleton rows. The preprocessing features must
-be bit-identical by `row_id`; probabilities must agree within the documented
-floating-point tolerance; the adapter state digest must not change.
+logic and the complete official test frame. It compares all rows in original
+order, reverse order, deterministic shuffle, and several batch partitions. It
+also checks 256 singleton rows selected solely by a fixed hash of `row_id` and
+the policy seed. The preprocessing features must be bit-identical by `row_id`;
+probabilities must agree within the documented floating-point tolerance; the
+adapter state digest must not change. Testing every one of 245,789 rows as a
+separate GPU call is deliberately excluded because it adds substantial runtime
+without materially strengthening the combination of source review, full-frame
+reordering, full-frame rebatching, and fixed singleton canaries.
 
 The runtime also runs deterministic singleton canaries before writing the final
 CSV. A canary mismatch blocks output publication.
@@ -184,10 +188,10 @@ is acceptable conservative performance evidence for the faster official L4,
 but the report must label the GPU mismatch rather than claim exact hardware
 equivalence. Python or PyTorch version mismatch blocks compatibility acceptance.
 
-The validation operation is rerun-safe: completed audit chunks are reused only
-after identity and chunk-hash verification. New evidence paths are exclusive,
-and an interrupted run exports a resume bundle rather than replacing previous
-evidence.
+The validation operation is rerun-safe: completed audit phases and their
+prediction shards are reused only after identity and content-hash verification.
+New evidence paths are exclusive, and an interrupted run exports a resume
+bundle rather than replacing previous evidence.
 
 ## Acceptance and packaging gates
 
@@ -258,4 +262,3 @@ The work is complete only when:
 7. an isolated dry run of the packaged `script.py` creates exactly one valid
    `output/submission.csv` from official input paths;
 8. no unrelated user changes are altered or committed.
-
