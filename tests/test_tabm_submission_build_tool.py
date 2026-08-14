@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from argparse import Namespace
 from pathlib import Path
+import subprocess
+import sys
 
 import pytest
 
@@ -17,6 +19,23 @@ class _VersionInfo(tuple):
     @property
     def minor(self) -> int:
         return int(self[1])
+
+
+def test_build_tool_can_be_executed_directly_outside_repo_cwd(
+    tmp_path: Path,
+) -> None:
+    script = Path(builder.__file__).resolve()
+
+    result = subprocess.run(
+        [sys.executable, str(script), "--help"],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "--stage-c-delivery" in result.stdout
 
 
 def _arguments(tmp_path: Path) -> Namespace:

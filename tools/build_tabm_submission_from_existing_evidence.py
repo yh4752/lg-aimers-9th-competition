@@ -17,6 +17,12 @@ from zoneinfo import ZoneInfo
 import numpy as np
 import pandas as pd
 
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+
 from submission.contract import PackageRequest, PackageResult
 from submission.package import build_submission_package
 from submission.tabm_candidate import (
