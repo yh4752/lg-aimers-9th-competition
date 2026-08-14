@@ -365,7 +365,9 @@ def fit_feature_view(
     )
     numeric = numeric.replace([np.inf, -np.inf], np.nan)
     means = numeric.mean(axis=0, skipna=True).fillna(0.0).to_numpy(dtype="float64")
-    scales = numeric.std(axis=0, ddof=0, skipna=True).to_numpy(dtype="float64")
+    scales = numeric.std(axis=0, ddof=0, skipna=True).to_numpy(
+        dtype="float64", copy=True
+    )
     scales[~np.isfinite(scales) | (scales <= 0)] = 1.0
     category_maps = _fit_categories(prepared, categorical_columns)
     lookup_hash = (
