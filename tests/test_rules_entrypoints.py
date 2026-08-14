@@ -21,17 +21,14 @@ def _blocked(**_: object) -> dict[str, object]:
     raise RulesContractError("blocked before data")
 
 
-def test_real_runnable_assertion_binds_source_and_candidates() -> None:
-    report = assert_experiment_runnable(
-        project_root=ROOT,
-        contract_path=ROOT / "experiments/independent_dl/experiment_contract.json",
-        config_path=ROOT / "experiments/independent_dl/configs/campaign_v1.json",
-        candidate_ids=["tabm__raw_typed__p1__s42"],
-    )
-
-    assert report["status"] == "passed"
-    assert report["candidate_count"] == 64
-    assert report["source_gate"]["status"] == "passed"
+def test_old_experiment_contract_is_blocked_by_current_policy() -> None:
+    with pytest.raises(RulesContractError, match="does not match current policy"):
+        assert_experiment_runnable(
+            project_root=ROOT,
+            contract_path=ROOT / "experiments/independent_dl/experiment_contract.json",
+            config_path=ROOT / "experiments/independent_dl/configs/campaign_v1.json",
+            candidate_ids=["tabm__raw_typed__p1__s42"],
+        )
 
 
 def test_independent_run_gates_before_runtime_construction(
@@ -145,11 +142,22 @@ def test_uncontracted_tabicl_is_filtered_without_blocking_tabm(
 
     monkeypatch.setattr(independent_cli, "run_campaign", fake_run)
     monkeypatch.setattr(independent_cli, "OfficialCampaignRuntime", lambda *a, **k: object())
+    config = ROOT / "experiments/independent_dl/configs/campaign_v1.json"
+    covered = [
+        candidate.candidate_id
+        for candidate in independent_cli.load_campaign(config).candidates
+        if "tabicl_v2" not in candidate.candidate_id
+    ]
+    monkeypatch.setattr(
+        independent_cli,
+        "assert_experiment_runnable",
+        lambda **_: {"status": "passed", "covered_candidate_ids": covered},
+    )
 
     independent_cli.main(
         [
             "run",
-            "--config", str(ROOT / "experiments/independent_dl/configs/campaign_v1.json"),
+            "--config", str(config),
             "--data-dir", str(tmp_path / "unread"),
             "--output-dir", str(tmp_path / "output"),
         ]
