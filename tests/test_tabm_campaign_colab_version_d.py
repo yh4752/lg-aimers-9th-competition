@@ -159,3 +159,16 @@ def test_version_d_runtime_excludes_stage_c_working_files() -> None:
     assert "colab_recovery.py" not in names
     assert "colab_stage_c_contract.json" not in names
     assert "COLAB_STAGE_C_RECOVERY_CELL.py" not in names
+
+
+def test_version_d_cell_repairs_colab_venv_without_changing_runtime_identity() -> None:
+    from tools import render_tabm_colab_version_d_cell as renderer
+
+    text = renderer.render().decode("utf-8")
+    assert "def ensure_venv_ready():" in text
+    assert 'stage = "venv"' in text
+    assert "python3.12-venv" in text
+    assert '\n    ensure_venv_ready()\n\n    stage = "run"' in text
+    assert sha256(renderer._archive_bytes()).hexdigest() == (
+        "75500c32988d94f671cff16195d0633a3f3f2d1fb648c8d6e28ddc4a396ad1f2"
+    )

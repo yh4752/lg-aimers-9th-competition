@@ -14,6 +14,7 @@ import shutil
 import subprocess
 import sys
 import tarfile
+import tempfile
 import time
 import traceback
 
@@ -147,6 +148,52 @@ def dependencies_ready():
         return False
 
 
+def venv_probe():
+    root = Path(tempfile.mkdtemp(prefix="version_d_venv_probe_"))
+    try:
+        return subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "venv",
+                "--system-site-packages",
+                str(root / "probe"),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def ensure_venv_ready():
+    probe = venv_probe()
+    if probe.returncode == 0:
+        print("VERSION_D_VENV_READY mode=existing", flush=True)
+        return
+    print("VERSION_D_VENV_REPAIR_REQUIRED package=python3.12-venv", flush=True)
+    commands = (
+        ["apt-get", "update", "-qq"],
+        ["apt-get", "install", "-y", "-qq", "python3.12-venv"],
+    )
+    for command in commands:
+        completed = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            timeout=300,
+        )
+        if completed.returncode:
+            detail = (completed.stdout + "\n" + completed.stderr)[-2000:]
+            raise RuntimeError(f"venv repair failed: {detail}")
+    probe = venv_probe()
+    if probe.returncode:
+        detail = (probe.stdout + "\n" + probe.stderr)[-2000:]
+        raise RuntimeError(f"venv remains unavailable after repair: {detail}")
+    print("VERSION_D_VENV_READY mode=repaired", flush=True)
+
+
 def runtime_versions():
     import numpy
     import pandas
@@ -217,6 +264,9 @@ try:
         + " ".join(f"{name}={value}" for name, value in sorted(versions.items())),
         flush=True,
     )
+
+    stage = "venv"
+    ensure_venv_ready()
 
     stage = "run"
     sys.path.insert(0, str(CODE_ROOT))

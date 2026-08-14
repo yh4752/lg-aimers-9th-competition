@@ -28,8 +28,10 @@ Stage C delivery SHA-256은
 실행 셀은
 `experiments/tabm_campaign/COLAB_VERSION_D_REVIEW_CELL.py`다. 파일 전체를 복사해
 Colab 코드 셀 하나에 붙여 넣는다. 현재 셀 SHA-256은
-`4af85f6110328d0622e109553e0d1f13ec6a847a9f4095756c48342cb5e08672`이며
-크기는 125,811바이트다.
+`caf5de691378b627f398b417602b918dc1bb55af4a8428cb64a56ee3cf9405c9`이며
+크기는 127,300바이트다. 내장 runtime SHA-256은
+`75500c32988d94f671cff16195d0633a3f3f2d1fb648c8d6e28ddc4a396ad1f2`로
+유지되므로 기존 Version D emergency ZIP과 호환된다.
 
 ## 처음 실행
 
@@ -42,8 +44,17 @@ Colab 코드 셀 하나에 붙여 넣는다. 현재 셀 SHA-256은
 정상 진행 중에는 epoch마다 다음 형식의 로그가 나온다.
 
 ```text
+VERSION_D_VENV_READY mode=existing
 FINAL_TRAINING_PROGRESS seed=3407 epoch=1/3
 VERSION_D_EMERGENCY_SNAPSHOT_READY epoch=1 path=...
+```
+
+Colab Python의 `venv` 구성이 빠진 런타임에서는 다음 로그와 함께 필요한 시스템
+패키지만 보완한 후 다시 검사한다. 보완에는 보통 1~3분이 추가된다.
+
+```text
+VERSION_D_VENV_REPAIR_REQUIRED package=python3.12-venv
+VERSION_D_VENV_READY mode=repaired
 ```
 
 epoch 1~3이 끝날 때 emergency ZIP이 하나씩 다운로드된다. 학습이 끝나면
