@@ -401,10 +401,20 @@ def write_submission(
             temporary.unlink()
 
 
+def _input_directory() -> Path:
+    for name in ("data", "open"):
+        directory = Path(name)
+        if (directory / "test.csv").is_file() and (
+            directory / "sample_submission.csv"
+        ).is_file():
+            return directory
+    raise EvaluatorError("test.csv and sample_submission.csv were not found")
+
+
 def main() -> int:
     if not isinstance(EMBEDDED_METADATA, dict):
         raise EvaluatorError("script is not bound to a candidate")
-    data_dir = Path("data")
+    data_dir = _input_directory()
     model_dir = Path("model")
     output = Path("output/submission.csv")
     test = pd.read_csv(data_dir / "test.csv", dtype={"row_id": "string"})

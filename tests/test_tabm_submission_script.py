@@ -130,6 +130,26 @@ def test_main_uses_exact_paths_and_sample_order(
     assert result["control_success"].tolist() == [0.1, 0.2, 0.3]
 
 
+def test_main_accepts_evaluation_open_input_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    data = tmp_path / "open"
+    model = tmp_path / "model"
+    data.mkdir()
+    model.mkdir()
+    test, sample = _frames()
+    test.to_csv(data / "test.csv", index=False)
+    sample.to_csv(data / "sample_submission.csv", index=False)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(runtime, "EMBEDDED_METADATA", {"candidate_id": CANDIDATE_ID})
+    monkeypatch.setattr(runtime, "load_frozen_predictor", lambda path: _FixturePredictor())
+
+    assert runtime.main() == 0
+
+    result = pd.read_csv(tmp_path / "output/submission.csv", dtype={"row_id": "string"})
+    assert result["row_id"].tolist() == sample["row_id"].tolist()
+
+
 def test_duplicate_or_mismatched_ids_are_rejected(tmp_path: Path) -> None:
     test, sample = _frames()
     duplicate = test.copy()
