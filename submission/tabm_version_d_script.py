@@ -423,7 +423,9 @@ def main() -> int:
     )[: min(8, len(test))]
     for index in ordered:
         single = test.iloc[[index]].reset_index(drop=True)
-        if _predict_checked(predictor, single)[0] != by_id[single.iloc[0]["row_id"]]:
+        single_value = float(_predict_checked(predictor, single)[0])
+        batch_value = float(by_id[single.iloc[0]["row_id"]])
+        if abs(single_value - batch_value) > 1e-6:
             raise EvaluatorError("row-independence canary mismatch")
     write_submission(sample, by_id, output)
     print(

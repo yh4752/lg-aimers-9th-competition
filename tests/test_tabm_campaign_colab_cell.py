@@ -1,13 +1,9 @@
 from __future__ import annotations
 
-from hashlib import sha256
 from pathlib import Path
-import subprocess
-import sys
 
 
 CELL = Path("experiments/tabm_campaign/COLAB_STAGE_C_RECOVERY_CELL.py")
-RENDERER = Path("tools/render_tabm_colab_stage_c_recovery_cell.py")
 
 
 def test_colab_cell_is_self_contained_and_small() -> None:
@@ -47,7 +43,6 @@ def test_colab_cell_exposes_required_logs_and_download_contract() -> None:
 
 
 def test_colab_renderer_is_byte_deterministic() -> None:
-    subprocess.run([sys.executable, str(RENDERER)], check=True)
-    first = sha256(CELL.read_bytes()).hexdigest()
-    subprocess.run([sys.executable, str(RENDERER)], check=True)
-    assert sha256(CELL.read_bytes()).hexdigest() == first
+    from tools import render_tabm_colab_stage_c_recovery_cell as renderer
+
+    assert renderer.render() == renderer.render()

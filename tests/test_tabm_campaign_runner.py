@@ -7,7 +7,9 @@ from pathlib import Path
 from zipfile import ZipFile
 
 import pandas as pd
+import pytest
 
+from competition_rules import contract as rules_contract
 from experiments.tabm_campaign import worker as worker_module
 from experiments.tabm_campaign.contracts import Candidate
 from experiments.tabm_campaign.runner import (
@@ -16,6 +18,13 @@ from experiments.tabm_campaign.runner import (
     _version_c_confirmation_jobs,
     run_one_version,
 )
+
+
+@pytest.fixture(autouse=True)
+def _isolate_runner_mechanics_from_the_retired_rules_contract(monkeypatch) -> None:
+    """These tests cover scheduling; the retired campaign is not runnable now."""
+
+    monkeypatch.setattr(rules_contract, "assert_experiment_runnable", lambda **_: {})
 
 
 class _Runtime:

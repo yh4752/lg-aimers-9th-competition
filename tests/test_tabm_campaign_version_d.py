@@ -145,7 +145,7 @@ def test_contract_seals_single_s3407_and_three_epochs() -> None:
     }
 
 
-def test_same_day_policy_review_matches_policy_digest() -> None:
+def test_retired_policy_review_does_not_authorize_current_campaign() -> None:
     root = Path(__file__).resolve().parents[1]
     policy = load_policy(root / "competition_rules/policy.json", project_root=root)
     review = json.loads(
@@ -154,6 +154,18 @@ def test_same_day_policy_review_matches_policy_digest() -> None:
         )
     )
     assert review["verdict"] == "unchanged"
+    assert review["policy_sha256"] != policy_digest(policy)
+
+
+def test_current_policy_review_matches_policy_digest() -> None:
+    root = Path(__file__).resolve().parents[1]
+    policy = load_policy(root / "competition_rules/policy.json", project_root=root)
+    review = json.loads(
+        (root / "reports/rules/2026-08-15-policy-review.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert review["verdict"] == "updated"
     assert review["policy_sha256"] == policy_digest(policy)
 
 

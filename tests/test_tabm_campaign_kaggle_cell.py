@@ -5,14 +5,12 @@ import os
 import subprocess
 import sys
 import tarfile
-from hashlib import sha256
 from pathlib import Path
 
 from tools import render_tabm_campaign_kaggle_cell as renderer
 
 
 CELL = Path("experiments/tabm_campaign/KAGGLE_CELL.py")
-RENDERER = Path("tools/render_tabm_campaign_kaggle_cell.py")
 
 
 def test_generated_cell_is_self_contained_and_under_kaggle_limit() -> None:
@@ -36,10 +34,7 @@ def test_generated_cell_requires_only_official_data_and_optional_resume() -> Non
 
 
 def test_renderer_is_byte_deterministic() -> None:
-    subprocess.run([sys.executable, str(RENDERER)], check=True)
-    first = sha256(CELL.read_bytes()).hexdigest()
-    subprocess.run([sys.executable, str(RENDERER)], check=True)
-    assert sha256(CELL.read_bytes()).hexdigest() == first
+    assert renderer.render() == renderer.render()
 
 
 def test_embedded_runtime_imports_training_from_an_isolated_directory(

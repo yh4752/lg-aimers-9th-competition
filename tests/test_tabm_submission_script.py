@@ -149,3 +149,30 @@ def test_batch_dependent_predictions_fail_before_output(
     with pytest.raises(runtime.EvaluatorError, match="row-independence canary"):
         runtime.main()
     assert not (tmp_path / "output/submission.csv").exists()
+
+
+def test_canary_allows_normal_gpu_roundoff(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class RoundedByBatch(_FixturePredictor):
+        def predict_batch(
+            self, frame: pd.DataFrame, *, batch_size: int = 2048
+        ) -> np.ndarray:
+            values = super().predict_batch(frame, batch_size=batch_size)
+            return values + (5e-7 if len(frame) > 1 else 0.0)
+
+    data = tmp_path / "data"
+    (tmp_path / "model").mkdir()
+    data.mkdir()
+    test, sample = _frames()
+    test.to_csv(data / "test.csv", index=False)
+    sample.to_csv(data / "sample_submission.csv", index=False)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(runtime, "EMBEDDED_METADATA", {"candidate_id": CANDIDATE_ID})
+    monkeypatch.setattr(runtime, "load_frozen_predictor", lambda path: RoundedByBatch())
+
+    assert runtime.main() == 0
+    result = pd.read_csv(tmp_path / "output/submission.csv")
+    assert result["control_success"].tolist() == pytest.approx(
+        [0.1000005, 0.2000005, 0.3000005]
+    )

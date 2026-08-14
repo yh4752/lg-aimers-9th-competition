@@ -9,6 +9,7 @@ import shutil
 import subprocess
 import sys
 from time import monotonic
+import zipfile
 
 from IPython.display import FileLink, display
 
@@ -31,6 +32,34 @@ def file_sha256(path: Path) -> str:
         while block := handle.read(1024 * 1024):
             digest.update(block)
     return digest.hexdigest()
+
+
+def publish_diagnostics(
+    work: Path | None, run_id: str, stage: str, error: Exception
+) -> None:
+    if work is None or not work.is_dir():
+        return
+    logs = [
+        path
+        for path in sorted(work.rglob("*.log"))
+        if path.is_file() and not path.is_symlink()
+    ]
+    if not logs:
+        return
+    destination = WORKING_ROOT / f"tabm_submission_validation_diagnostics_{run_id}.zip"
+    with zipfile.ZipFile(destination, "x", compression=zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr(
+            "error.txt",
+            f"stage={stage}\ntype={type(error).__name__}\nmessage={error}\n",
+        )
+        for path in logs:
+            archive.write(path, f"logs/{path.relative_to(work).as_posix()}")
+    print(
+        f"VALIDATION_DIAGNOSTICS_READY path={destination} "
+        f"sha256={file_sha256(destination)}",
+        flush=True,
+    )
+    display(FileLink(str(destination)))
 
 
 def find_handoff() -> Path:
@@ -101,10 +130,11 @@ def run(command: list[str], *, log_path: Path, env: dict[str, str] | None = None
 
 
 stage = "setup"
+run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+work = None
 try:
     handoff = find_handoff()
     official_data = find_official_data()
-    run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     work = WORKING_ROOT / f"tabm_submission_validation_{run_id}"
     work.mkdir(parents=True, exist_ok=False)
     print(f"VALIDATION_HANDOFF_FOUND path={handoff}", flush=True)
@@ -225,4 +255,8 @@ try:
     display(FileLink(str(resume)))
 except Exception as error:
     fail(stage, error)
+    try:
+        publish_diagnostics(work, run_id, stage, error)
+    except Exception as diagnostics_error:
+        fail("diagnostics", diagnostics_error)
     raise

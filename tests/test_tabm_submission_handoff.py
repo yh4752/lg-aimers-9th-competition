@@ -89,4 +89,5 @@ def test_kaggle_cell_is_one_offline_repository_independent_program() -> None:
     assert "EXACT_ENV_READY" in source
     assert "VALIDATION_SUCCESS" in source
     assert "VALIDATION_ERROR" in source
+    assert "VALIDATION_DIAGNOSTICS_READY" in source
     assert "submit.zip" not in source

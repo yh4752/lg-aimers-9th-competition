@@ -1,0 +1,37 @@
+{
+  "schema_version": 1,
+  "policy_version": "dacon-236743-2026-08-15",
+  "policy_sha256": "7f118c46b81dec21a0667f2591ab39d536bad01102f8330b43d1e0291d4f78ec",
+  "reviewed_at": "2026-08-15T01:00:00+09:00",
+  "sources": [
+    {
+      "title": "대회 규칙",
+      "url": "https://dacon.io/competitions/official/236743/overview/rules"
+    },
+    {
+      "title": "평가 및 코드 제출 안내",
+      "url": "https://dacon.io/competitions/official/236743/overview/evaluation"
+    },
+    {
+      "title": "평가 데이터 독립 예측 원칙",
+      "url": "https://dacon.io/competitions/official/236743/talkboard/417123?page=1&dtype=recent"
+    },
+    {
+      "title": "대회 FAQ 및 운영진 답변",
+      "url": "https://dacon.io/competitions/official/236743/talkboard/417082?page=1&dtype=recent"
+    },
+    {
+      "title": "데이터 설명",
+      "url": "https://dacon.io/competitions/official/236743/data"
+    },
+    {
+      "title": "대회 설명",
+      "url": "https://dacon.io/competitions/official/236743/overview/description"
+    },
+    {
+      "title": "부정 제출 및 치팅 행위에 관하여",
+      "url": "https://dacon.io/notice/notice/13"
+    }
+  ],
+  "verdict": "updated"
+}

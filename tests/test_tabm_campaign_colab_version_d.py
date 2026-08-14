@@ -2,8 +2,6 @@ from __future__ import annotations
 
 from pathlib import Path
 from hashlib import sha256
-import subprocess
-import sys
 
 import pytest
 
@@ -11,7 +9,6 @@ from experiments.tabm_campaign.version_d import RecoverySelection
 
 
 CELL = Path("experiments/tabm_campaign/COLAB_VERSION_D_REVIEW_CELL.py")
-RENDERER = Path("tools/render_tabm_colab_version_d_cell.py")
 
 
 def test_frozen_recovery_skips_training(tmp_path: Path, monkeypatch) -> None:
@@ -146,10 +143,9 @@ def test_version_d_log_starts_before_code_ready_marker() -> None:
 
 
 def test_version_d_renderer_is_deterministic() -> None:
-    subprocess.run([sys.executable, str(RENDERER)], check=True)
-    first = sha256(CELL.read_bytes()).hexdigest()
-    subprocess.run([sys.executable, str(RENDERER)], check=True)
-    assert sha256(CELL.read_bytes()).hexdigest() == first
+    from tools import render_tabm_colab_version_d_cell as renderer
+
+    assert renderer.render() == renderer.render()
 
 
 def test_version_d_runtime_excludes_stage_c_working_files() -> None:
@@ -161,7 +157,7 @@ def test_version_d_runtime_excludes_stage_c_working_files() -> None:
     assert "COLAB_STAGE_C_RECOVERY_CELL.py" not in names
 
 
-def test_version_d_cell_repairs_colab_venv_without_changing_runtime_identity() -> None:
+def test_version_d_cell_repairs_colab_venv_without_changing_frozen_delivery() -> None:
     from tools import render_tabm_colab_version_d_cell as renderer
 
     text = renderer.render().decode("utf-8")
@@ -169,6 +165,9 @@ def test_version_d_cell_repairs_colab_venv_without_changing_runtime_identity() -
     assert 'stage = "venv"' in text
     assert "python3.12-venv" in text
     assert '\n    ensure_venv_ready()\n\n    stage = "run"' in text
-    assert sha256(renderer._archive_bytes()).hexdigest() == (
+    assert "75500c32988d94f671cff16195d0633a3f3f2d1fb648c8d6e28ddc4a396ad1f2" in (
+        CELL.read_text(encoding="utf-8")
+    )
+    assert sha256(renderer._archive_bytes()).hexdigest() != (
         "75500c32988d94f671cff16195d0633a3f3f2d1fb648c8d6e28ddc4a396ad1f2"
     )
