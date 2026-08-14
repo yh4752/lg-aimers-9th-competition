@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from datetime import datetime
 from hashlib import sha256
 import json
@@ -17,6 +17,7 @@ from competition_rules.evidence_gate import AuditIdentity
 from submission.contract import PackageRequest
 from submission.audit import SubmissionAuditError, audit_package_request
 from submission.package import build_submission_package
+from submission.tabm_candidate import CANDIDATE_ID, render_bound_script
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -134,6 +135,76 @@ def test_valid_fixture_package_has_exact_top_level_layout(
     assert names == ["script.py", "requirements.txt", "model/weights.bin"]
     assert result.receipt_path.parent == result.archive_path.parent
     assert json.loads(result.receipt_path.read_text())["status"] == "packaged"
+
+
+def test_tabm_package_script_is_bound_to_candidate_manifest(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from submission.adapters import resolve_adapter_factory as real_resolver
+    from submission.runtime import render_script as real_renderer
+
+    request = _valid_request(tmp_path, monkeypatch)
+    for path in request.model_dir.iterdir():
+        path.unlink()
+    values = {
+        "inference_manifest.json": b"{}\n",
+        "numeric_embedding_0.json": b"{}\n",
+        "preprocessing_state.json": b"{}\n",
+        "tabm_member_0_seed_3407.pt": b"weights",
+    }
+    members: dict[str, str] = {}
+    combined = sha256()
+    for name, value in sorted(values.items()):
+        (request.model_dir / name).write_bytes(value)
+        digest = _sha(value)
+        members[name] = digest
+        combined.update(name.encode() + b"\0" + bytes.fromhex(digest))
+    model_sha256 = combined.hexdigest()
+    metadata = {
+        "candidate_id": CANDIDATE_ID,
+        "delivery_sha256": "a" * 64,
+        "review_bundle_sha256": "b" * 64,
+        "model_sha256": model_sha256,
+        "members": members,
+    }
+    (request.model_dir.parent / "candidate_manifest.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "artifact_kind": "tabm_submission_validation_candidate",
+                **metadata,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    acceptance = json.loads(request.acceptance_path.read_text())
+    old_identity = acceptance["identity"]
+    identity = {**old_identity, "candidate_id": CANDIDATE_ID, "model_sha256": model_sha256}
+    acceptance.update(candidate_id=CANDIDATE_ID, adapter_id=CANDIDATE_ID, identity=identity)
+    request.acceptance_path.write_text(json.dumps(acceptance), encoding="utf-8")
+    benchmark = json.loads(request.runtime_benchmark_path.read_text())
+    benchmark.update(candidate_id=CANDIDATE_ID, adapter_id=CANDIDATE_ID, identity=identity)
+    request.runtime_benchmark_path.write_text(json.dumps(benchmark), encoding="utf-8")
+    manifest = json.loads(request.full_audit_manifest_path.read_text())
+    chunk_path = request.full_audit_manifest_path.parent / manifest["chunks"][0]["path"]
+    chunk = json.loads(chunk_path.read_text())
+    chunk["identity"] = identity
+    chunk.pop("chunk_sha256")
+    canonical = lambda value: (json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n").encode()
+    chunk["chunk_sha256"] = _sha(canonical(chunk))
+    chunk_path.write_bytes(canonical(chunk))
+    manifest["identity"] = identity
+    manifest["chunks"][0]["sha256"] = chunk["chunk_sha256"]
+    request.full_audit_manifest_path.write_bytes(canonical(manifest))
+    request = replace(request, adapter_id=CANDIDATE_ID)
+    monkeypatch.setattr("submission.audit.resolve_adapter_factory", real_resolver)
+    monkeypatch.setattr("submission.package.render_script", real_renderer)
+
+    result = build_submission_package(request)
+
+    with zipfile.ZipFile(result.archive_path) as archive:
+        assert archive.read("script.py") == render_bound_script(metadata)
 
 
 @pytest.mark.parametrize("row_count", [5, 7])

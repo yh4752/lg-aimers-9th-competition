@@ -6,6 +6,8 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Callable, Mapping, Protocol
 
+from .tabm_candidate import CANDIDATE_ID
+
 
 class AdapterRegistryError(ValueError):
     """Raised when an adapter is not explicitly reviewed and registered."""
@@ -21,8 +23,18 @@ class SubmissionAdapter(Protocol):
 
 AdapterFactory = Callable[[Path, Mapping[str, object]], SubmissionAdapter]
 
-# Real candidate adapters are added only in separately reviewed candidate work.
-ADAPTER_FACTORIES: Mapping[str, AdapterFactory] = MappingProxyType({})
+def _load_version_d(
+    model_dir: Path, metadata: Mapping[str, object]
+) -> SubmissionAdapter:
+    del metadata
+    from .tabm_version_d_script import load_frozen_predictor
+
+    return load_frozen_predictor(model_dir)
+
+
+ADAPTER_FACTORIES: Mapping[str, AdapterFactory] = MappingProxyType(
+    {CANDIDATE_ID: _load_version_d}
+)
 
 
 def resolve_adapter_factory(

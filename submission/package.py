@@ -57,12 +57,7 @@ def build_submission_package(request: PackageRequest) -> PackageResult:
     snapshot: AuditSnapshot = audit_package_request(request)
     script = render_script(
         adapter_id=request.adapter_id,
-        artifact_metadata={
-            "candidate_id": snapshot.identity.candidate_id,
-            "model_sha256": snapshot.model_sha256,
-            "adapter_sha256": snapshot.identity.adapter_sha256,
-            "runtime_sha256": snapshot.identity.runtime_sha256,
-        },
+        artifact_metadata=snapshot.artifact_metadata,
     )
     if not isinstance(script, bytes) or not script:
         raise SubmissionAuditError("rendered script is empty")

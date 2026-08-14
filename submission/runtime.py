@@ -156,11 +156,17 @@ def run_evaluator(
 def render_script(
     *, adapter_id: str, artifact_metadata: Mapping[str, object]
 ) -> bytes:
-    """Reject unregistered candidates until a reviewed fixed template is added."""
+    """Render the reviewed fixed template for a registered adapter."""
 
     from .adapters import resolve_adapter_factory
+    from .tabm_candidate import CANDIDATE_ID, render_bound_script
 
     resolve_adapter_factory(adapter_id)
     if not isinstance(artifact_metadata, Mapping):
         raise SubmissionRuntimeError("artifact metadata must be a mapping")
+    if adapter_id == CANDIDATE_ID:
+        try:
+            return render_bound_script(artifact_metadata)
+        except ValueError as error:
+            raise SubmissionRuntimeError("TabM artifact metadata is invalid") from error
     raise SubmissionRuntimeError("registered adapter has no reviewed script template")

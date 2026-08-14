@@ -9,7 +9,8 @@ import pandas as pd
 import pytest
 
 from competition_rules.code_gate import inspect_inference_source
-from submission.adapters import AdapterRegistryError, resolve_adapter_factory
+from submission.adapters import ADAPTER_FACTORIES, resolve_adapter_factory
+from submission.runtime import render_script
 from submission.tabm_candidate import (
     CANDIDATE_ID,
     ImportedTabMCandidate,
@@ -45,7 +46,7 @@ def _candidate(tmp_path: Path) -> ImportedTabMCandidate:
     )
 
 
-def test_rendered_script_is_deterministic_parseable_and_unregistered(
+def test_rendered_script_is_deterministic_parseable_and_registered(
     tmp_path: Path,
 ) -> None:
     candidate = _candidate(tmp_path)
@@ -54,8 +55,23 @@ def test_rendered_script_is_deterministic_parseable_and_unregistered(
     assert first == render_validation_script(candidate)
     ast.parse(first.decode("utf-8"))
     assert candidate.model_sha256.encode() in first
-    with pytest.raises(AdapterRegistryError, match="not registered"):
-        resolve_adapter_factory(candidate.candidate_id)
+    assert callable(resolve_adapter_factory(candidate.candidate_id))
+    assert set(ADAPTER_FACTORIES) == {CANDIDATE_ID}
+
+
+def test_package_renderer_equals_validated_renderer(tmp_path: Path) -> None:
+    candidate = _candidate(tmp_path)
+    metadata = {
+        "candidate_id": candidate.candidate_id,
+        "delivery_sha256": candidate.delivery_sha256,
+        "review_bundle_sha256": candidate.review_bundle_sha256,
+        "model_sha256": candidate.model_sha256,
+        "members": dict(candidate.member_sha256),
+    }
+
+    assert render_script(adapter_id=CANDIDATE_ID, artifact_metadata=metadata) == (
+        render_validation_script(candidate)
+    )
 
 
 def test_rendered_script_passes_inference_source_gate(tmp_path: Path) -> None:

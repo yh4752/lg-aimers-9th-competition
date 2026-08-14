@@ -49,6 +49,7 @@ class AuditSnapshot:
     requirements_bytes: bytes
     model_files: tuple[tuple[str, bytes], ...]
     model_sha256: str
+    artifact_metadata: dict[str, object]
 
 
 def _safe_existing(path: Path, root: Path, *, directory: bool = False) -> Path:
@@ -158,6 +159,55 @@ def _require_number(payload: dict[str, object], key: str) -> float:
     return number
 
 
+def _artifact_metadata(
+    *,
+    request: PackageRequest,
+    root: Path,
+    model_dir: Path,
+    model_files: tuple[tuple[str, bytes], ...],
+    model_sha256: str,
+    identity: AuditIdentity,
+) -> dict[str, object]:
+    from .tabm_candidate import CANDIDATE_ID
+
+    if request.adapter_id != CANDIDATE_ID:
+        return {
+            "candidate_id": identity.candidate_id,
+            "model_sha256": model_sha256,
+            "adapter_sha256": identity.adapter_sha256,
+            "runtime_sha256": identity.runtime_sha256,
+        }
+    manifest_path = _safe_existing(model_dir.parent / "candidate_manifest.json", root)
+    manifest = _load(manifest_path)
+    expected_keys = {
+        "schema_version",
+        "artifact_kind",
+        "candidate_id",
+        "delivery_sha256",
+        "review_bundle_sha256",
+        "model_sha256",
+        "members",
+    }
+    members = {name: sha256(data).hexdigest() for name, data in model_files}
+    if (
+        set(manifest) != expected_keys
+        or manifest["schema_version"] != 1
+        or manifest["artifact_kind"] != "tabm_submission_validation_candidate"
+        or manifest["candidate_id"] != identity.candidate_id
+        or manifest["candidate_id"] != CANDIDATE_ID
+        or manifest["model_sha256"] != model_sha256
+        or manifest["members"] != members
+    ):
+        raise SubmissionAuditError("TabM candidate manifest differs from audited model")
+    return {
+        "candidate_id": manifest["candidate_id"],
+        "delivery_sha256": manifest["delivery_sha256"],
+        "review_bundle_sha256": manifest["review_bundle_sha256"],
+        "model_sha256": manifest["model_sha256"],
+        "members": manifest["members"],
+    }
+
+
 def audit_package_request(request: PackageRequest) -> AuditSnapshot:
     """Check all evidence before any archive member is written."""
 
@@ -213,6 +263,14 @@ def audit_package_request(request: PackageRequest) -> AuditSnapshot:
     model_files, model_digest = _model_snapshot(model_dir)
     if model_digest != identity.model_sha256:
         raise SubmissionAuditError("live model SHA does not match acceptance")
+    artifact_metadata = _artifact_metadata(
+        request=request,
+        root=root,
+        model_dir=model_dir,
+        model_files=model_files,
+        model_sha256=model_digest,
+        identity=identity,
+    )
     benchmark = _load(benchmark_path)
     expected_benchmark_keys = {
         "schema_version", "status", "candidate_id", "adapter_id", "identity",
@@ -250,4 +308,5 @@ def audit_package_request(request: PackageRequest) -> AuditSnapshot:
         requirements_bytes=requirements_path.read_bytes(),
         model_files=model_files,
         model_sha256=model_digest,
+        artifact_metadata=artifact_metadata,
     )

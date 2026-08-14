@@ -319,23 +319,56 @@ def import_review_delivery(
     )
 
 
-def render_validation_script(candidate: ImportedTabMCandidate) -> bytes:
-    """Bind immutable candidate hashes into the standalone evaluator source."""
+def candidate_metadata(candidate: ImportedTabMCandidate) -> dict[str, object]:
+    """Return the exact metadata embedded in the final evaluator."""
 
     if not isinstance(candidate, ImportedTabMCandidate):
         raise TabMCandidateError("candidate has invalid type")
-    source = _SCRIPT_SOURCE.read_bytes()
-    sentinel = b"EMBEDDED_METADATA = None"
-    if source.count(sentinel) != 1:
-        raise TabMCandidateError("script metadata sentinel differs")
-    metadata = {
+    return {
         "candidate_id": candidate.candidate_id,
         "delivery_sha256": candidate.delivery_sha256,
         "review_bundle_sha256": candidate.review_bundle_sha256,
         "model_sha256": candidate.model_sha256,
         "members": dict(candidate.member_sha256),
     }
-    payload = _canonical_json(metadata).decode("utf-8").strip()
+
+
+def render_bound_script(metadata: Mapping[str, object]) -> bytes:
+    """Render the reviewed evaluator from strictly validated metadata."""
+
+    expected_keys = {
+        "candidate_id",
+        "delivery_sha256",
+        "review_bundle_sha256",
+        "model_sha256",
+        "members",
+    }
+    if not isinstance(metadata, Mapping) or set(metadata) != expected_keys:
+        raise TabMCandidateError("script metadata contract differs")
+    if metadata["candidate_id"] != CANDIDATE_ID:
+        raise TabMCandidateError("script candidate identity differs")
+    members = metadata["members"]
+    if not isinstance(members, Mapping) or set(members) != _MODEL_NAMES:
+        raise TabMCandidateError("script model member contract differs")
+    hashes = {
+        "delivery_sha256": metadata["delivery_sha256"],
+        "review_bundle_sha256": metadata["review_bundle_sha256"],
+        "model_sha256": metadata["model_sha256"],
+        **dict(members),
+    }
+    for label, value in hashes.items():
+        if (
+            not isinstance(value, str)
+            or len(value) != 64
+            or any(character not in "0123456789abcdef" for character in value)
+        ):
+            raise TabMCandidateError(f"invalid SHA-256: {label}")
+
+    source = _SCRIPT_SOURCE.read_bytes()
+    sentinel = b"EMBEDDED_METADATA = None"
+    if source.count(sentinel) != 1:
+        raise TabMCandidateError("script metadata sentinel differs")
+    payload = _canonical_json(dict(metadata)).decode("utf-8").strip()
     replacement = (
         "EMBEDDED_METADATA = json.loads(" + repr(payload) + ")"
     ).encode("utf-8")
@@ -345,6 +378,12 @@ def render_validation_script(candidate: ImportedTabMCandidate) -> bytes:
     except SyntaxError as error:
         raise TabMCandidateError("rendered script is invalid") from error
     return rendered
+
+
+def render_validation_script(candidate: ImportedTabMCandidate) -> bytes:
+    """Bind immutable candidate hashes into the standalone evaluator source."""
+
+    return render_bound_script(candidate_metadata(candidate))
 
 
 def load_imported_candidate(root: str | Path) -> ImportedTabMCandidate:
