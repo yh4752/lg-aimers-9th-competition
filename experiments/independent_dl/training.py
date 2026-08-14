@@ -100,6 +100,20 @@ def _session_deadline() -> float | None:
     return value
 
 
+def stop_after_epoch_requested() -> bool:
+    """Return whether the supervisor requested a stop after a safe epoch."""
+
+    raw = os.environ.get("TABM_STOP_AFTER_EPOCH_FILE")
+    if raw is None or not raw.strip():
+        return False
+    marker = Path(raw)
+    if not marker.is_absolute():
+        raise TrainingContractError(
+            "TABM_STOP_AFTER_EPOCH_FILE must be an absolute path"
+        )
+    return marker.is_file()
+
+
 @dataclass(frozen=True)
 class TrainRequest:
     candidate_id: str
@@ -790,6 +804,14 @@ class TorchTrainingBackend:
                 epoch_seconds=time.monotonic() - epoch_started,
                 checkpoint=checkpoint_path,
             )
+            if stop_after_epoch_requested():
+                budget_reached = True
+                reporter.emit(
+                    "TRAINING_STOP_AFTER_EPOCH_REQUESTED",
+                    completed_epoch=epoch,
+                    completed_epochs=len(validation_curve),
+                )
+                break
             if epoch + 1 >= request.min_epochs and stale_epochs >= patience:
                 break
 

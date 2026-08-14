@@ -40,6 +40,7 @@ from experiments.independent_dl.training import (
     on_adapter_epoch_start,
     prepare_initial_retrieval_cache,
     restore_adapter_checkpoint_state,
+    stop_after_epoch_requested,
 )
 
 
@@ -240,6 +241,34 @@ def test_deadline_probe_allows_backend_to_finish_from_last_complete_epoch() -> N
     assert session_deadline_reached(time.time() - 1) is True
     assert session_deadline_reached(time.time() + 60) is False
     assert session_deadline_reached(None) is False
+
+
+def test_stop_after_epoch_marker_is_optional(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("TABM_STOP_AFTER_EPOCH_FILE", raising=False)
+
+    assert stop_after_epoch_requested() is False
+
+
+def test_stop_after_epoch_marker_requires_absolute_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("TABM_STOP_AFTER_EPOCH_FILE", "relative.stop")
+
+    with pytest.raises(Exception, match="absolute"):
+        stop_after_epoch_requested()
+
+
+def test_stop_after_epoch_marker_is_observed_only_when_present(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    marker = tmp_path / "stop-after-epoch"
+    monkeypatch.setenv("TABM_STOP_AFTER_EPOCH_FILE", str(marker))
+    assert stop_after_epoch_requested() is False
+
+    marker.write_text("stop\n", encoding="utf-8")
+
+    assert stop_after_epoch_requested() is True
 
 
 def test_progress_message_exposes_job_epoch_batch_and_eta() -> None:
