@@ -12,10 +12,11 @@
 | 기준선 Brier | `0.24825099524638927` |
 | 닫힌 계열 | FwFM standalone 및 F 제한 blend |
 | 기각된 구성 | TabM residual, calibration의 고정 세 변형 |
-| 열린 계열 | segment-aware calibration, 독립 TabM 후보, XGBoost |
+| 열린 계열 | TabM seed ensemble·행 단위 파생변수, segment-aware calibration |
 | XGBoost v3 | Public `820.9583317093`; 현재 규칙 재검토 전 패키지 차단 |
 | XGBoost rescue | 2024 `0.24826687414041645`, technical verified, Public 미확인 |
-| 다음 주력 | 확정 전처리 기반 4단계 TabM champion Kaggle 캠페인 |
+| TabM 첫 제출 | Public `872.3920184667`; 규칙 준수 단일 모델 |
+| 다음 주력 | 기존 OOF seed 앙상블 감사 후 행 단위 파생변수 검증 |
 | 규칙 안전선 | `competition_rules` → `experiment_contract.json` → 전체행 evidence → `submission/package.py` |
 
 점수가 같은 표에 있어도 검증 프로토콜이 다르면 직접 순위를 매기지 않는다. R9은
@@ -33,13 +34,17 @@
   않았으며, 넓은 탐색 후 중간 용량·seed ensemble·시즌 보정을 함께 선택한 결과다.
   다만 평가 분포 평균 이동 보정이 포함되어 현재 독립 예측 규칙 아래에서는 재사용·
   재패키징하지 않는다. 점수는 역사 기록으로만 보존한다.
+- 확정 전처리 `dl_standard + hand_matchup`의 단일 TabM은 Public
+  `872.3920184667`을 기록했다. 최대 43 epoch 검증의 최적 시점이 2~3 epoch였으므로
+  학습시간 연장보다 seed 앙상블과 행 단위 파생변수를 먼저 검증한다.
 
 ## 규칙 안전선
 
-모든 ML·DL 후보는 현재 정책 `dacon-236743-2026-08-13`, 후보별
+모든 ML·DL 후보는 현재 정책 `dacon-236743-2026-08-15`, 후보별
 `experiment_contract.json`, `current_row_only` 소스 gate와 전체행 독립성 감사를
 순서대로 통과해야 한다. 실제 제출 ZIP은 `submission/package.py`만 만들 수 있으며,
-규칙을 통과하지 못하면 파일 생성 전에 중단한다. 저장소는 업로드하지 않는다.
+규칙을 통과하지 못하면 파일 생성 전에 중단한다. 데이터, 모델과 ZIP은 저장소에
+올리지 않는다.
 팀·계정, 중복 참가, 일일 제출 잔여량, 마감과 업로드 파일 선택은 사용자가 확인한다.
 
 ## 문서
@@ -50,6 +55,8 @@
 - [로드맵](docs/ROADMAP.md): 다음 후보와 코드 이전 순서
 - [저장소 이전 설계](docs/superpowers/specs/2026-08-11-competition-repository-migration-design.md)
 - [TabM Kaggle 실행 안내](docs/TABM_CHAMPION_KAGGLE.md): A–D 입력, 시간, 로그와 전달 파일
+- [TabM 첫 공식 제출](docs/rounds/07-tabm-first-submission.md): 모델, 점수와 해석
+- [TabM 점수 개선 설계](docs/superpowers/specs/2026-08-15-tabm-score-improvement-design.md): 다음 실험 순서와 gate
 
 ## 검증 프로토콜
 
@@ -80,7 +87,6 @@ R9 이후 CatBoost 계보, R25 TabM 잔차와 R32 분모 보정 연구는 동료
 
 ## 다음 후보
 
-현재 실행 대상은 확정 전처리 `dl_standard + hand_matchup`을 고정한 TabM champion
-캠페인이다. [Kaggle 실행 안내](docs/TABM_CHAMPION_KAGGLE.md)에 따라 Save Version
-A–D를 순서대로 진행한다. 다른 DL 계열과 제출 패키징은 이 후보의 final review를
-검토한 뒤 별도 작업으로 다룬다.
+현재 첫 TabM 제출까지 완료했다. 다음 실행 대상은 새 학습이 아니라 Stage C의 기존
+seed별 OOF 예측을 읽는 앙상블 감사다. 이 감사가 사전 등록 gate를 통과한 경우에만
+추가 seed 전체 학습을 수행하고, 실패하면 행 단위 파생변수 검증으로 이동한다.

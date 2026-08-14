@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "candidate_id": "tabm_hand_matchup_version_d_seed3407_v1",
+  "result_source": "user_reported_dacon_public_leaderboard",
+  "recorded_at_kst": "2026-08-15",
+  "public_score": 872.3920184667,
+  "metric": "Brier Skill Score",
+  "score_direction": "higher_is_better",
+  "baseline_threshold": 549.51,
+  "submission_sha256": "bcea66999322721e60016761ce041ca151c71b034d0e4122f0b2852f5b06697a",
+  "model_sha256": "f5ef58341a8e2e3c630a38da74dad666666f9f39923c220f556a9c20c737474a",
+  "validation": {
+    "primary_fold": "2023->2024",
+    "primary_brier": 0.24811080225115084,
+    "older_fold": "2022->2023",
+    "older_brier": 0.25086573594721084
+  },
+  "interpretation": {
+    "relative_brier_improvement_percent": 0.8723920184667,
+    "points_above_baseline_threshold": 322.8820184667,
+    "points_below_1100_lower_bound": 227.6079815333
+  },
+  "status": "public_scored"
+}
