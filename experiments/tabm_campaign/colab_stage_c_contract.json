@@ -1,0 +1,35 @@
+{
+  "schema_version": 1,
+  "base_resume": {
+    "filename": "tabm_search_stage_C_resume_bundle.zip",
+    "sha256": "6f7cc5b3c8280551f266767f63e71667db05473846e262371803a1fe1272d806",
+    "version": "C"
+  },
+  "data_archive": {
+    "filename": "lg-aimers-9th-data.zip",
+    "max_member_count": 4,
+    "max_uncompressed_bytes": 722352760,
+    "members": {
+      "sample_submission.csv": {
+        "size": 112,
+        "sha256": "b2cf6ba6745c74c46db23e620d74705f9b327efb8c8a14dc0dd2afab0e898775"
+      },
+      "test.csv": {
+        "size": 1894,
+        "sha256": "478d10b20c00443f6fe8270ab7348de49d14395526130f0b2d915da496821a19"
+      },
+      "trackman_history.csv": {
+        "size": 353823031,
+        "sha256": "f7818f9ee0ccefe7c2cf69fa99efe6e5cb882d8b886dd96d2394bcf3b53f33a9"
+      },
+      "train.csv": {
+        "size": 368527723,
+        "sha256": "d2081186b458b49f60b082be480c273135833e15ba59a76d033af28bcf8763ff"
+      }
+    }
+  },
+  "target_candidate_id": "c_final__a__p2__piecewise_linear__bce__plateau__s42__s3407__tr2022__va2023",
+  "expected_completed_jobs": 20,
+  "snapshot_interval_seconds": 1200,
+  "interrupt_grace_seconds": 180
+}
