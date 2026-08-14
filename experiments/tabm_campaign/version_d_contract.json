@@ -1,0 +1,78 @@
+{
+  "schema_version": 1,
+  "version": "D",
+  "review_only": true,
+  "submission_package": false,
+  "data_archive": {
+    "filename": "lg-aimers-9th-data.zip",
+    "sha256": "0a1df39e82ed6621629378650c7b938c21bee56f0d57e414c61882f6de409176",
+    "members": {
+      "sample_submission.csv": {
+        "size": 112,
+        "sha256": "b2cf6ba6745c74c46db23e620d74705f9b327efb8c8a14dc0dd2afab0e898775"
+      },
+      "test.csv": {
+        "size": 1894,
+        "sha256": "478d10b20c00443f6fe8270ab7348de49d14395526130f0b2d915da496821a19"
+      },
+      "trackman_history.csv": {
+        "size": 353823031,
+        "sha256": "f7818f9ee0ccefe7c2cf69fa99efe6e5cb882d8b886dd96d2394bcf3b53f33a9"
+      },
+      "train.csv": {
+        "size": 368527723,
+        "sha256": "d2081186b458b49f60b082be480c273135833e15ba59a76d033af28bcf8763ff"
+      }
+    }
+  },
+  "stage_c_delivery": {
+    "filename": "tabm_colab_stage_C_delivery.zip",
+    "sha256": "f054e8e819d1053299fef4749a32e923db9136e20fc9c12cda79bbc7ef8c484a",
+    "review_sha256": "461c4422cebdc7383577ad6c53b044bfe3d9d15b667383e454591135e4242d2c",
+    "resume_sha256": "25aa43a846357f0ac97bcb18dd1826727d92e0850cb51091bec002ba6e2ed838",
+    "stage_state_sha256": "290b3b10854aca9131e19f3fd1b0620aed17e9b9d40e25f0cb41f67bb2fcba76",
+    "completed_jobs": 21
+  },
+  "predictor_id": "single_s3407",
+  "preprocessing": {
+    "profile": "dl_standard",
+    "components": [
+      "hand_matchup"
+    ],
+    "fit_scope": "official_train_only"
+  },
+  "selected_candidate": {
+    "family": "tabm",
+    "capacity": "p2",
+    "k": 32,
+    "width": 512,
+    "blocks": 4,
+    "dropout": 0.1,
+    "num_embedding": "piecewise_linear",
+    "loss": "bce",
+    "scheduler": "plateau",
+    "learning_rate": 0.0006,
+    "seed": 3407
+  },
+  "final_fit": {
+    "epochs": 3,
+    "scheduler": "constant",
+    "learning_rate": 0.0006,
+    "weight_decay": 0.0001,
+    "effective_batch_size": 4096,
+    "micro_batch_size": 512
+  },
+  "limits": {
+    "install_seconds": 480,
+    "inference_seconds": 480,
+    "gpu_bytes": 21474836480,
+    "rss_bytes": 22000000000,
+    "artifact_bytes": 2000000000
+  },
+  "outputs": {
+    "emergency_prefix": "tabm_version_D_emergency_epoch_",
+    "frozen_model": "tabm_version_D_frozen_model.zip",
+    "review_bundle": "tabm_hand_matchup_final_review_bundle.zip",
+    "delivery": "tabm_hand_matchup_stage_D_review_delivery.zip"
+  }
+}
