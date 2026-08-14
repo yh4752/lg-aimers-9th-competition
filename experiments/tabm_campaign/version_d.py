@@ -7,14 +7,40 @@ import os
 from pathlib import Path, PurePosixPath
 import shutil
 import tempfile
-from typing import Mapping
-from zipfile import ZipFile, ZipInfo
+from dataclasses import dataclass
+from typing import Mapping, Sequence
+from zipfile import ZIP_DEFLATED, ZipFile, ZipInfo
 
 from .artifacts import verify_resume_bundle, verify_review_bundle
 
 
 class VersionDError(RuntimeError):
     pass
+
+
+_ZIP_TIMESTAMP = (2026, 1, 1, 0, 0, 0)
+
+
+@dataclass(frozen=True)
+class VerifiedEmergency:
+    path: Path
+    epoch: int
+    sha256: str
+    identity: Mapping[str, str]
+
+
+@dataclass(frozen=True)
+class VerifiedFrozen:
+    path: Path
+    sha256: str
+    identity: Mapping[str, str]
+
+
+@dataclass(frozen=True)
+class RecoverySelection:
+    mode: str
+    path: Path | None
+    epoch: int
 
 
 def canonical_json(value: object) -> bytes:
@@ -295,3 +321,232 @@ def verify_stage_c_delivery(
         "final_member": dict(final_member),
         "stage_state": state,
     }
+
+
+def _deterministic_zip(members: Mapping[str, bytes]) -> bytes:
+    buffer = BytesIO()
+    with ZipFile(buffer, "w", compression=ZIP_DEFLATED, compresslevel=9) as archive:
+        for name, value in sorted(members.items()):
+            path = PurePosixPath(name)
+            if not name or path.is_absolute() or ".." in path.parts or "\\" in name:
+                raise VersionDError(f"unsafe archive member: {name}")
+            info = ZipInfo(name, date_time=_ZIP_TIMESTAMP)
+            info.compress_type = ZIP_DEFLATED
+            info.create_system = 3
+            info.external_attr = 0o100644 << 16
+            archive.writestr(info, value)
+    return buffer.getvalue()
+
+
+def _atomic_bytes(path: Path, value: bytes) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary_name = tempfile.mkstemp(prefix=f".{path.name}-", dir=path.parent)
+    try:
+        with os.fdopen(descriptor, "wb") as stream:
+            stream.write(value)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary_name, path)
+    except Exception:
+        try:
+            os.unlink(temporary_name)
+        except FileNotFoundError:
+            pass
+        raise
+
+
+def _snapshot_manifest(
+    kind: str,
+    identity: Mapping[str, str],
+    members: Mapping[str, bytes],
+    *,
+    epoch: int,
+) -> bytes:
+    return canonical_json(
+        {
+            "schema_version": 1,
+            "artifact_kind": kind,
+            "epoch": epoch,
+            "identity": dict(identity),
+            "members": {
+                name: sha256(value).hexdigest() for name, value in sorted(members.items())
+            },
+        }
+    )
+
+
+def write_emergency_snapshot(
+    output_dir: Path,
+    checkpoint_path: Path,
+    preprocessing_path: Path,
+    numeric_path: Path,
+    epoch: int,
+    identity: Mapping[str, str],
+) -> Path:
+    if epoch not in {1, 2, 3}:
+        raise VersionDError("emergency snapshot epoch differs")
+    sources = {
+        "checkpoint.pt": checkpoint_path,
+        "preprocessing_state.json": preprocessing_path,
+        "numeric_embedding_0.json": numeric_path,
+    }
+    if any(path.is_symlink() or not path.is_file() for path in sources.values()):
+        raise VersionDError("emergency snapshot source is missing")
+    members = {name: path.read_bytes() for name, path in sources.items()}
+    members["snapshot_manifest.json"] = _snapshot_manifest(
+        "tabm_version_D_emergency", identity, members, epoch=epoch
+    )
+    value = _deterministic_zip(members)
+    digest = sha256(value).hexdigest()
+    path = output_dir / f"tabm_version_D_emergency_epoch_{epoch:03d}_{digest[:12]}.zip"
+    _atomic_bytes(path, value)
+    verify_emergency_snapshot(path, identity)
+    return path
+
+
+def _verified_snapshot_members(
+    path: Path,
+    manifest_name: str,
+) -> tuple[dict[str, object], dict[str, bytes]]:
+    try:
+        with ZipFile(path) as archive:
+            infos = archive.infolist()
+            names = [info.filename for info in infos]
+            if len(names) != len(set(names)) or manifest_name not in names:
+                raise VersionDError("snapshot member set differs")
+            for info in infos:
+                _safe_member(info)
+            manifest = json.loads(archive.read(manifest_name))
+            expected = _mapping(manifest.get("members"), "snapshot member manifest")
+            if set(expected) != set(names) - {manifest_name}:
+                raise VersionDError("snapshot member set differs")
+            members = {name: archive.read(name) for name in names if name != manifest_name}
+    except VersionDError:
+        raise
+    except Exception as error:
+        raise VersionDError(f"cannot verify snapshot: {error}") from error
+    if any(sha256(value).hexdigest() != expected[name] for name, value in members.items()):
+        raise VersionDError("snapshot member SHA-256 differs")
+    return dict(manifest), members
+
+
+def verify_emergency_snapshot(
+    path: Path,
+    expected_identity: Mapping[str, str],
+) -> VerifiedEmergency:
+    manifest, members = _verified_snapshot_members(path, "snapshot_manifest.json")
+    if manifest.get("artifact_kind") != "tabm_version_D_emergency":
+        raise VersionDError("emergency snapshot kind differs")
+    if manifest.get("identity") != dict(expected_identity):
+        raise VersionDError("emergency snapshot identity differs")
+    epoch = manifest.get("epoch")
+    if epoch not in {1, 2, 3}:
+        raise VersionDError("emergency snapshot epoch differs")
+    if set(members) != {
+        "checkpoint.pt",
+        "preprocessing_state.json",
+        "numeric_embedding_0.json",
+    }:
+        raise VersionDError("emergency snapshot member set differs")
+    return VerifiedEmergency(path, int(epoch), file_sha256(path), dict(expected_identity))
+
+
+def write_frozen_snapshot(
+    output_dir: Path,
+    artifact_root: Path,
+    identity: Mapping[str, str],
+) -> Path:
+    manifest_path = artifact_root / "inference_manifest.json"
+    try:
+        inference_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except Exception as error:
+        raise VersionDError(f"cannot read frozen inference manifest: {error}") from error
+    if (
+        inference_manifest.get("epochs") != 3
+        or inference_manifest.get("seeds") != [3407]
+        or inference_manifest.get("scheduler") != "constant"
+        or inference_manifest.get("identity") != dict(identity)
+    ):
+        raise VersionDError("frozen inference identity differs")
+    declared = _mapping(inference_manifest.get("files"), "frozen inference files")
+    expected_names = set(declared) | {"inference_manifest.json"}
+    actual_names = {
+        path.relative_to(artifact_root).as_posix()
+        for path in artifact_root.rglob("*")
+        if path.is_file()
+    }
+    if actual_names != expected_names:
+        raise VersionDError("frozen artifact member set differs")
+    members: dict[str, bytes] = {}
+    for name in sorted(expected_names):
+        path = artifact_root / name
+        if path.is_symlink() or not path.is_file():
+            raise VersionDError(f"frozen artifact is missing: {name}")
+        value = path.read_bytes()
+        if name in declared and sha256(value).hexdigest() != declared[name]:
+            raise VersionDError(f"frozen artifact SHA-256 differs: {name}")
+        members[name] = value
+    members["frozen_manifest.json"] = _snapshot_manifest(
+        "tabm_version_D_frozen_model", identity, members, epoch=3
+    )
+    value = _deterministic_zip(members)
+    path = output_dir / "tabm_version_D_frozen_model.zip"
+    _atomic_bytes(path, value)
+    verify_frozen_snapshot(path, identity)
+    return path
+
+
+def verify_frozen_snapshot(
+    path: Path,
+    expected_identity: Mapping[str, str],
+) -> VerifiedFrozen:
+    manifest, members = _verified_snapshot_members(path, "frozen_manifest.json")
+    if manifest.get("artifact_kind") != "tabm_version_D_frozen_model":
+        raise VersionDError("frozen snapshot kind differs")
+    if manifest.get("identity") != dict(expected_identity):
+        raise VersionDError("frozen snapshot identity differs")
+    if manifest.get("epoch") != 3 or "inference_manifest.json" not in members:
+        raise VersionDError("frozen snapshot member set differs")
+    lowered = "\n".join(members).lower()
+    if any(token in lowered for token in ("optimizer", "scaler", "rng")):
+        raise VersionDError("frozen snapshot contains training state")
+    try:
+        inference_manifest = json.loads(members["inference_manifest.json"])
+    except Exception as error:
+        raise VersionDError(f"cannot read frozen snapshot manifest: {error}") from error
+    declared = _mapping(inference_manifest.get("files"), "frozen inference files")
+    if set(members) != set(declared) | {"inference_manifest.json"}:
+        raise VersionDError("frozen snapshot member set differs")
+    if (
+        inference_manifest.get("epochs") != 3
+        or inference_manifest.get("seeds") != [3407]
+        or inference_manifest.get("scheduler") != "constant"
+        or inference_manifest.get("identity") != dict(expected_identity)
+    ):
+        raise VersionDError("frozen snapshot inference identity differs")
+    if any(sha256(members[name]).hexdigest() != digest for name, digest in declared.items()):
+        raise VersionDError("frozen snapshot inference hash differs")
+    return VerifiedFrozen(path, file_sha256(path), dict(expected_identity))
+
+
+def select_recovery_snapshot(
+    emergency_paths: Sequence[Path],
+    frozen_paths: Sequence[Path],
+    expected_identity: Mapping[str, str],
+) -> RecoverySelection:
+    frozen = [verify_frozen_snapshot(path, expected_identity) for path in frozen_paths]
+    if frozen:
+        digests = {item.sha256 for item in frozen}
+        if len(digests) != 1:
+            raise VersionDError("conflicting recovery snapshots")
+        return RecoverySelection("frozen", frozen[0].path, 3)
+    emergency = [
+        verify_emergency_snapshot(path, expected_identity) for path in emergency_paths
+    ]
+    if not emergency:
+        return RecoverySelection("fresh", None, 0)
+    latest_epoch = max(item.epoch for item in emergency)
+    latest = [item for item in emergency if item.epoch == latest_epoch]
+    if len({item.sha256 for item in latest}) != 1:
+        raise VersionDError("conflicting recovery snapshots")
+    return RecoverySelection("emergency", latest[0].path, latest_epoch)

@@ -194,3 +194,132 @@ def test_stage_c_delivery_rejects_outer_tampering(tmp_path: Path) -> None:
     contract["stage_c_delivery"]["sha256"] = "0" * 64
     with pytest.raises(VersionDError, match="Stage C delivery SHA-256 differs"):
         verify_stage_c_delivery(delivery, contract)
+
+
+def _snapshot_identity() -> dict[str, str]:
+    return {
+        "contract_sha256": "1" * 64,
+        "data_archive_sha256": "2" * 64,
+        "train_sha256": "3" * 64,
+        "runtime_sha256": "4" * 64,
+        "training_source_sha256": "5" * 64,
+    }
+
+
+def test_emergency_snapshot_is_deterministic_and_bound(tmp_path: Path) -> None:
+    from experiments.tabm_campaign.version_d import (
+        verify_emergency_snapshot,
+        write_emergency_snapshot,
+    )
+
+    checkpoint = tmp_path / "checkpoint.pt"
+    checkpoint.write_bytes(b"checkpoint")
+    state = tmp_path / "preprocessing_state.json"
+    state.write_bytes(b"{}")
+    numeric = tmp_path / "numeric_embedding_0.json"
+    numeric.write_bytes(b"{}")
+    identity = _snapshot_identity()
+    first = write_emergency_snapshot(
+        tmp_path / "one", checkpoint, state, numeric, 1, identity
+    )
+    second = write_emergency_snapshot(
+        tmp_path / "two", checkpoint, state, numeric, 1, identity
+    )
+    assert first.read_bytes() == second.read_bytes()
+    verified = verify_emergency_snapshot(first, identity)
+    assert verified.epoch == 1
+    assert verified.sha256 == _digest(first.read_bytes())
+
+
+def test_emergency_snapshot_rejects_identity_change(tmp_path: Path) -> None:
+    from experiments.tabm_campaign.version_d import (
+        verify_emergency_snapshot,
+        write_emergency_snapshot,
+    )
+
+    files = []
+    for name in ("checkpoint.pt", "preprocessing_state.json", "numeric_embedding_0.json"):
+        path = tmp_path / name
+        path.write_bytes(name.encode())
+        files.append(path)
+    snapshot = write_emergency_snapshot(
+        tmp_path / "snapshots", *files, 2, _snapshot_identity()
+    )
+    changed = {**_snapshot_identity(), "train_sha256": "9" * 64}
+    with pytest.raises(VersionDError, match="emergency snapshot identity differs"):
+        verify_emergency_snapshot(snapshot, changed)
+
+
+def _frozen_artifact(root: Path) -> None:
+    members = {
+        "preprocessing_state.json": b"{}",
+        "numeric_embedding_0.json": b"{}",
+        "tabm_member_0_seed_3407.pt": b"weights",
+    }
+    root.mkdir()
+    for name, value in members.items():
+        (root / name).write_bytes(value)
+    manifest = {
+        "schema_version": 1,
+        "fit_scope": "official_train_2019_2024_only",
+        "epochs": 3,
+        "seeds": [3407],
+        "scheduler": "constant",
+        "preprocessing_state": "preprocessing_state.json",
+        "members": [
+            {
+                "seed": 3407,
+                "weights": "tabm_member_0_seed_3407.pt",
+                "numeric_state": "numeric_embedding_0.json",
+                "model_config": {"architecture": "tabm"},
+            }
+        ],
+        "files": {name: _digest(value) for name, value in members.items()},
+        "identity": _snapshot_identity(),
+    }
+    (root / "inference_manifest.json").write_bytes(
+        json.dumps(manifest, sort_keys=True, separators=(",", ":")).encode()
+    )
+
+
+def test_frozen_snapshot_round_trip_has_no_training_state(tmp_path: Path) -> None:
+    from experiments.tabm_campaign.version_d import (
+        verify_frozen_snapshot,
+        write_frozen_snapshot,
+    )
+
+    artifact = tmp_path / "frozen"
+    _frozen_artifact(artifact)
+    snapshot = write_frozen_snapshot(
+        tmp_path / "snapshots", artifact, _snapshot_identity()
+    )
+    verified = verify_frozen_snapshot(snapshot, _snapshot_identity())
+    assert verified.sha256 == _digest(snapshot.read_bytes())
+    with ZipFile(snapshot) as archive:
+        lowered = "\n".join(archive.namelist()).lower()
+    assert "optimizer" not in lowered
+    assert "scaler" not in lowered
+    assert "rng" not in lowered
+
+
+def test_recovery_selects_frozen_before_latest_emergency(tmp_path: Path) -> None:
+    from experiments.tabm_campaign.version_d import (
+        select_recovery_snapshot,
+        write_emergency_snapshot,
+        write_frozen_snapshot,
+    )
+
+    files = []
+    for name in ("checkpoint.pt", "preprocessing_state.json", "numeric_embedding_0.json"):
+        path = tmp_path / name
+        path.write_bytes(name.encode())
+        files.append(path)
+    emergency = write_emergency_snapshot(
+        tmp_path / "emergency", *files, 3, _snapshot_identity()
+    )
+    artifact = tmp_path / "frozen"
+    _frozen_artifact(artifact)
+    frozen = write_frozen_snapshot(tmp_path / "snapshots", artifact, _snapshot_identity())
+    selected = select_recovery_snapshot([emergency], [frozen], _snapshot_identity())
+    assert selected.mode == "frozen"
+    assert selected.path == frozen
