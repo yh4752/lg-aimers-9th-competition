@@ -12,6 +12,7 @@ from submission.tabm_candidate import (
     CANDIDATE_ID,
     TabMCandidateError,
     import_review_delivery,
+    load_imported_candidate,
 )
 
 
@@ -145,6 +146,7 @@ def test_import_review_delivery_is_hash_bound_and_exclusive(tmp_path: Path) -> N
     assert len(result.review_bundle_sha256) == 64
     assert len(result.model_sha256) == 64
     assert result.model_dir.is_dir()
+    assert load_imported_candidate(result.root) == result
     with pytest.raises(TabMCandidateError, match="destination already exists"):
         import_review_delivery(_delivery(tmp_path), tmp_path / "candidate")
 

@@ -345,3 +345,63 @@ def render_validation_script(candidate: ImportedTabMCandidate) -> bytes:
     except SyntaxError as error:
         raise TabMCandidateError("rendered script is invalid") from error
     return rendered
+
+
+def load_imported_candidate(root: str | Path) -> ImportedTabMCandidate:
+    """Re-verify a previously imported candidate without its source ZIP."""
+
+    candidate_root = Path(root).expanduser().resolve(strict=True)
+    manifest_path = candidate_root / "candidate_manifest.json"
+    model_dir = candidate_root / "model"
+    if manifest_path.is_symlink() or not manifest_path.is_file():
+        raise TabMCandidateError("candidate manifest is missing or unsafe")
+    if model_dir.is_symlink() or not model_dir.is_dir():
+        raise TabMCandidateError("candidate model directory is missing or unsafe")
+    manifest = _load_json(manifest_path.read_bytes(), "candidate_manifest.json")
+    expected_keys = {
+        "schema_version",
+        "artifact_kind",
+        "candidate_id",
+        "delivery_sha256",
+        "review_bundle_sha256",
+        "model_sha256",
+        "members",
+    }
+    if (
+        set(manifest) != expected_keys
+        or manifest["schema_version"] != 1
+        or manifest["artifact_kind"] != "tabm_submission_validation_candidate"
+        or manifest["candidate_id"] != CANDIDATE_ID
+    ):
+        raise TabMCandidateError("candidate manifest contract differs")
+    members = manifest["members"]
+    paths = list(model_dir.iterdir())
+    if not isinstance(members, dict) or set(members) != _MODEL_NAMES:
+        raise TabMCandidateError("candidate member manifest differs")
+    if {path.name for path in paths} != _MODEL_NAMES or any(
+        path.is_symlink() or not path.is_file() for path in paths
+    ):
+        raise TabMCandidateError("candidate model member set differs")
+    values = {name: (model_dir / name).read_bytes() for name in sorted(_MODEL_NAMES)}
+    for name, value in values.items():
+        if members[name] != sha256(value).hexdigest():
+            raise TabMCandidateError(f"candidate model SHA-256 differs: {name}")
+    if manifest["model_sha256"] != _model_digest(values):
+        raise TabMCandidateError("candidate combined model SHA-256 differs")
+    for key in ("delivery_sha256", "review_bundle_sha256", "model_sha256"):
+        value = manifest[key]
+        if not isinstance(value, str) or len(value) != 64 or any(
+            character not in "0123456789abcdef" for character in value
+        ):
+            raise TabMCandidateError(f"candidate {key} is invalid")
+    return ImportedTabMCandidate(
+        candidate_id=CANDIDATE_ID,
+        root=candidate_root,
+        model_dir=model_dir,
+        delivery_sha256=str(manifest["delivery_sha256"]),
+        review_bundle_sha256=str(manifest["review_bundle_sha256"]),
+        model_sha256=str(manifest["model_sha256"]),
+        member_sha256=MappingProxyType(
+            {str(name): str(value) for name, value in members.items()}
+        ),
+    )

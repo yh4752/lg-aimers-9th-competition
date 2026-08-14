@@ -7,6 +7,7 @@ from hashlib import sha256
 import json
 import os
 from pathlib import Path
+from time import monotonic
 from typing import Callable
 
 from .code_gate import RulesCodeGateError, assert_row_independent
@@ -44,6 +45,15 @@ class FullAuditResult:
     row_count: int
     completed_chunks: int
     reused_chunks: int
+    manifest_path: Path
+
+
+@dataclass(frozen=True)
+class PhasedAuditResult:
+    status: str
+    row_count: int
+    completed_phases: int
+    reused_phases: int
     manifest_path: Path
 
 
@@ -173,6 +183,8 @@ def validate_full_audit(
 ) -> dict[str, object]:
     path = Path(manifest_path)
     manifest = _load(path)
+    if manifest.get("schema_version") == 2:
+        return _validate_phased_audit(path, manifest, expected_identity)
     if manifest.get("status") != "passed" or manifest.get("identity") != asdict(expected_identity):
         raise RulesEvidenceError("full audit identity or status differs")
     chunks = manifest.get("chunks")
@@ -199,4 +211,274 @@ def validate_full_audit(
         rows += int(payload.get("row_count", -1))
     if len(set(names)) != len(names) or rows != manifest.get("row_count"):
         raise RulesEvidenceError("audit chunks duplicate or omit rows")
+    return manifest
+
+
+_PHASES = (
+    "baseline",
+    "reverse",
+    "shuffle",
+    "batch_257",
+    "batch_2048",
+    "singleton_canaries",
+)
+
+
+def _phase_hash(payload: dict[str, object]) -> str:
+    body = dict(payload)
+    body.pop("phase_sha256", None)
+    return sha256(_canonical(body)).hexdigest()
+
+
+def _row_hashes(
+    frame: "object", x_num: object, x_cat: object
+) -> dict[str, str]:
+    import numpy as np
+
+    numeric = np.asarray(x_num)
+    categorical = np.asarray(x_cat)
+    if (
+        numeric.ndim != 2
+        or categorical.ndim != 2
+        or len(numeric) != len(frame)
+        or len(categorical) != len(frame)
+    ):
+        raise RulesEvidenceError("encoded features must be aligned matrices")
+    output: dict[str, str] = {}
+    for index, row_id in enumerate(frame["row_id"].astype(str)):
+        digest = sha256()
+        digest.update(numeric[index].tobytes())
+        digest.update(categorical[index].tobytes())
+        output[row_id] = digest.hexdigest()
+    return output
+
+
+def _phase_payload(
+    *,
+    phase: str,
+    frame: "object",
+    identity: AuditIdentity,
+    load_predictor: Callable[[], object],
+) -> dict[str, object]:
+    import numpy as np
+
+    predictor = load_predictor()
+    digest = getattr(predictor, "state_digest", None)
+    encode = getattr(predictor, "encode", None)
+    predict = getattr(predictor, "predict_batch", None)
+    if not callable(digest) or not callable(encode) or not callable(predict):
+        raise RulesEvidenceError("phased audit predictor contract differs")
+    before = str(digest())
+    started = monotonic()
+    if phase == "baseline":
+        selected = frame.reset_index(drop=True)
+        values = np.asarray(predict(selected, batch_size=2048), dtype="float64")
+    elif phase == "reverse":
+        selected = frame.iloc[::-1].reset_index(drop=True)
+        values = np.asarray(predict(selected, batch_size=2048), dtype="float64")
+    elif phase == "shuffle":
+        order = sorted(
+            range(len(frame)),
+            key=lambda index: sha256(
+                (identity.runtime_sha256 + "\0" + str(frame.iloc[index]["row_id"])).encode()
+            ).hexdigest(),
+        )
+        selected = frame.iloc[order].reset_index(drop=True)
+        values = np.asarray(predict(selected, batch_size=2048), dtype="float64")
+    elif phase in {"batch_257", "batch_2048"}:
+        selected = frame.reset_index(drop=True)
+        size = int(phase.split("_", 1)[1])
+        parts = [
+            np.asarray(
+                predict(selected.iloc[start : start + size].reset_index(drop=True), batch_size=size),
+                dtype="float64",
+            )
+            for start in range(0, len(selected), size)
+        ]
+        values = np.concatenate(parts)
+    else:
+        selected = frame.reset_index(drop=True)
+        parts = [
+            np.asarray(predict(selected.iloc[[index]].reset_index(drop=True), batch_size=1), dtype="float64")
+            for index in range(len(selected))
+        ]
+        values = np.concatenate(parts)
+    if values.shape != (len(selected),) or not np.isfinite(values).all():
+        raise RulesEvidenceError("phased audit predictions are not finite and aligned")
+    if ((values < 0) | (values > 1)).any():
+        raise RulesEvidenceError("phased audit predictions are outside [0, 1]")
+    x_num, x_cat = encode(selected.copy(deep=True))
+    after = str(digest())
+    if before != after:
+        raise RulesEvidenceError("predictor state changed during phased audit")
+    ids = selected["row_id"].astype(str).tolist()
+    payload: dict[str, object] = {
+        "schema_version": 2,
+        "status": "passed",
+        "identity": asdict(identity),
+        "phase": phase,
+        "row_count": len(selected),
+        "row_id_sha256": sha256("\n".join(ids).encode()).hexdigest(),
+        "predictions": dict(zip(ids, (float(item) for item in values), strict=True)),
+        "feature_sha256": _row_hashes(selected, x_num, x_cat),
+        "state_sha256_before": before,
+        "state_sha256_after": after,
+        "elapsed_seconds": monotonic() - started,
+    }
+    payload["phase_sha256"] = _phase_hash(payload)
+    return payload
+
+
+def _load_phase(
+    path: Path,
+    *,
+    phase: str,
+    identity: AuditIdentity,
+) -> dict[str, object]:
+    payload = _load(path)
+    if (
+        payload.get("schema_version") != 2
+        or payload.get("status") != "passed"
+        or payload.get("identity") != asdict(identity)
+        or payload.get("phase") != phase
+        or payload.get("phase_sha256") != _phase_hash(payload)
+    ):
+        raise RulesEvidenceError(f"existing audit phase differs: {phase}")
+    if payload.get("state_sha256_before") != payload.get("state_sha256_after"):
+        raise RulesEvidenceError(f"audit phase state changed: {phase}")
+    predictions = payload.get("predictions")
+    features = payload.get("feature_sha256")
+    if not isinstance(predictions, dict) or not isinstance(features, dict):
+        raise RulesEvidenceError(f"audit phase evidence is incomplete: {phase}")
+    if set(predictions) != set(features) or len(predictions) != payload.get("row_count"):
+        raise RulesEvidenceError(f"audit phase rows differ: {phase}")
+    return payload
+
+
+def run_phased_independence_audit(
+    *,
+    frame: "object",
+    output_dir: str | Path,
+    identity: AuditIdentity,
+    load_predictor: Callable[[], object],
+    singleton_count: int,
+    stop_after_phases: int | None = None,
+    tolerance: float = 1e-6,
+) -> PhasedAuditResult:
+    """Audit every sample row under reorder, rebatch, and singleton variants."""
+
+    import pandas as pd
+
+    if not isinstance(frame, pd.DataFrame) or frame.empty or "row_id" not in frame:
+        raise RulesEvidenceError("phased audit frame must be non-empty with row_id")
+    ids = frame["row_id"].astype("string")
+    if ids.isna().any() or ids.astype(str).duplicated().any():
+        raise RulesEvidenceError("phased audit row_id must be non-null and unique")
+    if type(singleton_count) is not int or singleton_count < 1:
+        raise RulesEvidenceError("singleton_count must be positive")
+    if singleton_count != len(frame):
+        raise RulesEvidenceError("all official sample rows must be singleton-audited")
+    if not isinstance(tolerance, float) or tolerance <= 0:
+        raise RulesEvidenceError("audit tolerance must be positive")
+    root = Path(output_dir)
+    root.mkdir(parents=True, exist_ok=True)
+    source = frame.copy(deep=True).reset_index(drop=True)
+    source["row_id"] = ids.astype(str).to_numpy()
+    completed = 0
+    reused = 0
+    payloads: list[dict[str, object]] = []
+    entries: list[dict[str, str]] = []
+    for phase in _PHASES:
+        path = root / f"phase-{phase}.json"
+        if path.exists():
+            payload = _load_phase(path, phase=phase, identity=identity)
+            reused += 1
+        else:
+            payload = _phase_payload(
+                phase=phase,
+                frame=source,
+                identity=identity,
+                load_predictor=load_predictor,
+            )
+            _write_new(path, payload)
+        payloads.append(payload)
+        entries.append({"path": path.name, "sha256": str(payload["phase_sha256"])})
+        completed += 1
+        if stop_after_phases is not None and completed >= stop_after_phases:
+            return PhasedAuditResult(
+                "incomplete", len(source), completed, reused, root / "full_audit_manifest.json"
+            )
+    baseline_predictions = payloads[0]["predictions"]
+    baseline_features = payloads[0]["feature_sha256"]
+    if not isinstance(baseline_predictions, dict) or not isinstance(baseline_features, dict):
+        raise RulesEvidenceError("baseline audit evidence is incomplete")
+    for payload in payloads[1:]:
+        predictions = payload["predictions"]
+        features = payload["feature_sha256"]
+        if set(predictions) != set(baseline_predictions) or features != baseline_features:
+            raise RulesEvidenceError(f"row independence mismatch: {payload['phase']}")
+        maximum = max(
+            abs(float(predictions[row_id]) - float(baseline_predictions[row_id]))
+            for row_id in baseline_predictions
+        )
+        if maximum > tolerance:
+            raise RulesEvidenceError(f"row independence mismatch: {payload['phase']}")
+    manifest = {
+        "schema_version": 2,
+        "status": "passed",
+        "audit_scope": "official_sample_plus_synthetic_scale",
+        "identity": asdict(identity),
+        "row_count": len(source),
+        "singleton_count": singleton_count,
+        "tolerance": tolerance,
+        "phases": entries,
+    }
+    manifest_path = root / "full_audit_manifest.json"
+    if manifest_path.exists():
+        if _load(manifest_path) != manifest:
+            raise RulesEvidenceError("existing phased audit manifest differs")
+    else:
+        _write_new(manifest_path, manifest)
+    validate_full_audit(manifest_path, expected_identity=identity)
+    return PhasedAuditResult("passed", len(source), completed, reused, manifest_path)
+
+
+def _validate_phased_audit(
+    path: Path,
+    manifest: dict[str, object],
+    identity: AuditIdentity,
+) -> dict[str, object]:
+    expected_keys = {
+        "schema_version",
+        "status",
+        "audit_scope",
+        "identity",
+        "row_count",
+        "singleton_count",
+        "tolerance",
+        "phases",
+    }
+    if set(manifest) != expected_keys:
+        raise RulesEvidenceError("phased audit manifest fields differ")
+    if (
+        manifest["status"] != "passed"
+        or manifest["audit_scope"] != "official_sample_plus_synthetic_scale"
+        or manifest["identity"] != asdict(identity)
+        or manifest["singleton_count"] != manifest["row_count"]
+    ):
+        raise RulesEvidenceError("phased audit manifest identity or scope differs")
+    phases = manifest["phases"]
+    if not isinstance(phases, list) or len(phases) != len(_PHASES):
+        raise RulesEvidenceError("phased audit phase list differs")
+    for expected_phase, entry in zip(_PHASES, phases, strict=True):
+        if not isinstance(entry, dict) or set(entry) != {"path", "sha256"}:
+            raise RulesEvidenceError("phased audit phase entry differs")
+        phase_path = path.parent / str(entry["path"])
+        if phase_path.name != f"phase-{expected_phase}.json":
+            raise RulesEvidenceError("phased audit phase order differs")
+        payload = _load_phase(phase_path, phase=expected_phase, identity=identity)
+        if payload["phase_sha256"] != entry["sha256"]:
+            raise RulesEvidenceError(f"phased audit phase hash differs: {expected_phase}")
+        if payload["row_count"] != manifest["row_count"]:
+            raise RulesEvidenceError(f"phased audit phase row count differs: {expected_phase}")
     return manifest
