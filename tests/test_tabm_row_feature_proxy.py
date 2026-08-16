@@ -483,7 +483,7 @@ def _official_data(tmp_path: Path, monkeypatch) -> Path:
     train.write_text("tiny fixture\n", encoding="utf-8")
     monkeypatch.setattr(
         "experiments.tabm_campaign.row_feature_proxy._official_train_file_sha256",
-        lambda path: CONTRACT.official_train_sha256,
+        lambda path, check_deadline=None: CONTRACT.official_train_sha256,
     )
     return data
 
@@ -1049,6 +1049,99 @@ def test_inconclusive_checkpoint_payload_fails_closed(
         )
 
 
+def test_worker_result_payload_validation_uses_injected_deadline_validator(
+    tmp_path: Path, monkeypatch
+) -> None:
+    data = _official_data(tmp_path, monkeypatch)
+    runtime = _Runtime({"rfp__baseline__s42": "inconclusive"})
+    observed: list[str] = []
+
+    def validator(job, result, path, **kwargs):
+        assert runtime.calls
+        assert kwargs["check_deadline"] is not None
+        observed.append(job.candidate_id)
+        raise TimeoutError("fixture payload validator blocked past deadline")
+
+    with pytest.raises(TimeoutError, match="payload validator"):
+        run_row_feature_proxy(
+            data_dir=data,
+            output_dir=tmp_path / "out",
+            runtime=runtime,
+            wall_deadline=10_000.0,
+            now=lambda: 1_000.0,
+            checkpoint_payload_validator=validator,
+        )
+    assert observed == ["rfp__baseline__s42"]
+
+
+def test_recovered_checkpoint_uses_injected_payload_validator_before_runtime(
+    tmp_path: Path, monkeypatch
+) -> None:
+    data = _official_data(tmp_path, monkeypatch)
+    first = run_row_feature_proxy(
+        data_dir=data,
+        output_dir=tmp_path / "first",
+        runtime=_Runtime({"rfp__baseline__s42": "inconclusive"}),
+        wall_deadline=10_000.0,
+        now=lambda: 1_000.0,
+    )
+    observed: list[str] = []
+
+    class Runtime(_Runtime):
+        def run_jobs(self, *args, **kwargs):
+            assert observed == ["rfp__baseline__s42"]
+            return super().run_jobs(*args, **kwargs)
+
+    def validator(job, result, path, **kwargs):
+        assert kwargs["check_deadline"] is not None
+        observed.append(job.candidate_id)
+
+    run_row_feature_proxy(
+        data_dir=data,
+        output_dir=tmp_path / "restored",
+        resume_bundle=first.bundles.resume,
+        runtime=Runtime({"rfp__baseline__s42": "inconclusive"}),
+        wall_deadline=12_000.0,
+        now=lambda: 2_000.0,
+        checkpoint_payload_validator=validator,
+    )
+    assert observed == ["rfp__baseline__s42", "rfp__baseline__s42"]
+
+
+def test_bundle_member_hashing_checks_deadline_between_chunks(tmp_path: Path) -> None:
+    payload = tmp_path / "jobs" / "candidate" / "checkpoint.pt"
+    payload.parent.mkdir(parents=True)
+    payload.write_bytes(b"x" * (3 * 1024 * 1024))
+    binding = {
+        "path": "jobs/candidate/checkpoint.pt",
+        "sha256": sha256(payload.read_bytes()).hexdigest(),
+    }
+    row = {
+        "candidate_id": "candidate",
+        "status": "inconclusive",
+        "artifacts": {"checkpoint.pt": binding},
+    }
+    calls = [0]
+
+    def deadline() -> None:
+        calls[0] += 1
+        if calls[0] == 3:
+            raise TimeoutError("fixture bundle hash deadline expired")
+
+    with pytest.raises(TimeoutError, match="bundle hash deadline"):
+        _bundle_members(
+            output_dir=tmp_path,
+            config_bytes=b"{}",
+            state={"results": []},
+            rows={"candidate": row},
+            decision=proxy_module.ProxyDecision(
+                "incomplete", "fixture", (), (), (), ()
+            ),
+            check_deadline=deadline,
+        )
+    assert calls[0] == 3
+
+
 def test_same_directory_reuses_completed_and_failed_but_reruns_inconclusive(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -1175,15 +1268,22 @@ def test_job_guard_stops_before_starting_a_new_job_and_persists_progress(
 ) -> None:
     data = _official_data(tmp_path, monkeypatch)
     jobs = build_proxy_jobs(CONTRACT)
-    times = iter((1_000.0, 1_000.0, 9_100.0))
-    runtime = _Runtime()
+    current = [1_000.0]
+
+    class Runtime(_Runtime):
+        def run_jobs(self, *args, **kwargs):
+            result = super().run_jobs(*args, **kwargs)
+            current[0] = 9_100.0
+            return result
+
+    runtime = Runtime()
 
     run = run_row_feature_proxy(
         data_dir=data,
         output_dir=tmp_path / "out",
         runtime=runtime,
         wall_deadline=10_000.0,
-        now=lambda: next(times),
+        now=lambda: current[0],
     )
 
     assert [call[1][0].candidate_id for call in runtime.calls] == [jobs[0].candidate_id]

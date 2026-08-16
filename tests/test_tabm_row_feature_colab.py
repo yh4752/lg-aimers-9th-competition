@@ -640,10 +640,12 @@ def test_isolated_checkpoint_validator_is_killed_at_deadline(tmp_path: Path) -> 
     started = time.monotonic()
 
     with pytest.raises(TimeoutError, match="deadline"):
-        colab._validate_active_checkpoint_payload_isolated(
-            tmp_path,
+        colab._validate_checkpoint_payload_isolated(
             job,
             result,
+            tmp_path / "checkpoint.pt",
+            meta_epoch=0,
+            meta_adapter_state=None,
             best_epoch=0,
             check_deadline=lambda: (_ for _ in ()).throw(
                 TimeoutError("fixture deadline expired")
@@ -651,6 +653,83 @@ def test_isolated_checkpoint_validator_is_killed_at_deadline(tmp_path: Path) -> 
         )
 
     assert time.monotonic() - started < 2.0
+
+
+def test_isolated_validator_escalates_terminate_with_only_bounded_joins(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    job = proxy.build_proxy_jobs(load_row_feature_proxy_contract())[0]
+    result = CampaignJobResult(
+        candidate_id=job.candidate_id,
+        status="inconclusive",
+        brier=0.04,
+        best_epoch=0,
+        completed_epochs=1,
+        checkpoint=tmp_path / "checkpoint.pt",
+        predictions_path=None,
+        resource_evidence={"cache_digest": "a" * 64},
+        failure="active_checkpoint_snapshot",
+    )
+
+    class Connection:
+        def close(self):
+            return None
+
+    class Process:
+        exitcode = None
+
+        def __init__(self):
+            self.alive = True
+            self.terminate_calls = 0
+            self.kill_calls = 0
+            self.join_timeouts: list[float] = []
+
+        def start(self):
+            return None
+
+        def is_alive(self):
+            return self.alive
+
+        def terminate(self):
+            self.terminate_calls += 1
+
+        def kill(self):
+            self.kill_calls += 1
+            self.alive = False
+            self.exitcode = -9
+
+        def join(self, timeout=None):
+            assert timeout is not None, "join must always be bounded"
+            self.join_timeouts.append(timeout)
+
+    process = Process()
+
+    class Context:
+        def Pipe(self, duplex=False):
+            return Connection(), Connection()
+
+        def Process(self, **kwargs):
+            return process
+
+    monkeypatch.setattr(colab.multiprocessing, "get_context", lambda mode: Context())
+
+    with pytest.raises(TimeoutError, match="deadline"):
+        colab._validate_checkpoint_payload_isolated(
+            job,
+            result,
+            tmp_path / "checkpoint.pt",
+            meta_epoch=0,
+            meta_adapter_state=None,
+            check_deadline=lambda: (_ for _ in ()).throw(
+                TimeoutError("fixture deadline expired")
+            ),
+        )
+
+    assert process.terminate_calls == 1
+    assert process.kill_calls == 1
+    assert process.join_timeouts and all(
+        timeout <= 1.0 for timeout in process.join_timeouts
+    )
 
 
 def test_active_checkpoint_snapshot_restores_the_same_completed_epoch(

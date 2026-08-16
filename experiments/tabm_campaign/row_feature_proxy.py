@@ -13,7 +13,7 @@ import time
 from dataclasses import dataclass
 from hashlib import sha256
 from pathlib import Path, PurePosixPath
-from typing import Callable, Mapping
+from typing import Callable, Mapping, Protocol
 from zipfile import ZipFile
 
 from .artifacts import (
@@ -55,6 +55,19 @@ from .worker import (
 
 class RowFeatureProxyError(RuntimeError):
     """Raised when Stage P cannot advance from trusted evidence."""
+
+
+class _CheckpointPayloadValidator(Protocol):
+    def __call__(
+        self,
+        job: CampaignJob,
+        result: CampaignJobResult,
+        path: Path,
+        *,
+        meta_epoch: int,
+        meta_adapter_state: object,
+        check_deadline: Callable[[], None] | None,
+    ) -> None: ...
 
 
 @dataclass(frozen=True)
@@ -120,13 +133,19 @@ def _file_sha256(
     return digest.hexdigest()
 
 
-def _official_train_file_sha256(path: Path) -> str:
+def _official_train_file_sha256(
+    path: Path, check_deadline: Callable[[], None] | None = None
+) -> str:
     """Separate seam for tiny fixture tests; production hashes the whole file."""
 
-    return _file_sha256(path)
+    return _file_sha256(path, check_deadline)
 
 
-def _bound_input_file_sha256(data_dir: Path, name: str) -> str | None:
+def _bound_input_file_sha256(
+    data_dir: Path,
+    name: str,
+    check_deadline: Callable[[], None] | None = None,
+) -> str | None:
     candidates: list[Path] = []
     for root, directories, files in os.walk(data_dir, topdown=True, followlinks=False):
         root_path = Path(root)
@@ -148,7 +167,7 @@ def _bound_input_file_sha256(data_dir: Path, name: str) -> str | None:
             f"data_dir must contain at most one regular non-symlink {name}; "
             f"found={len(candidates)}"
         )
-    return _file_sha256(candidates[0])
+    return _file_sha256(candidates[0], check_deadline)
 
 
 def _regular_file(path: Path) -> bool:
@@ -222,7 +241,10 @@ def _code_file_paths(experiments_root: Path | None = None) -> tuple[Path, ...]:
     return result
 
 
-def _code_sha256(experiments_root: Path | None = None) -> str:
+def _code_sha256(
+    experiments_root: Path | None = None,
+    check_deadline: Callable[[], None] | None = None,
+) -> str:
     root = (
         Path(__file__).resolve().parents[1]
         if experiments_root is None
@@ -237,7 +259,11 @@ def _code_sha256(experiments_root: Path | None = None) -> str:
         relative = path.relative_to(root).as_posix()
         digest.update(relative.encode("utf-8"))
         digest.update(b"\0")
-        digest.update(path.read_bytes())
+        with path.open("rb") as source:
+            while chunk := source.read(1024 * 1024):
+                if check_deadline is not None:
+                    check_deadline()
+                digest.update(chunk)
         digest.update(b"\0")
     return digest.hexdigest()
 
@@ -387,7 +413,11 @@ def _validate_checkpoint_meta(
     job_dir: Path,
     *,
     validate_payload: bool = True,
+    checkpoint_payload_validator: _CheckpointPayloadValidator | None = None,
+    check_deadline: Callable[[], None] | None = None,
 ) -> None:
+    if check_deadline is not None:
+        check_deadline()
     meta = _read_json_file(job_dir / "checkpoint_meta.json", "checkpoint metadata")
     expected_keys = {
         "candidate_id",
@@ -426,7 +456,7 @@ def _validate_checkpoint_meta(
     expected_binding = {
         "config_sha256": _job_sha(job),
         "cache_sha256": cache_digest,
-        "training_source_sha256": _training_source_sha256(),
+        "training_source_sha256": _training_source_sha256(check_deadline),
     }
     if (
         type(cache_digest) is not str
@@ -443,12 +473,14 @@ def _validate_checkpoint_meta(
     if checkpoint_size <= 0 or checkpoint_size > _MAX_CHECKPOINT_BYTES:
         raise RowFeatureProxyError("checkpoint payload exceeds the Stage P size limit")
     if validate_payload:
-        _validate_checkpoint_payload(
+        validator = checkpoint_payload_validator or _validate_checkpoint_payload
+        validator(
             job,
             result,
             checkpoint_path,
             meta_epoch=epoch,
             meta_adapter_state=meta["adapter_state"],
+            check_deadline=check_deadline,
         )
 
 
@@ -459,9 +491,12 @@ def _validate_checkpoint_payload(
     *,
     meta_epoch: int,
     meta_adapter_state: object,
+    check_deadline: Callable[[], None] | None = None,
 ) -> None:
     """Safely validate the restart state written by independent_dl.training."""
 
+    if check_deadline is not None:
+        check_deadline()
     try:
         checkpoint_size = path.stat().st_size
     except OSError as error:
@@ -973,6 +1008,8 @@ def _validate_semantic_evidence(
     job_dir: Path,
     *,
     validate_checkpoint_payload: bool = True,
+    checkpoint_payload_validator: _CheckpointPayloadValidator | None = None,
+    check_deadline: Callable[[], None] | None = None,
 ) -> None:
     try:
         job_payload = _read_json_file(job_dir / "job.json", "job evidence")
@@ -996,6 +1033,8 @@ def _validate_semantic_evidence(
                 result,
                 job_dir,
                 validate_payload=validate_checkpoint_payload,
+                checkpoint_payload_validator=checkpoint_payload_validator,
+                check_deadline=check_deadline,
             )
 
         has_prediction_evidence = (
@@ -1004,13 +1043,15 @@ def _validate_semantic_evidence(
             and result.predictions_path is not None
         )
         if has_prediction_evidence and not _valid_completed_result(
-            job_dir, job, result
+            job_dir, job, result, check_deadline
         ):
             raise RowFeatureProxyError(
                 "prediction schema, recomputed Brier, checkpoint, code, or artifact binding differs"
             )
         if result.status == "completed" and not has_prediction_evidence:
             raise RowFeatureProxyError("completed result evidence is incomplete")
+    except TimeoutError:
+        raise
     except (RowFeatureProxyError, KeyError, OSError, TypeError, ValueError) as error:
         raise RowFeatureProxyError(
             f"completed evidence is untrusted for {job.candidate_id}: {error}"
@@ -1052,7 +1093,10 @@ def _validate_runtime_result(
     *,
     validate_checkpoint_payload: bool = True,
     check_deadline: Callable[[], None] | None = None,
+    checkpoint_payload_validator: _CheckpointPayloadValidator | None = None,
 ) -> dict[str, object]:
+    if check_deadline is not None:
+        check_deadline()
     if not isinstance(result, CampaignJobResult):
         raise RowFeatureProxyError("runtime returned a foreign result type")
     if result.candidate_id != job.candidate_id:
@@ -1094,6 +1138,8 @@ def _validate_runtime_result(
         result,
         job_dir,
         validate_checkpoint_payload=validate_checkpoint_payload,
+        checkpoint_payload_validator=checkpoint_payload_validator,
+        check_deadline=check_deadline,
     )
     _normalize_worker_result(job, result, job_dir)
     artifacts = _collect_job_artifacts(job_dir, check_deadline)
@@ -1399,6 +1445,7 @@ def _read_zip_control_member(
     archive: ZipFile,
     name: str,
     expected_sha256: str,
+    check_deadline: Callable[[], None] | None = None,
 ) -> bytes:
     info = archive.getinfo(name)
     if info.file_size > _MAX_CONTROL_MEMBER_BYTES:
@@ -1407,6 +1454,8 @@ def _read_zip_control_member(
     value = bytearray()
     with archive.open(info, "r") as source:
         while chunk := source.read(1024 * 1024):
+            if check_deadline is not None:
+                check_deadline()
             value.extend(chunk)
             digest.update(chunk)
     if digest.hexdigest() != expected_sha256:
@@ -1414,10 +1463,16 @@ def _read_zip_control_member(
     return bytes(value)
 
 
-def _zip_member_sha256(archive: ZipFile, name: str) -> str:
+def _zip_member_sha256(
+    archive: ZipFile,
+    name: str,
+    check_deadline: Callable[[], None] | None = None,
+) -> str:
     digest = sha256()
     with archive.open(name, "r") as source:
         while chunk := source.read(1024 * 1024):
+            if check_deadline is not None:
+                check_deadline()
             digest.update(chunk)
     return digest.hexdigest()
 
@@ -1427,6 +1482,7 @@ def _atomic_restore_member(
     name: str,
     target: Path,
     expected_sha256: str,
+    check_deadline: Callable[[], None] | None = None,
 ) -> None:
     info = archive.getinfo(name)
     if name.endswith(("/checkpoint.pt", "/best_checkpoint.pt")) and (
@@ -1441,6 +1497,8 @@ def _atomic_restore_member(
         digest = sha256()
         with archive.open(info, "r") as source, os.fdopen(descriptor, "wb") as output:
             while chunk := source.read(1024 * 1024):
+                if check_deadline is not None:
+                    check_deadline()
                 output.write(chunk)
                 digest.update(chunk)
             output.flush()
@@ -1508,6 +1566,7 @@ def _restore_resume(
     code_sha: str,
     contract: RowFeatureProxyContract,
     jobs: tuple[CampaignJob, ...],
+    check_deadline: Callable[[], None] | None = None,
 ) -> tuple[dict[str, object], dict[str, dict[str, object]], str]:
     try:
         with ZipFile(resume_path, "r") as archive:
@@ -1518,7 +1577,11 @@ def _restore_resume(
                 for info in archive.infolist()
             ):
                 raise ArtifactError("resume checkpoint exceeds the Stage P size limit")
-        verified = verify_resume_bundle(resume_path)
+        verified = verify_resume_bundle(
+            resume_path, check_deadline=check_deadline
+        )
+    except TimeoutError:
+        raise
     except ArtifactError as error:
         raise RowFeatureProxyError(f"resume bundle is untrusted: {error}") from error
     except Exception as error:
@@ -1537,6 +1600,7 @@ def _restore_resume(
                 archive,
                 "manifest.json",
                 verified.manifest_sha256,
+                check_deadline,
             )
             if sha256(manifest_bytes).hexdigest() != verified.manifest_sha256:
                 raise RowFeatureProxyError("resume manifest changed after verification")
@@ -1546,7 +1610,10 @@ def _restore_resume(
                 )
             controls = {
                 name: _read_zip_control_member(
-                    archive, name, verified.member_sha256[name]
+                    archive,
+                    name,
+                    verified.member_sha256[name],
+                    check_deadline,
                 )
                 for name in _BASE_MEMBERS
             }
@@ -1611,6 +1678,7 @@ def _restore_resume(
                         member,
                         target,
                         binding["sha256"],
+                        check_deadline,
                     )
                 if row["status"] == "completed":
                     prediction = f"predictions/{row['candidate_id']}.csv"
@@ -1618,19 +1686,23 @@ def _restore_resume(
                     if (
                         verified.member_sha256[prediction]
                         != artifact["sha256"]
-                        or _zip_member_sha256(archive, prediction)
+                        or _zip_member_sha256(
+                            archive, prediction, check_deadline
+                        )
                         != artifact["sha256"]
                     ):
                         raise RowFeatureProxyError(
                             "resume completed prediction copies differ"
                         )
+    except TimeoutError:
+        raise
     except RowFeatureProxyError:
         raise
     except ArtifactError as error:
         raise RowFeatureProxyError(f"resume bundle is untrusted: {error}") from error
     except Exception as error:
         raise RowFeatureProxyError(f"cannot restore resume bundle: {error}") from error
-    _verify_local_artifacts(output_dir, rows)
+    _verify_local_artifacts(output_dir, rows, check_deadline)
     return state, rows, verified.manifest_sha256
 
 
@@ -1658,6 +1730,9 @@ def _validate_recovered_rows(
     rows: Mapping[str, dict[str, object]],
     jobs: tuple[CampaignJob, ...],
     output_dir: Path,
+    *,
+    check_deadline: Callable[[], None] | None = None,
+    checkpoint_payload_validator: _CheckpointPayloadValidator | None = None,
 ) -> None:
     for job in jobs:
         row = rows.get(job.candidate_id)
@@ -1668,6 +1743,8 @@ def _validate_recovered_rows(
             job,
             recovered,
             output_dir / "jobs" / job.candidate_id,
+            check_deadline=check_deadline,
+            checkpoint_payload_validator=checkpoint_payload_validator,
         )
         if rebuilt != row:
             raise RowFeatureProxyError(
@@ -1727,6 +1804,7 @@ def _bundle_members(
     state: dict[str, object],
     rows: Mapping[str, dict[str, object]],
     decision: ProxyDecision,
+    check_deadline: Callable[[], None] | None = None,
 ) -> tuple[dict[str, bytes | _StagePFile], dict[str, bytes | _StagePFile]]:
     state_bytes = _canonical_json(state)
     metrics_bytes = _canonical_json(state["results"])
@@ -1744,7 +1822,10 @@ def _bundle_members(
         artifacts = row["artifacts"]
         for binding in artifacts.values():  # type: ignore[union-attr]
             path = output_dir / binding["path"]
-            if not _regular_file(path) or _file_sha256(path) != binding["sha256"]:
+            if (
+                not _regular_file(path)
+                or _file_sha256(path, check_deadline) != binding["sha256"]
+            ):
                 raise RowFeatureProxyError(f"artifact changed before publication: {binding['path']}")
             source = _StagePFile(path, binding["sha256"])
             resume[binding["path"]] = source
@@ -1771,6 +1852,7 @@ def run_row_feature_proxy(
     contract_path: str | Path = DEFAULT_ROW_FEATURE_PROXY_CONTRACT,
     now: Callable[[], float] = time.time,
     on_candidate_complete: Callable[[CampaignJob, Path], None] | None = None,
+    checkpoint_payload_validator: _CheckpointPayloadValidator | None = None,
 ) -> RowFeatureProxyRun:
     """Advance Stage P sequentially and publish deterministic review/resume evidence."""
 
@@ -1800,9 +1882,17 @@ def run_row_feature_proxy(
 
     now = tracked_now
 
+    def check_deadline() -> None:
+        if _now_value(now) >= wall_deadline:
+            raise TimeoutError("Stage P absolute wall deadline expired")
+
+    check_deadline()
+
     try:
         contract = load_row_feature_proxy_contract(contract_path)
+        check_deadline()
         contract_sha = row_feature_contract_sha256(contract_path)
+        check_deadline()
         config_bytes = _read_contract_bytes(contract_path)
     except Exception as error:
         raise RowFeatureProxyError(f"cannot trust the Stage P contract: {error}") from error
@@ -1815,12 +1905,16 @@ def run_row_feature_proxy(
         )
     data_dir = Path(data_dir)
     train_path = _find_official_train(data_dir)
-    train_sha = _official_train_file_sha256(train_path)
+    train_sha = _official_train_file_sha256(train_path, check_deadline)
     if train_sha != contract.official_train_sha256:
         raise RowFeatureProxyError("official train.csv SHA-256 differs from the contract")
-    history_sha = _bound_input_file_sha256(data_dir, "trackman_history.csv")
-    input_manifest_sha = _bound_input_file_sha256(data_dir, "input_manifest.json")
-    code_sha = _code_sha256()
+    history_sha = _bound_input_file_sha256(
+        data_dir, "trackman_history.csv", check_deadline
+    )
+    input_manifest_sha = _bound_input_file_sha256(
+        data_dir, "input_manifest.json", check_deadline
+    )
+    code_sha = _code_sha256(check_deadline=check_deadline)
     jobs = build_proxy_jobs(contract)
     job_deadline = wall_deadline - contract.budget.new_job_guard_seconds
     root = Path(output_dir)
@@ -1847,6 +1941,7 @@ def run_row_feature_proxy(
             code_sha=code_sha,
             contract=contract,
             jobs=jobs,
+            check_deadline=check_deadline,
         )
     elif state_path.exists() or state_path.is_symlink():
         recovered_state, rows = _load_local_state(
@@ -1858,10 +1953,17 @@ def run_row_feature_proxy(
             code_sha=code_sha,
             jobs=jobs,
             output_dir=root,
+            check_deadline=check_deadline,
         )
         prior_manifest_sha = recovered_state["prior_manifest_sha256"]  # type: ignore[assignment]
 
-    _validate_recovered_rows(rows, jobs, root)
+    _validate_recovered_rows(
+        rows,
+        jobs,
+        root,
+        check_deadline=check_deadline,
+        checkpoint_payload_validator=checkpoint_payload_validator,
+    )
 
     if runtime is None:
         from .worker import SubprocessCampaignRuntime
@@ -1901,9 +2003,16 @@ def run_row_feature_proxy(
             gpu_count=gpu_count,
             job_deadline=job_deadline,
         )
+        check_deadline()
         if type(returned) is not tuple or len(returned) != 1:
             raise RowFeatureProxyError("runtime must return exactly one result for each one-job call")
-        row = _validate_runtime_result(job, returned[0], jobs_root / job.candidate_id)
+        row = _validate_runtime_result(
+            job,
+            returned[0],
+            jobs_root / job.candidate_id,
+            check_deadline=check_deadline,
+            checkpoint_payload_validator=checkpoint_payload_validator,
+        )
         rows[job.candidate_id] = row
         decision = _decision(jobs, rows, contract)
         state = _state_payload(
@@ -1944,6 +2053,7 @@ def run_row_feature_proxy(
         state=state,
         rows=rows,
         decision=decision,
+        check_deadline=check_deadline,
     )
     evidence = StageEvidence(
         version=_VERSION,
@@ -1952,10 +2062,6 @@ def run_row_feature_proxy(
         review_members=review,
         resume_members=resume,
     )
-
-    def check_deadline() -> None:
-        if _now_value(now) >= wall_deadline:
-            raise TimeoutError("Stage P absolute wall deadline expired")
 
     bundles = write_stage_bundles(
         root,

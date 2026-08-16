@@ -11,7 +11,7 @@ import subprocess
 import sys
 import threading
 import time
-from typing import Mapping
+from typing import Callable, Mapping
 
 from experiments.independent_dl.preprocessing import (
     PreprocessingSpec,
@@ -87,40 +87,60 @@ def _training_status(budget_reached: bool) -> str:
     return "inconclusive" if budget_reached else "completed"
 
 
-def _file_sha256(path: Path) -> str:
-    return sha256(path.read_bytes()).hexdigest()
+def _file_sha256(
+    path: Path, check_deadline: Callable[[], None] | None = None
+) -> str:
+    digest = sha256()
+    with path.open("rb") as source:
+        while chunk := source.read(1024 * 1024):
+            if check_deadline is not None:
+                check_deadline()
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
-def _training_source_sha256() -> str:
-    return sha256(
-        (_INDEPENDENT_DL_ROOT / "training.py").read_bytes()
-        + (_INDEPENDENT_DL_ROOT / "models" / "tabm.py").read_bytes()
-    ).hexdigest()
+def _training_source_sha256(
+    check_deadline: Callable[[], None] | None = None,
+) -> str:
+    digest = sha256()
+    for path in (
+        _INDEPENDENT_DL_ROOT / "training.py",
+        _INDEPENDENT_DL_ROOT / "models" / "tabm.py",
+    ):
+        with path.open("rb") as source:
+            while chunk := source.read(1024 * 1024):
+                if check_deadline is not None:
+                    check_deadline()
+                digest.update(chunk)
+    return digest.hexdigest()
 
 
 def _current_code_provenance(
     training_source_sha256: str,
+    check_deadline: Callable[[], None] | None = None,
 ) -> dict[str, str]:
     return {
         "preprocessing_code_sha256": _file_sha256(
-            _INDEPENDENT_DL_ROOT / "preprocessing.py"
+            _INDEPENDENT_DL_ROOT / "preprocessing.py", check_deadline
         ),
         "row_feature_code_sha256": _file_sha256(
-            _INDEPENDENT_DL_ROOT / "row_features.py"
+            _INDEPENDENT_DL_ROOT / "row_features.py", check_deadline
         ),
         "feature_code_sha256": _file_sha256(
-            _INDEPENDENT_DL_ROOT / "features.py"
+            _INDEPENDENT_DL_ROOT / "features.py", check_deadline
         ),
         "training_source_sha256": training_source_sha256,
     }
 
 
 def _artifact_hash_evidence(
-    checkpoint: Path, predictions: Path
+    checkpoint: Path,
+    predictions: Path,
+    check_deadline: Callable[[], None] | None = None,
 ) -> dict[str, str]:
     return {
-        "checkpoint_sha256": _file_sha256(checkpoint),
-        "predictions_sha256": _file_sha256(predictions),
+        "checkpoint_sha256": _file_sha256(checkpoint, check_deadline),
+        "predictions_sha256": _file_sha256(predictions, check_deadline),
     }
 
 
@@ -336,7 +356,10 @@ def _valid_prediction_evidence(path: Path) -> float | None:
 
 
 def _valid_completed_result(
-    job_dir: Path, job: CampaignJob, result: CampaignJobResult
+    job_dir: Path,
+    job: CampaignJob,
+    result: CampaignJobResult,
+    check_deadline: Callable[[], None] | None = None,
 ) -> bool:
     checkpoint = job_dir / "best_checkpoint.pt"
     predictions = job_dir / "predictions.csv"
@@ -359,7 +382,7 @@ def _valid_completed_result(
     cache_digest = result.resource_evidence.get("cache_digest")
     if not isinstance(cache_digest, str) or binding.get("cache_sha256") != cache_digest:
         return False
-    current_training_sha256 = _training_source_sha256()
+    current_training_sha256 = _training_source_sha256(check_deadline)
     if binding.get("training_source_sha256") != current_training_sha256:
         return False
     prediction_brier = _valid_prediction_evidence(predictions)
@@ -379,10 +402,12 @@ def _valid_completed_result(
     )
     if not modern:
         return True
-    current_code_provenance = _current_code_provenance(current_training_sha256)
+    current_code_provenance = _current_code_provenance(
+        current_training_sha256, check_deadline
+    )
     expected_provenance = {
         **current_code_provenance,
-        **_artifact_hash_evidence(checkpoint, predictions),
+        **_artifact_hash_evidence(checkpoint, predictions, check_deadline),
     }
     for key in _MODERN_PROVENANCE_KEYS:
         if result.resource_evidence.get(key) != expected_provenance[key]:

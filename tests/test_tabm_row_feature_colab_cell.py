@@ -57,6 +57,8 @@ def test_embedded_runtime_inventory_is_minimal_complete_and_deterministic() -> N
         b"sample_submission.csv",
     ):
         assert forbidden not in decoded
+    assert b"checkpoint_payload_validator=(" in decoded
+    assert b"_validate_checkpoint_payload_isolated" in decoded
 
 
 def test_embedded_runtime_imports_and_builds_stage_p_grid_in_isolation(

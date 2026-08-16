@@ -869,7 +869,8 @@ def _copy_active_candidate(
         or binding.get("config_sha256") != _job_sha(job)
         or type(binding.get("cache_sha256")) is not str
         or _SHA_RE.fullmatch(binding["cache_sha256"]) is None
-        or binding.get("training_source_sha256") != _training_source_sha256()
+        or binding.get("training_source_sha256")
+        != _training_source_sha256(check_deadline)
     ):
         raise RowFeatureColabError("active checkpoint binding is invalid")
     if (source / "job.json").read_bytes() != canonical_json(_job_payload(job)):
@@ -908,44 +909,114 @@ def _checkpoint_progress(path: Path, *, candidate_id: str, epoch: int) -> dict[s
     return latest
 
 
-def _active_checkpoint_payload_worker(
+def _checkpoint_payload_worker(
     connection,
-    snapshot_job_dir: str,
     job,
     result,
-    best_epoch: int,
+    checkpoint_path: str,
+    meta_epoch: int,
+    meta_adapter_state: object,
+    best_epoch: int | None,
 ) -> None:
     """Validate Torch payloads in a process the deadline supervisor can kill."""
 
     try:
         from . import row_feature_proxy as proxy
 
-        proxy._validate_checkpoint_meta(
+        proxy._validate_checkpoint_payload(
             job,
             result,
-            Path(snapshot_job_dir),
-            validate_payload=True,
+            Path(checkpoint_path),
+            meta_epoch=meta_epoch,
+            meta_adapter_state=meta_adapter_state,
         )
-        import torch
+        if best_epoch is not None:
+            import torch
 
-        with torch.serialization.safe_globals([]):
-            best_payload = torch.load(
-                Path(snapshot_job_dir) / "best_checkpoint.pt",
-                map_location="cpu",
-                weights_only=True,
-            )
-        if (
-            type(best_payload) is not dict
-            or set(best_payload) != {"model", "epoch"}
-            or best_payload["epoch"] != best_epoch
-            or not isinstance(best_payload["model"], Mapping)
-        ):
-            raise RowFeatureColabError("active best checkpoint epoch binding differs")
+            with torch.serialization.safe_globals([]):
+                best_payload = torch.load(
+                    Path(checkpoint_path).with_name("best_checkpoint.pt"),
+                    map_location="cpu",
+                    weights_only=True,
+                )
+            if (
+                type(best_payload) is not dict
+                or set(best_payload) != {"model", "epoch"}
+                or best_payload["epoch"] != best_epoch
+                or not isinstance(best_payload["model"], Mapping)
+            ):
+                raise RowFeatureColabError(
+                    "active best checkpoint epoch binding differs"
+                )
         connection.send((True, ""))
     except BaseException as error:
         connection.send((False, f"{type(error).__name__}: {error}"))
     finally:
         connection.close()
+
+
+def _stop_validation_process(process, *, timeout: float = 0.5) -> bool:
+    if not process.is_alive():
+        process.join(0)
+        return True
+    process.terminate()
+    process.join(timeout)
+    if process.is_alive():
+        process.kill()
+        process.join(timeout)
+    return not process.is_alive()
+
+
+def _validate_checkpoint_payload_isolated(
+    job,
+    result,
+    checkpoint_path: Path,
+    *,
+    meta_epoch: int,
+    meta_adapter_state: object,
+    check_deadline: Callable[[], None] | None,
+    best_epoch: int | None = None,
+) -> None:
+    """Bound untrusted Torch loading by the absolute session deadline."""
+
+    context = multiprocessing.get_context("spawn")
+    parent, child = context.Pipe(duplex=False)
+    process = context.Process(
+        target=_checkpoint_payload_worker,
+        args=(
+            child,
+            job,
+            result,
+            str(checkpoint_path),
+            meta_epoch,
+            meta_adapter_state,
+            best_epoch,
+        ),
+    )
+    process.start()
+    child.close()
+    try:
+        while process.is_alive():
+            _check_deadline(check_deadline)
+            process.join(0.1)
+        process.join(0)
+        _check_deadline(check_deadline)
+        if process.exitcode != 0 or not parent.poll():
+            raise RowFeatureColabError("isolated active checkpoint validator failed")
+        accepted, detail = parent.recv()
+        if accepted is not True:
+            raise RowFeatureColabError(
+                f"active checkpoint payload is invalid: {detail}"
+            )
+    except BaseException as error:
+        if not _stop_validation_process(process):
+            raise RowFeatureColabError(
+                "isolated checkpoint validator could not be stopped"
+            ) from error
+        raise
+    finally:
+        if not process.is_alive():
+            parent.close()
 
 
 def _validate_active_checkpoint_payload_isolated(
@@ -956,35 +1027,19 @@ def _validate_active_checkpoint_payload_isolated(
     best_epoch: int,
     check_deadline: Callable[[], None] | None,
 ) -> None:
-    """Bound untrusted Torch loading by the absolute session deadline."""
-
-    context = multiprocessing.get_context("spawn")
-    parent, child = context.Pipe(duplex=False)
-    process = context.Process(
-        target=_active_checkpoint_payload_worker,
-        args=(child, str(snapshot_job_dir), job, result, best_epoch),
+    metadata = _read_json_object(
+        (snapshot_job_dir / "checkpoint_meta.json").read_bytes(),
+        "copied checkpoint metadata",
     )
-    process.start()
-    child.close()
-    try:
-        while process.is_alive():
-            _check_deadline(check_deadline)
-            process.join(0.1)
-        _check_deadline(check_deadline)
-        if process.exitcode != 0 or not parent.poll():
-            raise RowFeatureColabError("isolated active checkpoint validator failed")
-        accepted, detail = parent.recv()
-        if accepted is not True:
-            raise RowFeatureColabError(
-                f"active checkpoint payload is invalid: {detail}"
-            )
-    except BaseException:
-        if process.is_alive():
-            process.terminate()
-        process.join()
-        raise
-    finally:
-        parent.close()
+    _validate_checkpoint_payload_isolated(
+        job,
+        result,
+        snapshot_job_dir / "checkpoint.pt",
+        meta_epoch=int(metadata["epoch"]),
+        meta_adapter_state=metadata["adapter_state"],
+        best_epoch=best_epoch,
+        check_deadline=check_deadline,
+    )
 
 
 def _validated_active_row(
@@ -1025,10 +1080,10 @@ def _validated_active_row(
         raise RowFeatureColabError("active checkpoint progress metric is invalid")
     _check_deadline(check_deadline)
     binding = metadata["checkpoint_binding"]
-    training_sha = _training_source_sha256()
+    training_sha = _training_source_sha256(check_deadline)
     evidence = {
         "cache_digest": binding["cache_sha256"],
-        **_current_code_provenance(training_sha),
+        **_current_code_provenance(training_sha, check_deadline),
     }
     result = CampaignJobResult(
         candidate_id=job.candidate_id,
@@ -1182,6 +1237,7 @@ def publish_active_checkpoint_snapshot(
             state=snapshot_state,
             rows=rows,
             decision=decision,
+            check_deadline=check_deadline,
         )
         bundles = write_stage_bundles(
             Path(temporary) / "bundles",
@@ -1329,6 +1385,7 @@ def publish_stable_state_snapshot(
             state=state,
             rows=rows,
             decision=decision,
+            check_deadline=check_deadline,
         )
         bundles = write_stage_bundles(
             Path(temporary) / "bundles",
@@ -1666,19 +1723,25 @@ def run_supervised_stage(
         row_feature_contract_sha256,
     )
 
-    contract = load_row_feature_proxy_contract()
-    contract_sha = row_feature_contract_sha256()
-    code_sha = proxy._code_sha256()
-    data_dir = Path(data_dir)
-    history_sha = file_sha256(_regular_file(data_dir / "trackman_history.csv", "history"))
-    input_manifest_sha = file_sha256(
-        _regular_file(data_dir / "input_manifest.json", "input manifest")
-    )
-    output_dir = Path(output_dir)
-
     def check_deadline() -> None:
         if time.time() >= wall_deadline:
             raise TimeoutError("Stage P absolute session deadline expired")
+
+    check_deadline()
+    contract = load_row_feature_proxy_contract()
+    check_deadline()
+    contract_sha = row_feature_contract_sha256()
+    code_sha = proxy._code_sha256(check_deadline=check_deadline)
+    data_dir = Path(data_dir)
+    history_sha = file_sha256(
+        _regular_file(data_dir / "trackman_history.csv", "history"),
+        check_deadline,
+    )
+    input_manifest_sha = file_sha256(
+        _regular_file(data_dir / "input_manifest.json", "input manifest"),
+        check_deadline,
+    )
+    output_dir = Path(output_dir)
 
     store = _VerifiedSnapshotStore(
         snapshot_dir=Path(snapshot_dir),
@@ -1729,5 +1792,8 @@ def run_supervised_stage(
                 gpu_count=1,
                 wall_deadline=wall_deadline,
                 on_candidate_complete=completed,
+                checkpoint_payload_validator=(
+                    _validate_checkpoint_payload_isolated
+                ),
             )
     return result, store.latest
