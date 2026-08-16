@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import math
 from dataclasses import dataclass
+from decimal import Decimal
 from numbers import Real
 from types import MappingProxyType
 from typing import Any, Iterable, Mapping
@@ -56,6 +57,8 @@ _ALLOWED_STATUSES = {"completed", "inconclusive", "failed"}
 _EXPECTED_SEEDS = (42, 3407)
 _DECISION_STATUSES = {"complete", "incomplete", "blocked"}
 _CLASSIFICATIONS = {"strong", "safety", "rejected"}
+_DECIMAL_ZERO = Decimal("0")
+_DECIMAL_ONE = Decimal("1")
 _MISSING_LABELS = (
     *(f"baseline@{seed}" for seed in _EXPECTED_SEEDS),
     *(
@@ -91,7 +94,7 @@ def _validate_contract(contract: RowFeatureProxyContract) -> None:
             raise RowFeatureDecisionError(f"contract proxy gate {label} must be finite")
 
 
-def _validated_brier(metric: ProxyMetric) -> float | None:
+def _validated_brier(metric: ProxyMetric) -> Decimal | None:
     value = metric.brier
     if value is None:
         if metric.status == "completed":
@@ -99,8 +102,11 @@ def _validated_brier(metric: ProxyMetric) -> float | None:
         return None
     if type(value) is not float:
         raise RowFeatureDecisionError("metric brier must be a Python float or None")
-    result = value
-    if not math.isfinite(result) or not 0.0 <= result <= 1.0:
+    result = Decimal(str(value))
+    if (
+        not result.is_finite()
+        or not _DECIMAL_ZERO <= result <= _DECIMAL_ONE
+    ):
         raise RowFeatureDecisionError("metric brier must be finite and in [0, 1]")
     return result
 
@@ -109,10 +115,20 @@ def _empty_decision(status: str, reason: str) -> ProxyDecision:
     return ProxyDecision(status, reason, (), (), (), ())
 
 
-def _at_most(value: float, limit: float) -> bool:
-    return value <= limit or (
-        value > limit
-        and math.isclose(value, limit, rel_tol=0.0, abs_tol=1e-15)
+def _bundle_decision(
+    bundle: str,
+    seed_delta: Mapping[int, Decimal],
+    mean_delta: Decimal,
+    worst_seed_delta: Decimal,
+    classification: str,
+) -> BundleDecision:
+    float_deltas = {seed: float(value) for seed, value in seed_delta.items()}
+    return BundleDecision(
+        bundle=bundle,
+        seed_delta=float_deltas,
+        mean_delta=float(mean_delta),
+        worst_seed_delta=float(worst_seed_delta),
+        classification=classification,
     )
 
 
@@ -123,7 +139,7 @@ def decide_proxy_survivors(
     """Classify complete feature bundles against their same-seed baselines."""
 
     _validate_contract(contract)
-    evidence: dict[tuple[str | None, int], tuple[str, float | None]] = {}
+    evidence: dict[tuple[str | None, int], tuple[str, Decimal | None]] = {}
     for metric in metrics:
         if type(metric) is not ProxyMetric:
             raise RowFeatureDecisionError("every metric must be a ProxyMetric")
@@ -149,20 +165,11 @@ def decide_proxy_survivors(
     ):
         return _empty_decision("blocked", "baseline_failed")
 
-    failed_bundles = tuple(
-        bundle
-        for bundle in contract.feature_bundles
-        if any(
-            evidence.get((bundle, seed), (None, None))[0] == "failed"
-            for seed in contract.seeds
-        )
-    )
     expected = [
         *((None, seed) for seed in contract.seeds),
         *(
             (bundle, seed)
             for bundle in contract.feature_bundles
-            if bundle not in failed_bundles
             for seed in contract.seeds
         ),
     ]
@@ -181,7 +188,6 @@ def decide_proxy_survivors(
     inconclusive_bundles = [
         bundle
         for bundle in contract.feature_bundles
-        if bundle not in failed_bundles
         if any(
             evidence[(bundle, seed)][0] == "inconclusive"
             for seed in contract.seeds
@@ -193,7 +199,16 @@ def decide_proxy_survivors(
             f"feature_inconclusive:{','.join(inconclusive_bundles)}",
         )
 
-    computed: list[tuple[str, Mapping[int, float], float, float, bool]] = []
+    failed_bundles = tuple(
+        bundle
+        for bundle in contract.feature_bundles
+        if any(evidence[(bundle, seed)][0] == "failed" for seed in contract.seeds)
+    )
+    mean_limit = Decimal(str(contract.proxy_gate.mean_delta_max))
+    worst_limit = Decimal(str(contract.proxy_gate.worst_seed_delta_max))
+    computed: list[
+        tuple[str, Mapping[int, Decimal], Decimal, Decimal, bool]
+    ] = []
     for bundle in contract.feature_bundles:
         if bundle in failed_bundles:
             continue
@@ -201,21 +216,22 @@ def decide_proxy_survivors(
             seed: evidence[(bundle, seed)][1] - evidence[(None, seed)][1]  # type: ignore[operator]
             for seed in contract.seeds
         }
-        mean_delta = sum(seed_delta.values()) / len(seed_delta)
+        mean_delta = sum(seed_delta.values(), _DECIMAL_ZERO) / Decimal(
+            len(seed_delta)
+        )
         worst_seed_delta = max(seed_delta.values())
         strong = (
-            _at_most(mean_delta, contract.proxy_gate.mean_delta_max)
-            and _at_most(
-                worst_seed_delta,
-                contract.proxy_gate.worst_seed_delta_max,
-            )
+            mean_delta <= mean_limit
+            and worst_seed_delta <= worst_limit
         )
         computed.append(
             (bundle, seed_delta, mean_delta, worst_seed_delta, strong)
         )
 
     strong_survivors = tuple(row[0] for row in computed if row[4])
-    safety_candidates = [row for row in computed if not row[4] and row[2] < 0.0]
+    safety_candidates = [
+        row for row in computed if not row[4] and row[2] < _DECIMAL_ZERO
+    ]
     safety_bundle = (
         min(safety_candidates, key=lambda row: row[2])[0]
         if safety_candidates
@@ -223,12 +239,12 @@ def decide_proxy_survivors(
     )
     safety_survivors = (safety_bundle,) if safety_bundle is not None else ()
     rows = tuple(
-        BundleDecision(
-            bundle=bundle,
-            seed_delta=seed_delta,
-            mean_delta=mean_delta,
-            worst_seed_delta=worst_seed_delta,
-            classification=(
+        _bundle_decision(
+            bundle,
+            seed_delta,
+            mean_delta,
+            worst_seed_delta,
+            (
                 "strong"
                 if strong
                 else "safety"
@@ -347,6 +363,31 @@ def _validate_proxy_decision(decision: ProxyDecision) -> None:
         )
         if any(type(value) is not float or not math.isfinite(value) for value in numbers):
             raise RowFeatureDecisionError("decision row numbers must be finite floats")
+        decimal_deltas = tuple(
+            Decimal(str(row.seed_delta[seed])) for seed in _EXPECTED_SEEDS
+        )
+        derived_mean = sum(decimal_deltas, _DECIMAL_ZERO) / Decimal(
+            len(decimal_deltas)
+        )
+        derived_worst = max(decimal_deltas)
+        if not math.isclose(
+            row.mean_delta,
+            float(derived_mean),
+            rel_tol=0.0,
+            abs_tol=1e-15,
+        ):
+            raise RowFeatureDecisionError(
+                "decision row mean_delta contradicts seed_delta"
+            )
+        if not math.isclose(
+            row.worst_seed_delta,
+            float(derived_worst),
+            rel_tol=0.0,
+            abs_tol=1e-15,
+        ):
+            raise RowFeatureDecisionError(
+                "decision row worst_seed_delta contradicts seed_delta"
+            )
         if (
             type(row.classification) is not str
             or row.classification not in _CLASSIFICATIONS

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import random
 from dataclasses import FrozenInstanceError, replace
 from decimal import Decimal
@@ -98,7 +99,7 @@ def test_strong_gate_boundary_equality_passes() -> None:
     assert BUNDLES[0] in decision.strong_survivors
 
 
-def test_common_baseline_mean_boundary_representation_noise_passes() -> None:
+def test_common_baseline_decimal_mean_boundary_passes() -> None:
     decision = decide_proxy_survivors(
         _evidence(
             baseline={seed: 0.3 for seed in SEEDS},
@@ -108,12 +109,11 @@ def test_common_baseline_mean_boundary_representation_noise_passes() -> None:
     )
 
     row = _row(decision, BUNDLES[0])
-    assert row.mean_delta > CONTRACT.proxy_gate.mean_delta_max
-    assert row.mean_delta - CONTRACT.proxy_gate.mean_delta_max < 1e-15
+    assert row.mean_delta == CONTRACT.proxy_gate.mean_delta_max
     assert row.classification == "strong"
 
 
-def test_worst_seed_boundary_representation_noise_passes() -> None:
+def test_decimal_worst_seed_boundary_passes() -> None:
     decision = decide_proxy_survivors(
         _evidence(
             baseline={SEEDS[0]: 0.00003, SEEDS[1]: 0.3},
@@ -123,9 +123,35 @@ def test_worst_seed_boundary_representation_noise_passes() -> None:
     )
 
     row = _row(decision, BUNDLES[0])
-    assert row.worst_seed_delta > CONTRACT.proxy_gate.worst_seed_delta_max
-    assert row.worst_seed_delta - CONTRACT.proxy_gate.worst_seed_delta_max < 1e-15
+    assert row.worst_seed_delta == CONTRACT.proxy_gate.worst_seed_delta_max
     assert row.classification == "strong"
+
+
+def test_any_representable_positive_overshoot_above_zero_gate_is_rejected() -> None:
+    baseline = 0.3
+    candidate = math.nextafter(baseline, math.inf)
+    overshoot = candidate - baseline
+    custom_contract = replace(
+        CONTRACT,
+        proxy_gate=replace(
+            CONTRACT.proxy_gate,
+            mean_delta_max=0.0,
+            worst_seed_delta_max=0.0,
+        ),
+    )
+
+    decision = decide_proxy_survivors(
+        _evidence(
+            baseline={seed: baseline for seed in SEEDS},
+            deltas={BUNDLES[0]: (overshoot, overshoot)},
+        ),
+        custom_contract,
+    )
+
+    row = _row(decision, BUNDLES[0])
+    assert row.mean_delta > 0.0
+    assert row.classification == "rejected"
+    assert BUNDLES[0] not in decision.strong_survivors
 
 
 def test_just_outside_mean_gate_is_not_strong() -> None:
@@ -283,7 +309,7 @@ def test_observed_baseline_failure_blocks_even_when_grid_is_missing() -> None:
     )
 
 
-def test_failed_bundle_ignores_its_inconclusive_counterpart() -> None:
+def test_failed_bundle_with_inconclusive_counterpart_is_incomplete() -> None:
     failed = BUNDLES[0]
     independent = BUNDLES[1]
     decision = decide_proxy_survivors(
@@ -297,13 +323,14 @@ def test_failed_bundle_ignores_its_inconclusive_counterpart() -> None:
         CONTRACT,
     )
 
-    assert decision.status == "complete"
-    assert decision.failed_bundles == (failed,)
-    assert decision.strong_survivors == (independent,)
-    assert failed not in {row.bundle for row in decision.rows}
+    assert decision.status == "incomplete"
+    assert decision.reason == f"feature_inconclusive:{failed}"
+    assert decision.strong_survivors == decision.safety_survivors == ()
+    assert decision.failed_bundles == ()
+    assert decision.rows == ()
 
 
-def test_failed_bundle_ignores_its_missing_counterpart() -> None:
+def test_failed_bundle_with_missing_counterpart_is_incomplete() -> None:
     failed = BUNDLES[0]
     metrics = [
         metric
@@ -313,9 +340,11 @@ def test_failed_bundle_ignores_its_missing_counterpart() -> None:
 
     decision = decide_proxy_survivors(metrics, CONTRACT)
 
-    assert decision.status == "complete"
-    assert decision.failed_bundles == (failed,)
-    assert [row.bundle for row in decision.rows] == list(BUNDLES[1:])
+    assert decision.status == "incomplete"
+    assert decision.reason == f"missing_evidence:{failed}@{SEEDS[1]}"
+    assert decision.strong_survivors == decision.safety_survivors == ()
+    assert decision.failed_bundles == ()
+    assert decision.rows == ()
 
 
 def test_failed_bundle_does_not_hide_unrelated_missing_evidence() -> None:
@@ -512,6 +541,7 @@ def test_selection_uses_thresholds_from_passed_contract() -> None:
     decision = decide_proxy_survivors(_evidence(), custom_contract)
 
     assert decision.strong_survivors == BUNDLES
+    proxy_decision_payload(decision)
 
 
 def test_shuffled_input_produces_identical_decision_and_json() -> None:
@@ -580,6 +610,47 @@ def test_payload_is_plain_json_ready_shape_and_json_is_canonical() -> None:
 
     payload["rows"][0]["seed_delta"][str(SEEDS[0])] = 123.0
     assert _row(decision, BUNDLES[0]).seed_delta[SEEDS[0]] != 123.0
+
+
+def test_json_facing_stats_allow_bounded_delta_float_representation_loss() -> None:
+    baseline = {
+        SEEDS[0]: 0.5271933079440781,
+        SEEDS[1]: 0.00035259763517903053,
+    }
+    candidates = {
+        (BUNDLES[0], SEEDS[0]): 0.5265440012906939,
+        (BUNDLES[0], SEEDS[1]): 0.0012426075040075874,
+    }
+    decision = decide_proxy_survivors(
+        _evidence(baseline=baseline, briers=candidates), CONTRACT
+    )
+    row = _row(decision, BUNDLES[0])
+    decimal_deltas = [Decimal(str(row.seed_delta[seed])) for seed in SEEDS]
+    expected_mean = float(sum(decimal_deltas, Decimal("0")) / Decimal(len(SEEDS)))
+
+    assert row.mean_delta != expected_mean
+    assert math.isclose(row.mean_delta, expected_mean, rel_tol=0.0, abs_tol=1e-15)
+    proxy_decision_payload(decision)
+
+
+def test_exact_nonstrong_boundary_survives_delta_float_persistence() -> None:
+    baseline = 3.373543958473668e-05
+    candidate = 3.7354395847366805e-06
+    briers = {
+        (BUNDLES[0], seed): candidate
+        for seed in SEEDS
+    }
+    decision = decide_proxy_survivors(
+        _evidence(
+            baseline={seed: baseline for seed in SEEDS},
+            briers=briers,
+        ),
+        CONTRACT,
+    )
+
+    assert decision.safety_survivors == (BUNDLES[0],)
+    assert _row(decision, BUNDLES[0]).mean_delta == -0.00003
+    proxy_decision_payload(decision)
 
 
 def test_serializers_accept_normal_decision_states_deterministically() -> None:
@@ -666,6 +737,12 @@ def _invalid_serialization_decision(case: str) -> ProxyDecision:
     if case == "nonfinite_worst":
         row = replace(first, worst_seed_delta=float("-inf"))
         return replace(valid, rows=(row, *valid.rows[1:]))
+    if case == "inconsistent_mean":
+        row = replace(first, mean_delta=first.mean_delta + 1e-9)
+        return replace(valid, rows=(row, *valid.rows[1:]))
+    if case == "inconsistent_worst":
+        row = replace(first, worst_seed_delta=first.worst_seed_delta + 1e-9)
+        return replace(valid, rows=(row, *valid.rows[1:]))
     if case == "contradictory_survivors":
         return replace(valid, strong_survivors=())
     if case == "duplicate_survivors":
@@ -699,6 +776,8 @@ def _invalid_serialization_decision(case: str) -> ProxyDecision:
         "nonfinite_seed_delta",
         "nonfinite_mean",
         "nonfinite_worst",
+        "inconsistent_mean",
+        "inconsistent_worst",
         "contradictory_survivors",
         "duplicate_survivors",
         "unordered_survivors",
