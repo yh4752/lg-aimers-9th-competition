@@ -191,6 +191,37 @@ def test_prediction_evidence_rejects_invalid_alignment_before_csv(
         )
 
 
+def test_prediction_evidence_rejects_unequal_row_count() -> None:
+    fit, valid = _rows()
+
+    with pytest.raises(RuntimeError, match="equal lengths"):
+        worker_module._prediction_evidence_frame(
+            fit_rows=fit,
+            valid_rows=valid.iloc[:1].copy(),
+            valid_batch=_valid_batch(),
+            probability=np.asarray([0.25, 0.75]),
+            category_maps={},
+        )
+
+
+def test_prediction_evidence_rejects_row_order_mismatch() -> None:
+    fit, valid = _rows()
+
+    with pytest.raises(RuntimeError, match="row_id order differs"):
+        worker_module._prediction_evidence_frame(
+            fit_rows=fit,
+            valid_rows=valid.iloc[::-1].reset_index(drop=True),
+            valid_batch=_valid_batch(),
+            probability=np.asarray([0.25, 0.75]),
+            category_maps={},
+        )
+
+
+def test_training_budget_status_is_inconclusive_only_when_reached() -> None:
+    assert worker_module._training_status(True) == "inconclusive"
+    assert worker_module._training_status(False) == "completed"
+
+
 @pytest.mark.parametrize(
     ("status", "expected_exit"),
     [("completed", 0), ("inconclusive", 0), ("failed", 1)],
@@ -339,8 +370,10 @@ def test_completed_result_with_checkpoint_is_reused(
     job_dir.mkdir(parents=True)
     checkpoint = job_dir / "best_checkpoint.pt"
     checkpoint.write_bytes(b"best")
+    predictions = job_dir / "predictions.csv"
+    predictions.write_text("row_id,target,probability\nv1,0,0.25\n", encoding="utf-8")
     completed = CampaignJobResult(
-        job.candidate_id, "completed", 0.2, 1, 2, checkpoint, None, {}, None
+        job.candidate_id, "completed", 0.2, 1, 2, checkpoint, predictions, {}, None
     )
     worker_module._atomic_json(
         job_dir / "worker_result.json",
@@ -358,3 +391,47 @@ def test_completed_result_with_checkpoint_is_reused(
 
     assert result[0].status == "completed"
     assert result[0].checkpoint == checkpoint
+
+
+@pytest.mark.parametrize("prediction_state", ["none", "missing"])
+def test_completed_result_without_prediction_evidence_is_not_reused(
+    tmp_path: Path, prediction_state: str
+) -> None:
+    job = _job()
+    job_dir = tmp_path / job.candidate_id
+    job_dir.mkdir()
+    checkpoint = job_dir / "best_checkpoint.pt"
+    checkpoint.write_bytes(b"best")
+    predictions = None if prediction_state == "none" else job_dir / "missing.csv"
+    completed = CampaignJobResult(
+        job.candidate_id, "completed", 0.2, 1, 2, checkpoint, predictions, {}, None
+    )
+    worker_module._atomic_json(
+        job_dir / "worker_result.json",
+        worker_module._serialize_result(completed, worker_module._job_sha(job)),
+    )
+
+    assert worker_module.SubprocessCampaignRuntime._read_result(job_dir, job) is None
+
+
+def test_jobs_not_started_before_deadline_have_no_worker_result(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    job = _job()
+
+    def unexpected_popen(*args: object, **kwargs: object) -> None:
+        raise AssertionError("worker must not start after the deadline")
+
+    monkeypatch.setattr(worker_module.subprocess, "Popen", unexpected_popen)
+    monkeypatch.setattr(worker_module.time, "time", lambda: 100.0)
+    monkeypatch.setattr(worker_module.time, "sleep", lambda _: None)
+    output_dir = tmp_path / "jobs"
+
+    result = worker_module.SubprocessCampaignRuntime(tmp_path).run_jobs(
+        "P", (job,), output_dir, gpu_count=1, job_deadline=100.0
+    )
+
+    assert result[0].status == "inconclusive"
+    assert result[0].failure == "not_started_before_stage_deadline"
+    assert not (output_dir / job.candidate_id).exists()
+    assert not (output_dir / job.candidate_id / "worker_result.json").exists()

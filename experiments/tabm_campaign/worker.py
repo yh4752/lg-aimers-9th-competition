@@ -66,6 +66,10 @@ def _preprocessing_spec(job: CampaignJob) -> PreprocessingSpec:
     )
 
 
+def _training_status(budget_reached: bool) -> str:
+    return "inconclusive" if budget_reached else "completed"
+
+
 def _prediction_evidence_frame(
     *,
     fit_rows,
@@ -376,7 +380,7 @@ def run_worker(job: CampaignJob, data_dir: Path, output_dir: Path, cache_root: P
     )
     return CampaignJobResult(
         job.candidate_id,
-        "inconclusive" if trained.budget_reached else "completed",
+        _training_status(trained.budget_reached),
         brier,
         trained.best_epoch,
         trained.completed_epochs,
@@ -405,8 +409,11 @@ class SubprocessCampaignRuntime:
         if payload.get("job_sha256") != _job_sha(job):
             return None
         result = _result_from_payload(payload)
-        if result.status == "completed" and (
-            result.checkpoint is None or not result.checkpoint.is_file()
+        if result.status == "completed" and not (
+            result.checkpoint is not None
+            and result.checkpoint.is_file()
+            and result.predictions_path is not None
+            and result.predictions_path.is_file()
         ):
             return None
         return result
