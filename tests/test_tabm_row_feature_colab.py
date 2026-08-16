@@ -1081,6 +1081,63 @@ def test_stalled_epoch_republishes_latest_at_every_periodic_boundary(
     assert all(kind == "republish" for kind, _ in publications[1:])
 
 
+def test_no_checkpoint_republishes_initial_stable_snapshot_on_cadence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    job = proxy.build_proxy_jobs(load_row_feature_proxy_contract())[0]
+    publications: list[str] = []
+
+    class Store:
+        latest = None
+        snapshot_dir = tmp_path / "snapshots"
+
+        def next_sequence(self):
+            return 0
+
+        def accept(self, snapshot):
+            publications.append("stable")
+            self.latest = snapshot
+            return snapshot
+
+        def republish_latest(self):
+            publications.append("republish")
+            return self.latest
+
+    class Delegate:
+        def run_jobs(self, version, jobs, output_dir, **kwargs):
+            time.sleep(0.26)
+            return ("done",)
+
+    stable = colab.EmergencySnapshot(
+        tmp_path / "stable.zip", "e" * 64, "f" * 64, job.candidate_id, -1
+    )
+    monkeypatch.setattr(
+        colab, "publish_stable_state_snapshot", lambda **kwargs: stable
+    )
+    runtime = colab.SnapshottingCampaignRuntime(
+        tmp_path / "data",
+        live_output_dir=tmp_path / "live",
+        store=Store(),
+        contract=load_row_feature_proxy_contract(),
+        contract_path=DEFAULT_ROW_FEATURE_PROXY_CONTRACT,
+        contract_sha256=REAL_CONTRACT_SHA,
+        train_sha256="a" * 64,
+        history_sha256="b" * 64,
+        input_manifest_sha256="c" * 64,
+        code_sha256="d" * 64,
+        snapshot_interval_seconds=0.1,
+        poll_seconds=0.005,
+        session_deadline=time.time() + 5,
+        delegate=Delegate(),
+    )
+
+    assert runtime.run_jobs(
+        "P", (job,), tmp_path / "jobs", gpu_count=1, job_deadline=time.time() + 4
+    ) == ("done",)
+    assert publications[0] == "stable"
+    assert publications.count("republish") >= 2
+
+
 def test_epoch_after_stale_boundary_replaces_snapshot_without_waiting_a_cadence(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

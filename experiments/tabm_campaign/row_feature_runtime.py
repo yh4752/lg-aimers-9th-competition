@@ -27,6 +27,21 @@ STAGE_P_RUNTIME_PYTHON_MEMBERS = (
     "experiments/tabm_campaign/training.py",
     "experiments/tabm_campaign/worker.py",
 )
+STAGE_P_RUNTIME_REQUIREMENTS_MEMBER = (
+    "experiments/tabm_campaign/requirements-kaggle.txt"
+)
+STAGE_P_RUNTIME_CONTRACT_MEMBER = (
+    "experiments/tabm_campaign/configs/row_feature_proxy_v1.json"
+)
+STAGE_P_RUNTIME_MEMBERS = (
+    *STAGE_P_RUNTIME_PYTHON_MEMBERS,
+    STAGE_P_RUNTIME_REQUIREMENTS_MEMBER,
+    STAGE_P_RUNTIME_CONTRACT_MEMBER,
+)
+STAGE_P_CODE_IDENTITY_MEMBERS = (
+    *STAGE_P_RUNTIME_PYTHON_MEMBERS,
+    STAGE_P_RUNTIME_REQUIREMENTS_MEMBER,
+)
 
 
 @dataclass(frozen=True)

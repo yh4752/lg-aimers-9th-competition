@@ -607,6 +607,7 @@ def test_code_binding_covers_only_the_sealed_runtime_file_set(tmp_path: Path) ->
         path.endswith("independent_dl/feature_sources/trackman.py")
         for path in production
     )
+    assert any(path.endswith("requirements-kaggle.txt") for path in production)
 
     source_root = Path(proxy_module.__file__).resolve().parents[1]
     root = tmp_path / "experiments"
@@ -621,6 +622,16 @@ def test_code_binding_covers_only_the_sealed_runtime_file_set(tmp_path: Path) ->
     added.unlink()
     listed = root / "independent_dl" / "row_features.py"
     listed.write_bytes(listed.read_bytes() + b"\n# changed\n")
+    assert _code_sha256(root) != initial
+    listed.write_bytes(
+        next(
+            source.read_bytes()
+            for source in _code_file_paths()
+            if source.name == "row_features.py"
+        )
+    )
+    requirements = root / "tabm_campaign" / "requirements-kaggle.txt"
+    requirements.write_bytes(requirements.read_bytes() + b"\nfixture-pin==1.0\n")
     assert _code_sha256(root) != initial
 
 
@@ -1292,7 +1303,7 @@ def test_job_guard_stops_before_starting_a_new_job_and_persists_progress(
     assert all(row["disposition"] == "not_started" for row in state["results"][1:])
 
 
-def test_resume_rejects_changed_code_binding(
+def test_resume_rejects_changed_requirements_code_binding(
     tmp_path: Path, monkeypatch
 ) -> None:
     data = _official_data(tmp_path, monkeypatch)
@@ -1304,11 +1315,19 @@ def test_resume_rejects_changed_code_binding(
         now=lambda: 1_000.0,
     )
 
-    production_files = proxy_module._code_file_paths()
+    source_root = Path(proxy_module.__file__).resolve().parents[1]
+    changed_root = tmp_path / "changed-experiments"
+    for source in proxy_module._code_file_paths():
+        destination = changed_root / source.relative_to(source_root)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(source.read_bytes())
+    requirements = changed_root / "tabm_campaign" / "requirements-kaggle.txt"
+    requirements.write_bytes(requirements.read_bytes() + b"\nfixture-pin==1.0\n")
+    changed_code_sha = proxy_module._code_sha256(changed_root)
     monkeypatch.setattr(
         proxy_module,
-        "_code_file_paths",
-        lambda root=None: tuple(reversed(production_files)),
+        "_code_sha256",
+        lambda experiments_root=None, check_deadline=None: changed_code_sha,
     )
     with pytest.raises(RowFeatureProxyError, match="code_sha256"):
         run_row_feature_proxy(

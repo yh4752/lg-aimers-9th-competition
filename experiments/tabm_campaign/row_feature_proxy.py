@@ -39,7 +39,7 @@ from .row_feature_decisions import (
     proxy_decision_json,
 )
 from .row_feature_runtime import (
-    STAGE_P_RUNTIME_PYTHON_MEMBERS,
+    STAGE_P_CODE_IDENTITY_MEMBERS,
     CampaignJob,
     CampaignJobResult,
     CampaignRuntime,
@@ -225,7 +225,7 @@ def _find_official_train(data_dir: Path) -> Path:
 
 
 def _code_file_paths(experiments_root: Path | None = None) -> tuple[Path, ...]:
-    """Return the sealed Python source closure for Stage P execution."""
+    """Return the sealed Stage P code-and-dependency identity closure."""
 
     root = (
         Path(__file__).resolve().parents[1]
@@ -234,7 +234,7 @@ def _code_file_paths(experiments_root: Path | None = None) -> tuple[Path, ...]:
     )
     result = tuple(
         root / PurePosixPath(member).relative_to("experiments")
-        for member in STAGE_P_RUNTIME_PYTHON_MEMBERS
+        for member in STAGE_P_CODE_IDENTITY_MEMBERS
     )
     if any(not path.is_file() for path in result):
         raise RowFeatureProxyError("Stage P sealed source closure is incomplete")

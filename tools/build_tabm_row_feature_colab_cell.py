@@ -13,7 +13,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from experiments.tabm_campaign.row_feature_runtime import (
-    STAGE_P_RUNTIME_PYTHON_MEMBERS,
+    STAGE_P_RUNTIME_MEMBERS,
 )
 
 
@@ -22,13 +22,7 @@ _LIMIT_BYTES = 1_000_000
 
 
 def _source_paths() -> list[Path]:
-    paths = [ROOT / member for member in STAGE_P_RUNTIME_PYTHON_MEMBERS]
-    paths.extend(
-        (
-            ROOT / "experiments/tabm_campaign/configs/row_feature_proxy_v1.json",
-            ROOT / "experiments/tabm_campaign/requirements-kaggle.txt",
-        )
-    )
+    paths = [ROOT / member for member in STAGE_P_RUNTIME_MEMBERS]
     result = sorted(set(paths), key=lambda path: path.relative_to(ROOT).as_posix())
     if any(not path.is_file() for path in result):
         raise RuntimeError("embedded runtime inventory contains a missing source")

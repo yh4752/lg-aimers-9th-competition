@@ -9,6 +9,7 @@ import tarfile
 from pathlib import Path
 
 from tools import build_tabm_row_feature_colab_cell as builder
+from experiments.tabm_campaign.row_feature_runtime import STAGE_P_RUNTIME_MEMBERS
 
 
 CELL = Path("experiments/tabm_campaign/COLAB_ROW_FEATURE_PROXY_CELL.py")
@@ -40,6 +41,7 @@ def test_embedded_runtime_inventory_is_minimal_complete_and_deterministic() -> N
     paths = builder._source_paths()
     names = {path.relative_to(builder.ROOT).as_posix() for path in paths}
     assert names == EXPECTED_RUNTIME_MEMBERS
+    assert set(STAGE_P_RUNTIME_MEMBERS) == EXPECTED_RUNTIME_MEMBERS
     assert builder._archive_bytes() == builder._archive_bytes()
     with tarfile.open(fileobj=io.BytesIO(builder._archive_bytes()), mode="r:gz") as archive:
         assert set(archive.getnames()) == names

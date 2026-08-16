@@ -1594,12 +1594,13 @@ class SnapshottingCampaignRuntime:
                 check_deadline=self._check_session_deadline,
             )
             self.store.accept(initial)
+        initial_next_periodic = self.monotonic() + self.snapshot_interval_seconds
 
         monitor_errors: list[BaseException] = []
 
         def monitor_loop() -> None:
             last_epoch = -1
-            next_periodic: float | None = None
+            next_periodic = initial_next_periodic
             overdue_for_fresh = False
             while True:
                 until_periodic = (
