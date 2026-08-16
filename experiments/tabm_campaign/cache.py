@@ -18,6 +18,7 @@ from experiments.independent_dl.features import (
     materialize_preprocessed_fold_cache,
 )
 from experiments.independent_dl.preprocessing import PreprocessingSpec
+from experiments.independent_dl.row_features import ROW_FEATURE_BUNDLES
 from experiments.independent_dl.models.common import ModelMetadata
 
 
@@ -59,6 +60,7 @@ class CacheIdentity:
     profile: str
     components: tuple[str, ...]
     preprocessing_code_sha256: str
+    row_feature_code_sha256: str
     feature_code_sha256: str
 
     @classmethod
@@ -85,6 +87,7 @@ class CacheIdentity:
             profile=spec.profile,
             components=tuple(spec.components),
             preprocessing_code_sha256=_file_sha256(package_root / "preprocessing.py"),
+            row_feature_code_sha256=_file_sha256(package_root / "row_features.py"),
             feature_code_sha256=_file_sha256(package_root / "features.py"),
         )
 
@@ -177,6 +180,27 @@ def _model_metadata(batch: FeatureBatch, state: PreprocessedFeatureState) -> Mod
     )
 
 
+def _validate_campaign_spec(spec: PreprocessingSpec) -> None:
+    components = spec.components
+    valid = (
+        spec.profile == "dl_standard"
+        and isinstance(components, tuple)
+        and (
+            components == ("hand_matchup",)
+            or (
+                len(components) == 2
+                and components[0] == "hand_matchup"
+                and components[1] in ROW_FEATURE_BUNDLES
+            )
+        )
+    )
+    if not valid:
+        raise CacheError(
+            "campaign cache requires dl_standard + hand_matchup and at most one "
+            "sealed row feature bundle"
+        )
+
+
 def materialize_fixed_cache(
     cache_root: str | Path,
     *,
@@ -190,8 +214,7 @@ def materialize_fixed_cache(
 ) -> FixedCache:
     """Create a read-only sampled view over a full, fold-fitted preprocessing cache."""
 
-    if (spec.profile, tuple(spec.components)) != ("dl_standard", ("hand_matchup",)):
-        raise CacheError("campaign cache requires dl_standard + hand_matchup")
+    _validate_campaign_spec(spec)
     ids = tuple(str(value) for value in sample_ids)
     if not ids or len(set(ids)) != len(ids):
         raise CacheError("sample_ids must be non-empty and unique")

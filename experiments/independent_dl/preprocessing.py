@@ -12,6 +12,8 @@ import numpy as np
 import pandas as pd
 from scipy import stats
 
+from .row_features import ROW_FEATURE_BUNDLES, RowFeatureError, add_row_feature_bundle
+
 
 TARGET_COLUMN = "control_success"
 ROW_ID_COLUMN = "row_id"
@@ -73,6 +75,7 @@ _SIMPLE_COMPONENTS = (
     "entity_frequency_and_oov",
     "grouped_missing_indicators",
     "hand_matchup",
+    *ROW_FEATURE_BUNDLES,
     "count_state",
     "pitcher_team_win_expectancy",
 )
@@ -240,6 +243,11 @@ def _add_components(
                 + "_"
                 + _category(result["batter_hand"])
             )
+        elif component in ROW_FEATURE_BUNDLES:
+            try:
+                result = add_row_feature_bundle(result, component)
+            except RowFeatureError as error:
+                raise PreprocessingError(str(error)) from error
         elif component == "count_state":
             _required(result, ("balls_before", "strikes_before"), component)
             balls = _numeric(result["balls_before"], "balls_before").astype("Int64")
