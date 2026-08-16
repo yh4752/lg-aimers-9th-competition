@@ -79,6 +79,7 @@ _ALLOWED_JOB_ARTIFACTS = {
     "checkpoint.pt",
     "checkpoint_meta.json",
     "best_checkpoint.pt",
+    "progress.jsonl",
 }
 _CHECKPOINT_NAMES = {"checkpoint.pt", "best_checkpoint.pt"}
 _STATUSES = {"completed", "failed", "inconclusive"}
@@ -1679,6 +1680,7 @@ def run_row_feature_proxy(
     wall_deadline: float,
     contract_path: str | Path = DEFAULT_ROW_FEATURE_PROXY_CONTRACT,
     now: Callable[[], float] = time.time,
+    on_candidate_complete: Callable[[CampaignJob, Path], None] | None = None,
 ) -> RowFeatureProxyRun:
     """Advance Stage P sequentially and publish deterministic review/resume evidence."""
 
@@ -1800,6 +1802,8 @@ def run_row_feature_proxy(
             decision=decision,
         )
         _write_local_state(state_path, state)
+        if on_candidate_complete is not None:
+            on_candidate_complete(job, state_path)
         if row["status"] == "inconclusive":
             break
         if job.feature_bundle is None and row["status"] == "failed":

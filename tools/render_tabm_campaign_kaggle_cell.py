@@ -31,6 +31,7 @@ def _source_paths() -> list[Path]:
             "features.py",
             "preprocessing.py",
             "progress.py",
+            "row_features.py",
             "training.py",
         )
     )
