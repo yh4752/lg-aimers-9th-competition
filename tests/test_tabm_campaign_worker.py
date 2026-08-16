@@ -16,6 +16,46 @@ from experiments.tabm_campaign.cache import CacheIdentity
 from experiments.tabm_campaign.runner import CampaignJob, CampaignJobResult
 
 
+_INDEPENDENT_DL_ROOT = Path(worker_module.__file__).resolve().parents[1] / "independent_dl"
+_MODERN_EVIDENCE_KEYS = (
+    "preprocessing_code_sha256",
+    "row_feature_code_sha256",
+    "feature_code_sha256",
+    "training_source_sha256",
+    "checkpoint_sha256",
+    "predictions_sha256",
+)
+
+
+def _expected_training_source_sha256() -> str:
+    return sha256(
+        (_INDEPENDENT_DL_ROOT / "training.py").read_bytes()
+        + (_INDEPENDENT_DL_ROOT / "models" / "tabm.py").read_bytes()
+    ).hexdigest()
+
+
+def _modern_evidence(job_dir: Path, cache_digest: str) -> dict[str, object]:
+    return {
+        "cache_digest": cache_digest,
+        "preprocessing_code_sha256": sha256(
+            (_INDEPENDENT_DL_ROOT / "preprocessing.py").read_bytes()
+        ).hexdigest(),
+        "row_feature_code_sha256": sha256(
+            (_INDEPENDENT_DL_ROOT / "row_features.py").read_bytes()
+        ).hexdigest(),
+        "feature_code_sha256": sha256(
+            (_INDEPENDENT_DL_ROOT / "features.py").read_bytes()
+        ).hexdigest(),
+        "training_source_sha256": _expected_training_source_sha256(),
+        "checkpoint_sha256": sha256(
+            (job_dir / "best_checkpoint.pt").read_bytes()
+        ).hexdigest(),
+        "predictions_sha256": sha256(
+            (job_dir / "predictions.csv").read_bytes()
+        ).hexdigest(),
+    }
+
+
 def _job(**changes: object) -> CampaignJob:
     values = dict(
         candidate_id="candidate",
@@ -84,6 +124,7 @@ def _write_reusable_completed(
     candidate_id: str | None = None,
     status: str = "completed",
     resource_evidence: dict[str, object] | None = None,
+    brier: float | None = 0.0625,
 ) -> tuple[CampaignJob, CampaignJobResult]:
     job = _job() if job is None else job
     job_dir.mkdir(parents=True, exist_ok=True)
@@ -96,24 +137,33 @@ def _write_reusable_completed(
         "v2,1,0.75,F\n",
         encoding="utf-8",
     )
+    cache_digest = "c" * 64
     worker_module._atomic_json(
         job_dir / "checkpoint_meta.json",
         {
             "candidate_id": job.candidate_id,
             "epoch": 1,
             "checkpoint": "checkpoint.pt",
-            "checkpoint_binding": {"config_sha256": worker_module._job_sha(job)},
+            "checkpoint_binding": {
+                "config_sha256": worker_module._job_sha(job),
+                "cache_sha256": cache_digest,
+                "training_source_sha256": _expected_training_source_sha256(),
+            },
         },
     )
     result = CampaignJobResult(
         candidate_id or job.candidate_id,
         status,
-        0.2,
+        brier,
         1,
         2,
         checkpoint,
         predictions,
-        {} if resource_evidence is None else resource_evidence,
+        (
+            {"cache_digest": cache_digest}
+            if resource_evidence is None
+            else resource_evidence
+        ),
         None,
     )
     worker_module._atomic_json(
@@ -241,6 +291,12 @@ def test_resource_identity_evidence_contains_all_code_provenance() -> None:
         "feature_code_sha256": "3" * 64,
         "training_source_sha256": "5" * 64,
     }
+
+
+def test_training_source_sha_uses_current_training_and_tabm_sources() -> None:
+    assert worker_module._training_source_sha256() == (
+        _expected_training_source_sha256()
+    )
 
 
 def test_prediction_evidence_uses_fit_only_ids_and_preserves_alignment() -> None:
@@ -620,6 +676,118 @@ def test_completed_result_rejects_artifact_hash_mismatch(tmp_path: Path) -> None
     assert result.checkpoint is not None and result.predictions_path is not None
 
     assert worker_module.SubprocessCampaignRuntime._read_result(job_dir, job) is None
+
+
+@pytest.mark.parametrize("missing_key", ("cache_digest", *_MODERN_EVIDENCE_KEYS))
+def test_feature_result_requires_every_modern_evidence_key(
+    tmp_path: Path, missing_key: str
+) -> None:
+    job_dir = tmp_path / "job"
+    job = _job(feature_bundle="count_context")
+    job, result = _write_reusable_completed(job_dir, job=job)
+    evidence = _modern_evidence(job_dir, "c" * 64)
+    evidence.pop(missing_key)
+    result = replace(result, resource_evidence=evidence)
+    worker_module._atomic_json(
+        job_dir / "worker_result.json",
+        worker_module._serialize_result(result, worker_module._job_sha(job)),
+    )
+
+    assert worker_module.SubprocessCampaignRuntime._read_result(job_dir, job) is None
+
+
+def test_feature_result_accepts_complete_current_modern_evidence(
+    tmp_path: Path,
+) -> None:
+    job_dir = tmp_path / "job"
+    job = _job(feature_bundle="count_context")
+    job, result = _write_reusable_completed(job_dir, job=job)
+    result = replace(
+        result, resource_evidence=_modern_evidence(job_dir, "c" * 64)
+    )
+    worker_module._atomic_json(
+        job_dir / "worker_result.json",
+        worker_module._serialize_result(result, worker_module._job_sha(job)),
+    )
+
+    assert worker_module.SubprocessCampaignRuntime._read_result(job_dir, job) is not None
+
+
+@pytest.mark.parametrize("binding_key", ["cache_sha256", "training_source_sha256"])
+def test_completed_result_rejects_wrong_cache_or_training_binding(
+    tmp_path: Path, binding_key: str
+) -> None:
+    job_dir = tmp_path / "job"
+    job, _ = _write_reusable_completed(job_dir)
+    meta = json.loads((job_dir / "checkpoint_meta.json").read_text())
+    meta["checkpoint_binding"][binding_key] = "0" * 64
+    worker_module._atomic_json(job_dir / "checkpoint_meta.json", meta)
+
+    assert worker_module.SubprocessCampaignRuntime._read_result(job_dir, job) is None
+
+
+def test_legacy_baseline_requires_cache_digest_but_not_modern_hashes(
+    tmp_path: Path,
+) -> None:
+    job_dir = tmp_path / "job"
+    job, result = _write_reusable_completed(job_dir)
+
+    assert worker_module.SubprocessCampaignRuntime._read_result(job_dir, job) is not None
+
+    result = replace(result, resource_evidence={})
+    worker_module._atomic_json(
+        job_dir / "worker_result.json",
+        worker_module._serialize_result(result, worker_module._job_sha(job)),
+    )
+    assert worker_module.SubprocessCampaignRuntime._read_result(job_dir, job) is None
+
+
+@pytest.mark.parametrize("artifact_name", ["best_checkpoint.pt", "predictions.csv"])
+def test_modern_result_rejects_artifact_changed_after_hashing(
+    tmp_path: Path, artifact_name: str
+) -> None:
+    job_dir = tmp_path / "job"
+    job = _job(feature_bundle="count_context")
+    job, result = _write_reusable_completed(job_dir, job=job)
+    evidence = _modern_evidence(job_dir, "c" * 64)
+    result = replace(result, resource_evidence=evidence)
+    worker_module._atomic_json(
+        job_dir / "worker_result.json",
+        worker_module._serialize_result(result, worker_module._job_sha(job)),
+    )
+    artifact = job_dir / artifact_name
+    if artifact_name == "predictions.csv":
+        artifact.write_text(
+            "row_id,target,probability\nv1,0,0.20\nv2,1,0.80\n",
+            encoding="utf-8",
+        )
+    else:
+        artifact.write_bytes(b"changed")
+
+    assert worker_module.SubprocessCampaignRuntime._read_result(job_dir, job) is None
+
+
+@pytest.mark.parametrize("stored_brier", [None, 0.2, float("nan"), float("inf")])
+def test_completed_result_rejects_missing_nonfinite_or_mismatched_brier(
+    tmp_path: Path, stored_brier: float | None
+) -> None:
+    job_dir = tmp_path / "job"
+    job, result = _write_reusable_completed(job_dir)
+    result = replace(result, brier=stored_brier)
+    payload = worker_module._serialize_result(result, worker_module._job_sha(job))
+    (job_dir / "worker_result.json").write_text(json.dumps(payload), encoding="utf-8")
+
+    assert worker_module.SubprocessCampaignRuntime._read_result(job_dir, job) is None
+
+
+def test_completed_result_accepts_exact_recomputed_brier(tmp_path: Path) -> None:
+    job_dir = tmp_path / "job"
+    job, _ = _write_reusable_completed(job_dir, brier=0.0625)
+
+    result = worker_module.SubprocessCampaignRuntime._read_result(job_dir, job)
+
+    assert result is not None
+    assert result.brier == 0.0625
 
 
 def test_artifact_hash_evidence_records_checkpoint_and_predictions(

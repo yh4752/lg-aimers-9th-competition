@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 from dataclasses import asdict
 from hashlib import sha256
@@ -25,6 +26,15 @@ from .runner import CampaignJob, CampaignJobResult
 
 
 _RUNTIME_ROOT = Path(__file__).resolve().parents[2]
+_INDEPENDENT_DL_ROOT = Path(__file__).resolve().parents[1] / "independent_dl"
+_MODERN_PROVENANCE_KEYS = (
+    "preprocessing_code_sha256",
+    "row_feature_code_sha256",
+    "feature_code_sha256",
+    "training_source_sha256",
+    "checkpoint_sha256",
+    "predictions_sha256",
+)
 
 
 def _worker_environment(gpu: int) -> dict[str, str]:
@@ -79,6 +89,30 @@ def _training_status(budget_reached: bool) -> str:
 
 def _file_sha256(path: Path) -> str:
     return sha256(path.read_bytes()).hexdigest()
+
+
+def _training_source_sha256() -> str:
+    return sha256(
+        (_INDEPENDENT_DL_ROOT / "training.py").read_bytes()
+        + (_INDEPENDENT_DL_ROOT / "models" / "tabm.py").read_bytes()
+    ).hexdigest()
+
+
+def _current_code_provenance(
+    training_source_sha256: str,
+) -> dict[str, str]:
+    return {
+        "preprocessing_code_sha256": _file_sha256(
+            _INDEPENDENT_DL_ROOT / "preprocessing.py"
+        ),
+        "row_feature_code_sha256": _file_sha256(
+            _INDEPENDENT_DL_ROOT / "row_features.py"
+        ),
+        "feature_code_sha256": _file_sha256(
+            _INDEPENDENT_DL_ROOT / "features.py"
+        ),
+        "training_source_sha256": training_source_sha256,
+    }
 
 
 def _artifact_hash_evidence(
@@ -266,36 +300,39 @@ def _canonical_regular_file(actual: Path | None, expected: Path) -> bool:
     return actual.resolve() == expected.resolve()
 
 
-def _valid_prediction_evidence(path: Path) -> bool:
+def _valid_prediction_evidence(path: Path) -> float | None:
     import numpy as np
     import pandas as pd
 
     try:
         frame = pd.read_csv(path)
     except (OSError, UnicodeError, ValueError):
-        return False
+        return None
     required = {"row_id", "target", "probability"}
     if frame.empty or not required.issubset(frame.columns):
-        return False
+        return None
     row_id = frame["row_id"]
     if (
         row_id.isna().any()
         or row_id.astype("string").str.strip().eq("").any()
         or row_id.astype("string").duplicated().any()
     ):
-        return False
+        return None
     target = pd.to_numeric(frame["target"], errors="coerce").to_numpy(
         dtype="float64"
     )
     probability = pd.to_numeric(
         frame["probability"], errors="coerce"
     ).to_numpy(dtype="float64")
-    return bool(
+    valid = bool(
         np.isfinite(target).all()
         and np.isin(target, (0.0, 1.0)).all()
         and np.isfinite(probability).all()
         and ((probability >= 0.0) & (probability <= 1.0)).all()
     )
+    if not valid:
+        return None
+    return float(np.mean(np.square(probability - target)))
 
 
 def _valid_completed_result(
@@ -319,17 +356,36 @@ def _valid_completed_result(
     binding = meta.get("checkpoint_binding")
     if not isinstance(binding, dict) or binding.get("config_sha256") != _job_sha(job):
         return False
-    if not _valid_prediction_evidence(predictions):
+    cache_digest = result.resource_evidence.get("cache_digest")
+    if not isinstance(cache_digest, str) or binding.get("cache_sha256") != cache_digest:
         return False
-    expected_hashes = {
-        "checkpoint_sha256": checkpoint,
-        "predictions_sha256": predictions,
+    current_training_sha256 = _training_source_sha256()
+    if binding.get("training_source_sha256") != current_training_sha256:
+        return False
+    prediction_brier = _valid_prediction_evidence(predictions)
+    if prediction_brier is None:
+        return False
+    if (
+        result.brier is None
+        or not math.isfinite(result.brier)
+        or not 0.0 <= result.brier <= 1.0
+        or not math.isclose(
+            result.brier, prediction_brier, rel_tol=1e-12, abs_tol=1e-12
+        )
+    ):
+        return False
+    modern = job.feature_bundle is not None or any(
+        key in result.resource_evidence for key in _MODERN_PROVENANCE_KEYS
+    )
+    if not modern:
+        return True
+    current_code_provenance = _current_code_provenance(current_training_sha256)
+    expected_provenance = {
+        **current_code_provenance,
+        **_artifact_hash_evidence(checkpoint, predictions),
     }
-    for key, artifact in expected_hashes.items():
-        if key in result.resource_evidence and (
-            not isinstance(result.resource_evidence[key], str)
-            or result.resource_evidence[key] != _file_sha256(artifact)
-        ):
+    for key in _MODERN_PROVENANCE_KEYS:
+        if result.resource_evidence.get(key) != expected_provenance[key]:
             return False
     return True
 
@@ -387,11 +443,7 @@ def run_worker(job: CampaignJob, data_dir: Path, output_dir: Path, cache_root: P
         except (ImportError, NameError):
             pass
 
-    independent_dl_root = Path(__file__).resolve().parents[1] / "independent_dl"
-    training_source_sha256 = sha256(
-        (independent_dl_root / "training.py").read_bytes()
-        + (independent_dl_root / "models" / "tabm.py").read_bytes()
-    ).hexdigest()
+    training_source_sha256 = _training_source_sha256()
     model_config = {
         "architecture": "tabm",
         "k": job.k,
