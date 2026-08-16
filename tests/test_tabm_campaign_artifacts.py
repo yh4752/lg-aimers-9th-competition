@@ -277,25 +277,30 @@ def test_stage_p_stream_writer_rejects_symlink_swap_after_manifest_hash(
     replacement = tmp_path / "replacement.pt"
     source.write_bytes(b"same bytes")
     replacement.write_bytes(b"same bytes")
-    original_digest = artifact_module._file_digest
-    swapped = False
+    expected_sha256 = sha256(b"same bytes").hexdigest()
+    original_open = artifact_module._open_regular_descriptor
+    open_count = 0
 
-    def digest_then_swap(path: Path) -> str:
-        nonlocal swapped
-        digest = original_digest(path)
-        if path == source and not swapped:
-            swapped = True
+    def open_then_swap(path: Path):
+        nonlocal open_count
+        if path == source:
+            open_count += 1
+        if path == source and open_count == 2:
             source.unlink()
             source.symlink_to(replacement)
-        return digest
+        return original_open(path)
 
-    monkeypatch.setattr(artifact_module, "_file_digest", digest_then_swap)
+    monkeypatch.setattr(artifact_module, "_open_regular_descriptor", open_then_swap)
     evidence = StageEvidence(
         "P",
         "5" * 64,
         None,
         {"state/stage_state.json": b"{}"},
-        {"jobs/rfp__baseline__s42/checkpoint.pt": source},
+        {
+            "jobs/rfp__baseline__s42/checkpoint.pt": artifact_module._StagePFile(
+                source, expected_sha256
+            )
+        },
     )
 
     with pytest.raises(ArtifactError, match="safe regular file"):

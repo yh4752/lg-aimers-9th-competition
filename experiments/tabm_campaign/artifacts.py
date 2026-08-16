@@ -25,12 +25,18 @@ _MAX_MANIFEST_BYTES = 8 * 1024 * 1024
 
 
 @dataclass(frozen=True)
+class _StagePFile:
+    path: Path
+    expected_sha256: str
+
+
+@dataclass(frozen=True)
 class StageEvidence:
     version: str
     campaign_config_sha256: str
     prior_manifest_sha256: str | None
-    review_members: Mapping[str, bytes | Path]
-    resume_members: Mapping[str, bytes | Path]
+    review_members: Mapping[str, bytes | _StagePFile]
+    resume_members: Mapping[str, bytes | _StagePFile]
 
 
 @dataclass(frozen=True)
@@ -118,8 +124,8 @@ def _file_digest(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _member_digest(value: bytes | Path) -> str:
-    return _digest(value) if type(value) is bytes else _file_digest(value)
+def _member_digest(value: bytes | _StagePFile) -> str:
+    return _digest(value) if type(value) is bytes else value.expected_sha256
 
 
 def _validate_member_name(name: str) -> None:
@@ -197,9 +203,11 @@ def _validate_evidence(evidence: StageEvidence) -> None:
             continue
         if (
             evidence.version == "P"
-            and isinstance(value, Path)
+            and type(value) is _StagePFile
         ):
-            descriptor, _ = _open_regular_descriptor(value)
+            if not _valid_sha(value.expected_sha256):
+                raise ArtifactError(f"Stage P bundle member SHA-256 is invalid: {name}")
+            descriptor, _ = _open_regular_descriptor(value.path)
             os.close(descriptor)
             continue
         if evidence.version == "P":
@@ -211,7 +219,7 @@ def _validate_evidence(evidence: StageEvidence) -> None:
 def _manifest(
     evidence: StageEvidence,
     kind: str,
-    members: Mapping[str, bytes | Path],
+    members: Mapping[str, bytes | _StagePFile],
 ) -> bytes:
     return _canonical_json(
         {
@@ -248,13 +256,13 @@ def _atomic_zip_publish(
     path: Path,
     evidence: StageEvidence,
     kind: str,
-    members: Mapping[str, bytes | Path],
+    members: Mapping[str, bytes | _StagePFile],
 ) -> tuple[str, str]:
     """Publish Stage P without materializing file members or the ZIP in memory."""
 
     manifest = _manifest(evidence, kind, members)
     expected = json.loads(manifest)["members"]
-    all_members: dict[str, bytes | Path] = {**members, "manifest.json": manifest}
+    all_members: dict[str, bytes | _StagePFile] = {**members, "manifest.json": manifest}
     path.parent.mkdir(parents=True, exist_ok=True)
     descriptor, temporary_name = tempfile.mkstemp(
         prefix=f".{path.name}-", dir=path.parent
@@ -277,7 +285,7 @@ def _atomic_zip_publish(
                         destination.write(value)
                         observed.update(value)
                 else:
-                    descriptor, metadata = _open_regular_descriptor(value)
+                    descriptor, metadata = _open_regular_descriptor(value.path)
                     info.file_size = metadata.st_size
                     with os.fdopen(descriptor, "rb") as source:
                         with archive.open(info, "w") as destination:

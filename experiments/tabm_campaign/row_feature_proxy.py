@@ -7,6 +7,7 @@ import math
 import os
 import re
 import stat
+import sys
 import tempfile
 import time
 from dataclasses import dataclass
@@ -19,6 +20,7 @@ from .artifacts import (
     ArtifactError,
     BundlePaths,
     StageEvidence,
+    _StagePFile,
     _validate_archive_entries,
     verify_resume_bundle,
     write_stage_bundles,
@@ -637,14 +639,26 @@ def _validate_restart_state(payload: Mapping[str, object], torch: object, np: ob
             or state.dtype != torch.uint8
             or state.layout != torch.strided
             or state.ndim != 1
-            or state.numel() <= 0
-            or state.numel() > 1024 * 1024
+            or state.numel() not in {8, 16}
             or not state.is_contiguous()
             or state.untyped_storage().nbytes() < state.numel()
             for state in cuda_rng
         )
     ):
         raise RowFeatureProxyError("checkpoint CUDA RNG state is invalid")
+    for state in cuda_rng:
+        raw = bytes(state.tolist())
+        if len(raw) == 16:
+            offset = int.from_bytes(raw[8:], byteorder=sys.byteorder, signed=True)
+            if offset < 0 or offset % 4:
+                raise RowFeatureProxyError("checkpoint CUDA RNG state is invalid")
+        if torch.cuda.is_available():
+            try:
+                torch.Generator(device="cuda:0").set_state(state)
+            except Exception as error:
+                raise RowFeatureProxyError(
+                    "checkpoint CUDA RNG cannot be restored"
+                ) from error
 
 
 def _validate_tabm_model_state(
@@ -1622,7 +1636,7 @@ def _bundle_members(
     state: dict[str, object],
     rows: Mapping[str, dict[str, object]],
     decision: ProxyDecision,
-) -> tuple[dict[str, bytes | Path], dict[str, bytes | Path]]:
+) -> tuple[dict[str, bytes | _StagePFile], dict[str, bytes | _StagePFile]]:
     state_bytes = _canonical_json(state)
     metrics_bytes = _canonical_json(state["results"])
     log_bytes = _stage_log(state, decision)
@@ -1641,13 +1655,17 @@ def _bundle_members(
             path = output_dir / binding["path"]
             if not _regular_file(path) or _file_sha256(path) != binding["sha256"]:
                 raise RowFeatureProxyError(f"artifact changed before publication: {binding['path']}")
-            resume[binding["path"]] = path
+            source = _StagePFile(path, binding["sha256"])
+            resume[binding["path"]] = source
         if row["status"] == "completed":
             prediction_binding = artifacts["predictions.csv"]  # type: ignore[index]
             prediction_path = output_dir / prediction_binding["path"]
             name = f"predictions/{row['candidate_id']}.csv"
-            review[name] = prediction_path
-            resume[name] = prediction_path
+            prediction_source = _StagePFile(
+                prediction_path, prediction_binding["sha256"]
+            )
+            review[name] = prediction_source
+            resume[name] = prediction_source
     return review, resume
 
 

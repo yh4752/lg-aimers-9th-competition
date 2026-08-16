@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import math
+import sys
 from hashlib import sha256
 from pathlib import Path
 from zipfile import ZIP_DEFLATED, ZipFile
@@ -10,6 +11,11 @@ import pytest
 
 from experiments.tabm_campaign import worker as worker_module
 from experiments.tabm_campaign import row_feature_proxy as proxy_module
+from experiments.tabm_campaign.artifacts import (
+    ArtifactError,
+    StageEvidence,
+    write_stage_bundles,
+)
 from experiments.tabm_campaign.runner import CampaignJob, CampaignJobResult
 from experiments.tabm_campaign.row_feature_contracts import (
     load_row_feature_proxy_contract,
@@ -149,7 +155,15 @@ def _write_training_checkpoint(
         "python_rng": random.getstate(),
         "numpy_rng": np.random.get_state(),
         "torch_rng": torch.get_rng_state(),
-        "cuda_rng": [torch.get_rng_state().clone()],
+        "cuda_rng": [
+            torch.tensor(
+                list(
+                    (42).to_bytes(8, byteorder=sys.byteorder, signed=False)
+                    + (4).to_bytes(8, byteorder=sys.byteorder, signed=True)
+                ),
+                dtype=torch.uint8,
+            )
+        ],
         "adapter_state": None,
     }
     if missing_key is not None:
@@ -414,6 +428,7 @@ class _CorruptCheckpointRuntime(_DeadlineFallbackRuntime):
             "bad_numpy_rng",
             "bad_torch_rng",
             "bad_cuda_rng",
+            "bad_cuda_rng_offset",
         }:
             import torch
 
@@ -441,9 +456,21 @@ class _CorruptCheckpointRuntime(_DeadlineFallbackRuntime):
                     checkpoint["numpy_rng"] = ("bad",)
                 elif self.corruption == "bad_torch_rng":
                     checkpoint["torch_rng"] = torch.zeros(2, dtype=torch.float32)
+                elif self.corruption == "bad_cuda_rng":
+                    checkpoint["cuda_rng"] = [torch.zeros(12, dtype=torch.uint8)]
                 else:
                     checkpoint["cuda_rng"] = [
-                        torch.zeros(2, dtype=torch.float32)
+                        torch.tensor(
+                            list(
+                                (42).to_bytes(
+                                    8, byteorder=sys.byteorder, signed=False
+                                )
+                                + (2).to_bytes(
+                                    8, byteorder=sys.byteorder, signed=True
+                                )
+                            ),
+                            dtype=torch.uint8,
+                        )
                     ]
             torch.save(checkpoint, job_dir / "checkpoint.pt")
         return (result,)
@@ -808,6 +835,21 @@ def test_checkpoint_validator_accepts_actual_stage_p_cpu_states(tmp_path: Path) 
         meta_adapter_state=None,
     )
 
+    payload["cuda_rng"] = [
+        torch.tensor(
+            list((42).to_bytes(8, byteorder=sys.byteorder, signed=False)),
+            dtype=torch.uint8,
+        )
+    ]
+    torch.save(payload, path)
+    _validate_checkpoint_payload(
+        job,
+        result,
+        path,
+        meta_epoch=2,
+        meta_adapter_state=None,
+    )
+
 
 def test_checkpoint_scheduler_uses_plateau_threshold_semantics(tmp_path: Path) -> None:
     import torch
@@ -922,6 +964,7 @@ def test_checkpoint_size_is_rejected_before_torch_load(
         ("bad_numpy_rng", "RNG"),
         ("bad_torch_rng", "RNG"),
         ("bad_cuda_rng", "RNG"),
+        ("bad_cuda_rng_offset", "RNG"),
     ],
 )
 def test_inconclusive_checkpoint_payload_fails_closed(
@@ -1392,6 +1435,53 @@ def test_checkpoint_bundle_publication_and_restore_are_streamed(
             wall_deadline=12_000.0,
             now=lambda: 2_000.0,
         )
+
+
+def test_stage_p_publication_binds_file_to_state_sha_and_preserves_target(
+    tmp_path: Path, monkeypatch
+) -> None:
+    data = _official_data(tmp_path, monkeypatch)
+    output = tmp_path / "out"
+    first = run_row_feature_proxy(
+        data_dir=data,
+        output_dir=output,
+        runtime=_Runtime({"rfp__baseline__s42": "inconclusive"}),
+        wall_deadline=10_000.0,
+        now=lambda: 1_000.0,
+    )
+    state = json.loads(first.state_path.read_bytes())
+    rows = {row["candidate_id"]: row for row in state["results"]}
+    jobs = build_proxy_jobs(CONTRACT)
+    review, resume = _bundle_members(
+        output_dir=output,
+        config_bytes=proxy_module._read_contract_bytes(
+            proxy_module.DEFAULT_ROW_FEATURE_PROXY_CONTRACT
+        ),
+        state=state,
+        rows=rows,
+        decision=_decision(jobs, rows, CONTRACT),
+    )
+    row = state["results"][0]
+    checkpoint = output / row["artifacts"]["checkpoint.pt"]["path"]
+    checkpoint.write_bytes(b"mutated after bundle member validation")
+    review_before = first.bundles.review.read_bytes()
+    resume_before = first.bundles.resume.read_bytes()
+
+    with pytest.raises(ArtifactError, match="changed during publication"):
+        write_stage_bundles(
+            output,
+            StageEvidence(
+                "P",
+                state["campaign_config_sha256"],
+                state["prior_manifest_sha256"],
+                review,
+                resume,
+            ),
+            bundle_prefix="tabm_row_feature_stage",
+        )
+
+    assert first.bundles.review.read_bytes() == review_before
+    assert first.bundles.resume.read_bytes() == resume_before
 
 
 def test_resume_checkpoint_size_is_rejected_before_member_read(
