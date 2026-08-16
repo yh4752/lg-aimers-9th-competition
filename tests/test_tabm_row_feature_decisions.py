@@ -3,8 +3,10 @@ from __future__ import annotations
 import json
 import random
 from dataclasses import FrozenInstanceError, replace
+from decimal import Decimal
 from typing import Any
 
+import numpy as np
 import pytest
 
 from experiments.tabm_campaign.row_feature_contracts import (
@@ -27,6 +29,14 @@ BUNDLES = CONTRACT.feature_bundles
 
 
 class _BundleName(str):
+    pass
+
+
+class _FloatValue(float):
+    pass
+
+
+class _ProxyMetricSubclass(ProxyMetric):
     pass
 
 
@@ -154,6 +164,28 @@ def test_equal_safety_means_tie_break_in_contract_order() -> None:
     assert _row(decision, BUNDLES[1]).classification == "rejected"
 
 
+def test_safety_ranking_uses_unrounded_mean_regardless_of_input_order() -> None:
+    displayed_tie = -0.00004
+    lower_raw_mean = displayed_tie - 1e-9
+    worst = 0.0001
+    metrics = _evidence(
+        deltas={
+            BUNDLES[0]: (2 * displayed_tie - worst, worst),
+            BUNDLES[1]: (2 * lower_raw_mean - worst, worst),
+        }
+    )
+
+    ordered = decide_proxy_survivors(metrics, CONTRACT)
+    reversed_input = decide_proxy_survivors(reversed(metrics), CONTRACT)
+    first = _row(ordered, BUNDLES[0])
+    second = _row(ordered, BUNDLES[1])
+
+    assert round(first.mean_delta, 8) == round(second.mean_delta, 8)
+    assert second.mean_delta < first.mean_delta
+    assert ordered.safety_survivors == (BUNDLES[1],)
+    assert reversed_input == ordered
+
+
 def test_each_seed_delta_uses_its_own_baseline() -> None:
     baseline = {SEEDS[0]: 0.2, SEEDS[1]: 0.8}
     paired = (-0.001, 0.00002)
@@ -213,6 +245,23 @@ def test_missing_pair_returns_incomplete_and_names_the_evidence() -> None:
     assert decision.rows == ()
 
 
+def test_missing_baseline_pair_returns_incomplete_and_names_baseline_seed() -> None:
+    missing_seed = SEEDS[1]
+    metrics = [
+        metric
+        for metric in _evidence()
+        if (metric.bundle, metric.seed) != (None, missing_seed)
+    ]
+
+    decision = decide_proxy_survivors(metrics, CONTRACT)
+
+    assert decision.status == "incomplete"
+    assert decision.reason == f"missing_evidence:baseline@{missing_seed}"
+    assert decision.strong_survivors == ()
+    assert decision.safety_survivors == ()
+    assert decision.rows == ()
+
+
 @pytest.mark.parametrize("seed", SEEDS)
 def test_inconclusive_baseline_returns_incomplete(seed: int) -> None:
     decision = decide_proxy_survivors(
@@ -266,6 +315,7 @@ def test_duplicate_metric_pair_is_malformed() -> None:
         ProxyMetric(7, SEEDS[0], "completed", 0.25),  # type: ignore[arg-type]
         ProxyMetric(BUNDLES[0], True, "completed", 0.25),
         ProxyMetric(BUNDLES[0], SEEDS[0], 1, 0.25),  # type: ignore[arg-type]
+        _ProxyMetricSubclass(BUNDLES[0], SEEDS[0], "completed", 0.25),
         object(),
     ],
 )
@@ -280,8 +330,12 @@ def test_unknown_or_wrongly_typed_metric_fields_are_malformed(
     ("status", "brier"),
     [
         ("completed", None),
+        ("completed", 0),
         ("completed", True),
         ("completed", "0.25"),
+        ("completed", _FloatValue(0.25)),
+        ("completed", Decimal("0.25")),
+        ("completed", np.float64(0.25)),
         ("completed", float("nan")),
         ("completed", float("inf")),
         ("completed", float("-inf")),

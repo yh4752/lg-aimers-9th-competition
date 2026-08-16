@@ -87,9 +87,9 @@ def _validated_brier(metric: ProxyMetric) -> float | None:
         if metric.status == "completed":
             raise RowFeatureDecisionError("completed metric brier must be present")
         return None
-    if isinstance(value, bool) or not isinstance(value, Real):
-        raise RowFeatureDecisionError("metric brier must be a real number or None")
-    result = float(value)
+    if type(value) is not float:
+        raise RowFeatureDecisionError("metric brier must be a Python float or None")
+    result = value
     if not math.isfinite(result) or not 0.0 <= result <= 1.0:
         raise RowFeatureDecisionError("metric brier must be finite and in [0, 1]")
     return result
@@ -108,7 +108,7 @@ def decide_proxy_survivors(
     _validate_contract(contract)
     evidence: dict[tuple[str | None, int], tuple[str, float | None]] = {}
     for metric in metrics:
-        if not isinstance(metric, ProxyMetric):
+        if type(metric) is not ProxyMetric:
             raise RowFeatureDecisionError("every metric must be a ProxyMetric")
         if metric.bundle is not None and type(metric.bundle) is not str:
             raise RowFeatureDecisionError("metric bundle must be a string or None")
