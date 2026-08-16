@@ -19,6 +19,7 @@ from .artifacts import (
     ArtifactError,
     BundlePaths,
     StageEvidence,
+    _validate_archive_entries,
     verify_resume_bundle,
     write_stage_bundles,
 )
@@ -36,7 +37,13 @@ from .row_feature_decisions import (
     proxy_decision_json,
 )
 from .runner import CampaignJob, CampaignJobResult, CampaignRuntime
-from .worker import _job_sha
+from .worker import (
+    _job_payload,
+    _job_sha,
+    _result_from_payload as _worker_result_from_payload,
+    _training_source_sha256,
+    _valid_completed_result,
+)
 
 
 class RowFeatureProxyError(RuntimeError):
@@ -76,12 +83,20 @@ _STATUSES = {"completed", "failed", "inconclusive"}
 _DISPOSITIONS = {"completed", "failed", "inconclusive", "not_started"}
 _SHA_RE = re.compile(r"[0-9a-f]{64}")
 _CODE_FILES = (
+    "artifacts.py",
+    "row_feature_contracts.py",
+    "row_feature_decisions.py",
     "row_feature_proxy.py",
+    "runner.py",
     "worker.py",
+    "cache.py",
+    "sampling.py",
     "training.py",
     "../independent_dl/preprocessing.py",
     "../independent_dl/row_features.py",
     "../independent_dl/features.py",
+    "../independent_dl/training.py",
+    "../independent_dl/models/common.py",
     "../independent_dl/models/tabm.py",
 )
 
@@ -135,7 +150,17 @@ def _atomic_bytes(path: Path, value: bytes) -> None:
 
 
 def _find_official_train(data_dir: Path) -> Path:
-    if data_dir.is_symlink() or not data_dir.is_dir():
+    try:
+        lexical = Path(os.path.abspath(os.fspath(data_dir)))
+    except (OSError, TypeError, ValueError) as error:
+        raise RowFeatureProxyError("data_dir path is invalid") from error
+    for component in (lexical, *lexical.parents):
+        if component.is_symlink():
+            raise RowFeatureProxyError(
+                "data_dir path must not contain a symlink ancestor"
+            )
+    data_dir = lexical
+    if not data_dir.is_dir():
         raise RowFeatureProxyError("data_dir must be a regular directory, not a symlink")
     candidates: list[Path] = []
     for root, directories, files in os.walk(data_dir, topdown=True, followlinks=False):
@@ -261,6 +286,166 @@ def _collect_job_artifacts(job_dir: Path) -> dict[str, dict[str, str]]:
     return artifacts
 
 
+def _read_json_file(path: Path, label: str) -> dict[str, object]:
+    if not _regular_file(path):
+        raise RowFeatureProxyError(f"{label} must be a regular file")
+    value = _read_json_bytes(path.read_bytes(), label)
+    if type(value) is not dict:
+        raise RowFeatureProxyError(f"{label} must contain an object")
+    return value
+
+
+def _same_worker_result(
+    archived: CampaignJobResult,
+    returned: CampaignJobResult,
+) -> bool:
+    checkpoint_name = (
+        None if archived.checkpoint is None else archived.checkpoint.name
+    )
+    returned_checkpoint_name = (
+        None if returned.checkpoint is None else returned.checkpoint.name
+    )
+    prediction_name = (
+        None if archived.predictions_path is None else archived.predictions_path.name
+    )
+    returned_prediction_name = (
+        None if returned.predictions_path is None else returned.predictions_path.name
+    )
+    return (
+        archived.candidate_id == returned.candidate_id
+        and archived.status == returned.status
+        and archived.brier == returned.brier
+        and archived.best_epoch == returned.best_epoch
+        and archived.completed_epochs == returned.completed_epochs
+        and checkpoint_name == returned_checkpoint_name
+        and prediction_name == returned_prediction_name
+        and _json_resource(dict(archived.resource_evidence))
+        == _json_resource(dict(returned.resource_evidence))
+        and archived.failure == returned.failure
+    )
+
+
+def _validate_checkpoint_meta(
+    job: CampaignJob,
+    result: CampaignJobResult,
+    job_dir: Path,
+) -> None:
+    meta = _read_json_file(job_dir / "checkpoint_meta.json", "checkpoint metadata")
+    expected_keys = {
+        "candidate_id",
+        "epoch",
+        "checkpoint",
+        "adapter_state",
+        "checkpoint_binding",
+    }
+    if set(meta) != expected_keys:
+        raise RowFeatureProxyError("checkpoint metadata keys are invalid")
+    epoch = meta["epoch"]
+    if (
+        meta["candidate_id"] != job.candidate_id
+        or isinstance(epoch, bool)
+        or not isinstance(epoch, int)
+        or epoch < 0
+        or result.completed_epochs != epoch + 1
+        or meta["checkpoint"] != "checkpoint.pt"
+        or (
+            meta["adapter_state"] is not None
+            and type(meta["adapter_state"]) is not dict
+        )
+    ):
+        raise RowFeatureProxyError(
+            "checkpoint metadata job, model, or epoch binding is invalid"
+        )
+    binding = meta["checkpoint_binding"]
+    cache_digest = result.resource_evidence.get("cache_digest")
+    expected_binding = {
+        "config_sha256": _job_sha(job),
+        "cache_sha256": cache_digest,
+        "training_source_sha256": _training_source_sha256(),
+    }
+    if (
+        type(cache_digest) is not str
+        or _SHA_RE.fullmatch(cache_digest) is None
+        or binding != expected_binding
+    ):
+        raise RowFeatureProxyError(
+            "checkpoint metadata config, cache, optimizer, scheduler, or code binding is invalid"
+        )
+    if not _regular_file(job_dir / "checkpoint.pt"):
+        raise RowFeatureProxyError("checkpoint metadata references a missing checkpoint")
+
+
+def _validate_semantic_evidence(
+    job: CampaignJob,
+    result: CampaignJobResult,
+    job_dir: Path,
+) -> None:
+    try:
+        job_payload = _read_json_file(job_dir / "job.json", "job evidence")
+        if job_payload != _job_payload(job):
+            raise RowFeatureProxyError("job evidence differs from the scheduled job")
+
+        worker_payload = _read_json_file(
+            job_dir / "worker_result.json", "worker result evidence"
+        )
+        if worker_payload.get("job_sha256") != _job_sha(job):
+            raise RowFeatureProxyError("worker result job SHA-256 differs")
+        parsed = _worker_result_from_payload(worker_payload)
+        if not _same_worker_result(parsed, result):
+            raise RowFeatureProxyError(
+                "worker result identity, status, metric, or resource evidence differs"
+            )
+
+        if result.checkpoint is not None or result.completed_epochs > 0:
+            _validate_checkpoint_meta(job, result, job_dir)
+
+        has_prediction_evidence = (
+            result.brier is not None
+            and result.checkpoint is not None
+            and result.predictions_path is not None
+        )
+        if has_prediction_evidence and not _valid_completed_result(
+            job_dir, job, result
+        ):
+            raise RowFeatureProxyError(
+                "prediction schema, recomputed Brier, checkpoint, code, or artifact binding differs"
+            )
+        if result.status == "completed" and not has_prediction_evidence:
+            raise RowFeatureProxyError("completed result evidence is incomplete")
+    except (RowFeatureProxyError, KeyError, OSError, TypeError, ValueError) as error:
+        raise RowFeatureProxyError(
+            f"completed evidence is untrusted for {job.candidate_id}: {error}"
+        ) from error
+
+
+def _normalize_worker_result(
+    job: CampaignJob,
+    result: CampaignJobResult,
+    job_dir: Path,
+) -> None:
+    """Remove machine-specific absolute paths after semantic validation."""
+
+    payload = {
+        "job_sha256": _job_sha(job),
+        "candidate_id": result.candidate_id,
+        "status": result.status,
+        "brier": result.brier,
+        "best_epoch": result.best_epoch,
+        "completed_epochs": result.completed_epochs,
+        "checkpoint": (
+            None if result.checkpoint is None else result.checkpoint.name
+        ),
+        "predictions_path": (
+            None
+            if result.status != "completed" or result.predictions_path is None
+            else result.predictions_path.name
+        ),
+        "resource_evidence": dict(result.resource_evidence),
+        "failure": result.failure,
+    }
+    _atomic_bytes(job_dir / "worker_result.json", _canonical_json(payload))
+
+
 def _validate_runtime_result(
     job: CampaignJob,
     result: CampaignJobResult,
@@ -302,6 +487,8 @@ def _validate_runtime_result(
         if result.predictions_path.name != "predictions.csv":
             raise RowFeatureProxyError("completed predictions name must be predictions.csv")
         _artifact_entry(job_dir, result.predictions_path)
+    _validate_semantic_evidence(job, result, job_dir)
+    _normalize_worker_result(job, result, job_dir)
     artifacts = _collect_job_artifacts(job_dir)
     if result.status != "completed":
         artifacts.pop("predictions.csv", None)
@@ -629,8 +816,24 @@ def _restore_resume(
         raise RowFeatureProxyError(f"resume bundle is untrusted: {error}") from error
     if verified.version != _VERSION or verified.campaign_config_sha256 != contract_sha:
         raise RowFeatureProxyError("resume version or contract SHA-256 differs")
-    with ZipFile(resume_path, "r") as archive:
-        members = {name: archive.read(name) for name in verified.member_sha256}
+    try:
+        with ZipFile(resume_path, "r") as archive:
+            names = _validate_archive_entries(archive, label="resume")
+            expected_names = set(verified.member_sha256) | {"manifest.json"}
+            if set(names) != expected_names:
+                raise RowFeatureProxyError(
+                    "resume member set changed after verification"
+                )
+            members: dict[str, bytes] = {}
+            for name, expected_hash in verified.member_sha256.items():
+                value = archive.read(name)
+                if sha256(value).hexdigest() != expected_hash:
+                    raise RowFeatureProxyError(
+                        f"resume member changed after verification: {name}"
+                    )
+                members[name] = value
+    except ArtifactError as error:
+        raise RowFeatureProxyError(f"resume bundle is untrusted: {error}") from error
     if members.get(_CONFIG_MEMBER) != config_bytes:
         raise RowFeatureProxyError("resume contains the wrong exact contract bytes")
     if _STATE_MEMBER not in members:
@@ -842,6 +1045,11 @@ def run_row_feature_proxy(
         raise RowFeatureProxyError(f"cannot trust the Stage P contract: {error}") from error
     if sha256(config_bytes).hexdigest() != contract_sha:
         raise RowFeatureProxyError("exact contract bytes changed during validation")
+    maximum_deadline = current + contract.budget.wall_seconds
+    if wall_deadline > maximum_deadline:
+        raise RowFeatureProxyError(
+            "wall_deadline exceeds now() + contract budget.wall_seconds"
+        )
     train_path = _find_official_train(Path(data_dir))
     train_sha = _official_train_file_sha256(train_path)
     if train_sha != contract.official_train_sha256:

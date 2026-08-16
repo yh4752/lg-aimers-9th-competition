@@ -4,10 +4,11 @@ import io
 import json
 from hashlib import sha256
 from pathlib import Path
-from zipfile import ZIP_DEFLATED, ZipFile
+from zipfile import ZIP_DEFLATED, ZipFile, ZipInfo
 
 import pytest
 
+from experiments.tabm_campaign import artifacts as artifact_module
 from experiments.tabm_campaign.artifacts import (
     ArtifactError,
     StageEvidence,
@@ -141,3 +142,86 @@ def test_verifier_rejects_unknown_manifest_schema(tmp_path: Path) -> None:
 
     with pytest.raises(ArtifactError, match="schema"):
         verify_resume_bundle(bundle)
+
+
+def test_verifier_rejects_extreme_compression_ratio_before_read(tmp_path: Path) -> None:
+    evidence = StageEvidence(
+        "P",
+        "3" * 64,
+        None,
+        {"state/stage_state.json": b"x"},
+        {"jobs/rfp__baseline__s42/checkpoint.pt": b"0" * (1024 * 1024)},
+    )
+
+    with pytest.raises(ArtifactError, match="compression ratio"):
+        write_stage_bundles(tmp_path, evidence)
+
+
+def test_verifier_rejects_duplicate_member_before_read(tmp_path: Path) -> None:
+    source = write_stage_bundles(tmp_path / "source", _evidence()).resume
+    assert source is not None
+    with ZipFile(source) as archive:
+        members = [(name, archive.read(name)) for name in archive.namelist()]
+    forged = tmp_path / "duplicate.zip"
+    with pytest.warns(UserWarning, match="Duplicate name"):
+        with ZipFile(forged, "w", compression=ZIP_DEFLATED) as archive:
+            for name, value in members:
+                archive.writestr(name, value)
+            archive.writestr("stage_state.json", b"duplicate")
+
+    with pytest.raises(ArtifactError, match="duplicate"):
+        verify_resume_bundle(forged)
+
+
+def test_verifier_rejects_traversal_and_symlink_members_before_read(
+    tmp_path: Path,
+) -> None:
+    source = write_stage_bundles(tmp_path / "source", _evidence()).resume
+    assert source is not None
+    with ZipFile(source) as archive:
+        members = {name: archive.read(name) for name in archive.namelist()}
+
+    traversal = tmp_path / "traversal.zip"
+    manifest = json.loads(members["manifest.json"])
+    manifest["members"]["../escape"] = sha256(b"escape").hexdigest()
+    with ZipFile(traversal, "w", compression=ZIP_DEFLATED) as archive:
+        for name, value in members.items():
+            if name == "manifest.json":
+                value = json.dumps(manifest, sort_keys=True, separators=(",", ":")).encode()
+            archive.writestr(name, value)
+        archive.writestr("../escape", b"escape")
+    with pytest.raises(ArtifactError, match="unsafe"):
+        verify_resume_bundle(traversal)
+
+    symlink = tmp_path / "symlink.zip"
+    with ZipFile(symlink, "w", compression=ZIP_DEFLATED) as archive:
+        for name, value in members.items():
+            if name == "stage_state.json":
+                info = ZipInfo(name)
+                info.create_system = 3
+                info.external_attr = 0o120777 << 16
+                archive.writestr(info, value)
+            else:
+                archive.writestr(name, value)
+    with pytest.raises(ArtifactError, match="regular file"):
+        verify_resume_bundle(symlink)
+
+
+def test_verifier_enforces_member_and_total_uncompressed_size_limits(
+    tmp_path: Path, monkeypatch
+) -> None:
+    evidence = StageEvidence(
+        "P",
+        "4" * 64,
+        None,
+        {"state/stage_state.json": b"review"},
+        {"one.bin": b"12345678", "two.bin": b"abcdefgh"},
+    )
+    monkeypatch.setattr(artifact_module, "_MAX_ZIP_MEMBER_UNCOMPRESSED_BYTES", 7)
+    with pytest.raises(ArtifactError, match="member exceeds"):
+        write_stage_bundles(tmp_path / "member", evidence)
+
+    monkeypatch.setattr(artifact_module, "_MAX_ZIP_MEMBER_UNCOMPRESSED_BYTES", 1000)
+    monkeypatch.setattr(artifact_module, "_MAX_ZIP_TOTAL_UNCOMPRESSED_BYTES", 100)
+    with pytest.raises(ArtifactError, match="total uncompressed"):
+        write_stage_bundles(tmp_path / "total", evidence)

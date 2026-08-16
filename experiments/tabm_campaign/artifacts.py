@@ -17,6 +17,10 @@ class ArtifactError(ValueError):
 
 _VERSIONS = ("A", "B", "C", "D", "P")
 _ZIP_TIMESTAMP = (2026, 1, 1, 0, 0, 0)
+_MAX_ZIP_MEMBER_UNCOMPRESSED_BYTES = 2 * 1024 * 1024 * 1024
+_MAX_ZIP_TOTAL_UNCOMPRESSED_BYTES = 8 * 1024 * 1024 * 1024
+_MAX_ZIP_COMPRESSION_RATIO = 200.0
+_MIN_RATIO_CHECK_BYTES = 64 * 1024
 
 
 @dataclass(frozen=True)
@@ -80,6 +84,46 @@ def _validate_member_name(name: str) -> None:
         or name == "manifest.json"
     ):
         raise ArtifactError(f"unsafe or reserved ZIP member path: {name}")
+
+
+def _validate_archive_entries(archive: ZipFile, *, label: str) -> list[str]:
+    """Reject unsafe ZIP metadata before any member is decompressed."""
+
+    names = archive.namelist()
+    if len(names) != len(set(names)) or "manifest.json" not in names:
+        raise ArtifactError(f"{label} bundle has duplicate members or no manifest")
+    total_size = 0
+    for info in archive.infolist():
+        if info.filename != "manifest.json":
+            _validate_member_name(info.filename)
+        mode = info.external_attr >> 16
+        file_type = stat.S_IFMT(mode)
+        if (
+            info.is_dir()
+            or stat.S_ISLNK(mode)
+            or file_type not in {0, stat.S_IFREG}
+        ):
+            raise ArtifactError(
+                f"{label} bundle member is not a regular file: {info.filename}"
+            )
+        if info.file_size > _MAX_ZIP_MEMBER_UNCOMPRESSED_BYTES:
+            raise ArtifactError(
+                f"{label} bundle member exceeds the uncompressed size limit: {info.filename}"
+            )
+        total_size += info.file_size
+        if total_size > _MAX_ZIP_TOTAL_UNCOMPRESSED_BYTES:
+            raise ArtifactError(f"{label} bundle exceeds the total uncompressed size limit")
+        if info.file_size >= _MIN_RATIO_CHECK_BYTES:
+            if info.compress_size == 0:
+                raise ArtifactError(
+                    f"{label} bundle member has an invalid compression ratio: {info.filename}"
+                )
+            ratio = info.file_size / info.compress_size
+            if ratio > _MAX_ZIP_COMPRESSION_RATIO:
+                raise ArtifactError(
+                    f"{label} bundle member exceeds the compression ratio limit: {info.filename}"
+                )
+    return names
 
 
 def _validate_evidence(evidence: StageEvidence) -> None:
@@ -192,15 +236,7 @@ def verify_review_bundle(path: str | Path) -> VerifiedReview:
     bundle = Path(path)
     try:
         with ZipFile(bundle, "r") as archive:
-            names = archive.namelist()
-            if len(names) != len(set(names)) or "manifest.json" not in names:
-                raise ArtifactError("review bundle has duplicate members or no manifest")
-            for name in names:
-                if name != "manifest.json":
-                    _validate_member_name(name)
-                info = archive.getinfo(name)
-                if info.is_dir() or stat.S_ISLNK(info.external_attr >> 16):
-                    raise ArtifactError(f"review bundle member is not a regular file: {name}")
+            names = _validate_archive_entries(archive, label="review")
             manifest_bytes = archive.read("manifest.json")
             manifest = json.loads(manifest_bytes)
             if manifest.get("schema_version") != 1:
@@ -240,15 +276,7 @@ def verify_resume_bundle(path: str | Path) -> VerifiedResume:
     bundle = Path(path)
     try:
         with ZipFile(bundle, "r") as archive:
-            names = archive.namelist()
-            if len(names) != len(set(names)) or "manifest.json" not in names:
-                raise ArtifactError("resume bundle has duplicate members or no manifest")
-            for name in names:
-                if name != "manifest.json":
-                    _validate_member_name(name)
-                info = archive.getinfo(name)
-                if info.is_dir() or stat.S_ISLNK(info.external_attr >> 16):
-                    raise ArtifactError(f"resume bundle member is not a regular file: {name}")
+            names = _validate_archive_entries(archive, label="resume")
             manifest_bytes = archive.read("manifest.json")
             manifest = json.loads(manifest_bytes)
             if manifest.get("schema_version") != 1:
