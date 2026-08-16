@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import asdict, replace
+from hashlib import sha256
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -76,6 +77,52 @@ def _valid_batch(**changes: object) -> SimpleNamespace:
     return SimpleNamespace(**values)
 
 
+def _write_reusable_completed(
+    job_dir: Path,
+    *,
+    job: CampaignJob | None = None,
+    candidate_id: str | None = None,
+    status: str = "completed",
+    resource_evidence: dict[str, object] | None = None,
+) -> tuple[CampaignJob, CampaignJobResult]:
+    job = _job() if job is None else job
+    job_dir.mkdir(parents=True, exist_ok=True)
+    checkpoint = job_dir / "best_checkpoint.pt"
+    checkpoint.write_bytes(b"best")
+    predictions = job_dir / "predictions.csv"
+    predictions.write_text(
+        "row_id,target,probability,game_type_segment\n"
+        "v1,0,0.25,R\n"
+        "v2,1,0.75,F\n",
+        encoding="utf-8",
+    )
+    worker_module._atomic_json(
+        job_dir / "checkpoint_meta.json",
+        {
+            "candidate_id": job.candidate_id,
+            "epoch": 1,
+            "checkpoint": "checkpoint.pt",
+            "checkpoint_binding": {"config_sha256": worker_module._job_sha(job)},
+        },
+    )
+    result = CampaignJobResult(
+        candidate_id or job.candidate_id,
+        status,
+        0.2,
+        1,
+        2,
+        checkpoint,
+        predictions,
+        {} if resource_evidence is None else resource_evidence,
+        None,
+    )
+    worker_module._atomic_json(
+        job_dir / "worker_result.json",
+        worker_module._serialize_result(result, worker_module._job_sha(job)),
+    )
+    return job, result
+
+
 def test_preprocessing_spec_supports_baseline_and_one_bundle() -> None:
     assert worker_module._preprocessing_spec(_job()) == PreprocessingSpec(
         "dl_standard", ("hand_matchup",)
@@ -128,6 +175,72 @@ def test_feature_bundle_changes_job_and_cache_provenance() -> None:
         **cache_kwargs, spec=worker_module._preprocessing_spec(bundled)
     )
     assert baseline_cache.digest() != bundled_cache.digest()
+
+
+def test_baseline_job_payload_and_sha_match_legacy_schema_exactly() -> None:
+    baseline = _job()
+    legacy_payload = {
+        "candidate_id": "candidate",
+        "capacity": "p2",
+        "k": 32,
+        "width": 512,
+        "blocks": 4,
+        "dropout": 0.1,
+        "num_embedding": "piecewise_linear",
+        "loss": "bce",
+        "scheduler": "plateau",
+        "learning_rate": 0.0006,
+        "seed": 42,
+        "train_end_year": 2023,
+        "valid_year": 2024,
+        "sample_mode": "proxy",
+        "max_epochs": 8,
+        "min_epochs": 3,
+        "patience": 3,
+    }
+
+    assert worker_module._job_payload(baseline) == legacy_payload
+    assert worker_module._job_sha(baseline) == (
+        "1d9139cb6ebb44148da20b1e209161344c964dfe6b41bd2dbae89d232a2d6fd3"
+    )
+
+    bundled = replace(baseline, feature_bundle="count_context")
+    assert worker_module._job_payload(bundled) == {
+        **legacy_payload,
+        "feature_bundle": "count_context",
+    }
+    assert worker_module._job_sha(bundled) != worker_module._job_sha(baseline)
+
+
+def test_resource_identity_evidence_contains_all_code_provenance() -> None:
+    identity = SimpleNamespace(
+        preprocessing_code_sha256="1" * 64,
+        row_feature_code_sha256="2" * 64,
+        feature_code_sha256="3" * 64,
+        digest=lambda: "4" * 64,
+    )
+
+    evidence = worker_module._resource_identity_evidence(
+        _job(feature_bundle="count_context"),
+        PreprocessingSpec("dl_standard", ("hand_matchup", "count_context")),
+        identity,
+        cache_reused=True,
+        training_source_sha256="5" * 64,
+    )
+
+    assert evidence == {
+        "cache_digest": "4" * 64,
+        "cache_reused": True,
+        "feature_bundle": "count_context",
+        "preprocessing_spec": {
+            "profile": "dl_standard",
+            "components": ("hand_matchup", "count_context"),
+        },
+        "preprocessing_code_sha256": "1" * 64,
+        "row_feature_code_sha256": "2" * 64,
+        "feature_code_sha256": "3" * 64,
+        "training_source_sha256": "5" * 64,
+    }
 
 
 def test_prediction_evidence_uses_fit_only_ids_and_preserves_alignment() -> None:
@@ -339,7 +452,10 @@ def test_deadline_grace_result_is_durable_but_resumed_next_session(
         "P", (job,), output_dir, gpu_count=1, job_deadline=100.0
     )
 
+    written_job = json.loads((job_dir / "job.json").read_text())
     payload = json.loads((job_dir / "worker_result.json").read_text())
+    assert written_job == worker_module._job_payload(job)
+    assert "feature_bundle" not in written_job
     assert first[0].status == "inconclusive"
     assert payload["status"] == "inconclusive"
     assert payload["job_sha256"] == worker_module._job_sha(job)
@@ -365,20 +481,8 @@ def test_deadline_grace_result_is_durable_but_resumed_next_session(
 def test_completed_result_with_checkpoint_is_reused(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    job = _job()
-    job_dir = tmp_path / "jobs" / job.candidate_id
-    job_dir.mkdir(parents=True)
-    checkpoint = job_dir / "best_checkpoint.pt"
-    checkpoint.write_bytes(b"best")
-    predictions = job_dir / "predictions.csv"
-    predictions.write_text("row_id,target,probability\nv1,0,0.25\n", encoding="utf-8")
-    completed = CampaignJobResult(
-        job.candidate_id, "completed", 0.2, 1, 2, checkpoint, predictions, {}, None
-    )
-    worker_module._atomic_json(
-        job_dir / "worker_result.json",
-        worker_module._serialize_result(completed, worker_module._job_sha(job)),
-    )
+    job_dir = tmp_path / "jobs" / "candidate"
+    job, completed = _write_reusable_completed(job_dir)
 
     def unexpected_popen(*args: object, **kwargs: object) -> None:
         raise AssertionError("completed job should not restart")
@@ -390,7 +494,7 @@ def test_completed_result_with_checkpoint_is_reused(
     )
 
     assert result[0].status == "completed"
-    assert result[0].checkpoint == checkpoint
+    assert result[0].checkpoint == completed.checkpoint
 
 
 @pytest.mark.parametrize("prediction_state", ["none", "missing"])
@@ -412,6 +516,126 @@ def test_completed_result_without_prediction_evidence_is_not_reused(
     )
 
     assert worker_module.SubprocessCampaignRuntime._read_result(job_dir, job) is None
+
+
+def test_completed_result_rejects_external_checkpoint(tmp_path: Path) -> None:
+    job_dir = tmp_path / "job"
+    job, result = _write_reusable_completed(job_dir)
+    external = tmp_path / "external.pt"
+    external.write_bytes(b"best")
+    foreign = replace(result, checkpoint=external)
+    worker_module._atomic_json(
+        job_dir / "worker_result.json",
+        worker_module._serialize_result(foreign, worker_module._job_sha(job)),
+    )
+
+    assert worker_module.SubprocessCampaignRuntime._read_result(job_dir, job) is None
+
+
+@pytest.mark.parametrize(
+    "csv_text",
+    [
+        "",
+        "row_id,target\nv1,0\n",
+        "row_id,target,probability\nv1,2,0.5\n",
+        "row_id,target,probability\nv1,0,nan\n",
+        "row_id,target,probability\nv1,0,1.5\n",
+        "row_id,target,probability\nv1,0,0.2\nv1,1,0.8\n",
+    ],
+)
+def test_completed_result_rejects_malformed_prediction_csv(
+    tmp_path: Path, csv_text: str
+) -> None:
+    job_dir = tmp_path / "job"
+    job, result = _write_reusable_completed(job_dir)
+    assert result.predictions_path is not None
+    result.predictions_path.write_text(csv_text, encoding="utf-8")
+
+    assert worker_module.SubprocessCampaignRuntime._read_result(job_dir, job) is None
+
+
+def test_worker_result_rejects_candidate_mismatch_and_invalid_status(
+    tmp_path: Path,
+) -> None:
+    job_dir = tmp_path / "job"
+    job, result = _write_reusable_completed(job_dir)
+    mismatch = replace(result, candidate_id="foreign")
+    worker_module._atomic_json(
+        job_dir / "worker_result.json",
+        worker_module._serialize_result(mismatch, worker_module._job_sha(job)),
+    )
+    assert (
+        worker_module.SubprocessCampaignRuntime._read_worker_result(job_dir, job)
+        is None
+    )
+
+    invalid = replace(result, status="running")
+    worker_module._atomic_json(
+        job_dir / "worker_result.json",
+        worker_module._serialize_result(invalid, worker_module._job_sha(job)),
+    )
+    assert (
+        worker_module.SubprocessCampaignRuntime._read_worker_result(job_dir, job)
+        is None
+    )
+
+
+@pytest.mark.parametrize("meta_defect", ["candidate", "binding"])
+def test_completed_result_rejects_bad_checkpoint_metadata(
+    tmp_path: Path, meta_defect: str
+) -> None:
+    job_dir = tmp_path / "job"
+    job, _ = _write_reusable_completed(job_dir)
+    meta = json.loads((job_dir / "checkpoint_meta.json").read_text())
+    if meta_defect == "candidate":
+        meta["candidate_id"] = "foreign"
+    else:
+        meta["checkpoint_binding"]["config_sha256"] = "0" * 64
+    worker_module._atomic_json(job_dir / "checkpoint_meta.json", meta)
+
+    assert worker_module.SubprocessCampaignRuntime._read_result(job_dir, job) is None
+
+
+def test_completed_result_rejects_symlink_artifact(tmp_path: Path) -> None:
+    job_dir = tmp_path / "job"
+    job, result = _write_reusable_completed(job_dir)
+    assert result.checkpoint is not None
+    external = tmp_path / "external.pt"
+    external.write_bytes(b"best")
+    result.checkpoint.unlink()
+    result.checkpoint.symlink_to(external)
+
+    assert worker_module.SubprocessCampaignRuntime._read_result(job_dir, job) is None
+
+
+def test_completed_result_rejects_artifact_hash_mismatch(tmp_path: Path) -> None:
+    job_dir = tmp_path / "job"
+    job, result = _write_reusable_completed(
+        job_dir,
+        resource_evidence={
+            "checkpoint_sha256": "0" * 64,
+            "predictions_sha256": "1" * 64,
+        },
+    )
+    assert result.checkpoint is not None and result.predictions_path is not None
+
+    assert worker_module.SubprocessCampaignRuntime._read_result(job_dir, job) is None
+
+
+def test_artifact_hash_evidence_records_checkpoint_and_predictions(
+    tmp_path: Path,
+) -> None:
+    checkpoint = tmp_path / "best_checkpoint.pt"
+    predictions = tmp_path / "predictions.csv"
+    checkpoint.write_bytes(b"best")
+    predictions.write_bytes(b"row_id,target,probability\nv1,0,0.25\n")
+
+    evidence = worker_module._artifact_hash_evidence(checkpoint, predictions)
+
+    assert evidence == {
+        "checkpoint_sha256": sha256(b"best").hexdigest(),
+        "predictions_sha256": sha256(predictions.read_bytes()).hexdigest(),
+    }
 
 
 def test_jobs_not_started_before_deadline_have_no_worker_result(

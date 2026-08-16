@@ -47,8 +47,15 @@ def _atomic_json(path: Path, value: object) -> None:
     os.replace(temporary, path)
 
 
+def _job_payload(job: CampaignJob) -> dict[str, object]:
+    payload = asdict(job)
+    if job.feature_bundle is None:
+        payload.pop("feature_bundle")
+    return payload
+
+
 def _job_sha(job: CampaignJob) -> str:
-    return sha256(_canonical_json(asdict(job))).hexdigest()
+    return sha256(_canonical_json(_job_payload(job))).hexdigest()
 
 
 def _job_from_json(path: Path) -> CampaignJob:
@@ -68,6 +75,39 @@ def _preprocessing_spec(job: CampaignJob) -> PreprocessingSpec:
 
 def _training_status(budget_reached: bool) -> str:
     return "inconclusive" if budget_reached else "completed"
+
+
+def _file_sha256(path: Path) -> str:
+    return sha256(path.read_bytes()).hexdigest()
+
+
+def _artifact_hash_evidence(
+    checkpoint: Path, predictions: Path
+) -> dict[str, str]:
+    return {
+        "checkpoint_sha256": _file_sha256(checkpoint),
+        "predictions_sha256": _file_sha256(predictions),
+    }
+
+
+def _resource_identity_evidence(
+    job: CampaignJob,
+    normalized_spec: PreprocessingSpec,
+    cache_identity,
+    *,
+    cache_reused: bool,
+    training_source_sha256: str,
+) -> dict[str, object]:
+    return {
+        "cache_digest": cache_identity.digest(),
+        "cache_reused": cache_reused,
+        "feature_bundle": job.feature_bundle,
+        "preprocessing_spec": asdict(normalized_spec),
+        "preprocessing_code_sha256": cache_identity.preprocessing_code_sha256,
+        "row_feature_code_sha256": cache_identity.row_feature_code_sha256,
+        "feature_code_sha256": cache_identity.feature_code_sha256,
+        "training_source_sha256": training_source_sha256,
+    }
 
 
 def _prediction_evidence_frame(
@@ -218,6 +258,82 @@ def _result_from_payload(payload: Mapping[str, object]) -> CampaignJobResult:
     )
 
 
+def _canonical_regular_file(actual: Path | None, expected: Path) -> bool:
+    if actual is None or actual.is_symlink() or expected.is_symlink():
+        return False
+    if not actual.is_file() or not expected.is_file():
+        return False
+    return actual.resolve() == expected.resolve()
+
+
+def _valid_prediction_evidence(path: Path) -> bool:
+    import numpy as np
+    import pandas as pd
+
+    try:
+        frame = pd.read_csv(path)
+    except (OSError, UnicodeError, ValueError):
+        return False
+    required = {"row_id", "target", "probability"}
+    if frame.empty or not required.issubset(frame.columns):
+        return False
+    row_id = frame["row_id"]
+    if (
+        row_id.isna().any()
+        or row_id.astype("string").str.strip().eq("").any()
+        or row_id.astype("string").duplicated().any()
+    ):
+        return False
+    target = pd.to_numeric(frame["target"], errors="coerce").to_numpy(
+        dtype="float64"
+    )
+    probability = pd.to_numeric(
+        frame["probability"], errors="coerce"
+    ).to_numpy(dtype="float64")
+    return bool(
+        np.isfinite(target).all()
+        and np.isin(target, (0.0, 1.0)).all()
+        and np.isfinite(probability).all()
+        and ((probability >= 0.0) & (probability <= 1.0)).all()
+    )
+
+
+def _valid_completed_result(
+    job_dir: Path, job: CampaignJob, result: CampaignJobResult
+) -> bool:
+    checkpoint = job_dir / "best_checkpoint.pt"
+    predictions = job_dir / "predictions.csv"
+    meta_path = job_dir / "checkpoint_meta.json"
+    if not _canonical_regular_file(result.checkpoint, checkpoint):
+        return False
+    if not _canonical_regular_file(result.predictions_path, predictions):
+        return False
+    if meta_path.is_symlink() or not meta_path.is_file():
+        return False
+    try:
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return False
+    if not isinstance(meta, dict) or meta.get("candidate_id") != job.candidate_id:
+        return False
+    binding = meta.get("checkpoint_binding")
+    if not isinstance(binding, dict) or binding.get("config_sha256") != _job_sha(job):
+        return False
+    if not _valid_prediction_evidence(predictions):
+        return False
+    expected_hashes = {
+        "checkpoint_sha256": checkpoint,
+        "predictions_sha256": predictions,
+    }
+    for key, artifact in expected_hashes.items():
+        if key in result.resource_evidence and (
+            not isinstance(result.resource_evidence[key], str)
+            or result.resource_evidence[key] != _file_sha256(artifact)
+        ):
+            return False
+    return True
+
+
 def run_worker(job: CampaignJob, data_dir: Path, output_dir: Path, cache_root: Path, deadline: float) -> CampaignJobResult:
     preprocessing_spec = _preprocessing_spec(job)
     normalized_spec = normalize_spec(preprocessing_spec)
@@ -271,6 +387,11 @@ def run_worker(job: CampaignJob, data_dir: Path, output_dir: Path, cache_root: P
         except (ImportError, NameError):
             pass
 
+    independent_dl_root = Path(__file__).resolve().parents[1] / "independent_dl"
+    training_source_sha256 = sha256(
+        (independent_dl_root / "training.py").read_bytes()
+        + (independent_dl_root / "models" / "tabm.py").read_bytes()
+    ).hexdigest()
     model_config = {
         "architecture": "tabm",
         "k": job.k,
@@ -304,12 +425,13 @@ def run_worker(job: CampaignJob, data_dir: Path, output_dir: Path, cache_root: P
         return evidence
 
     preflight_result = preflight(job.candidate_id, architecture_probe)
-    preprocessing_evidence = {
-        "cache_digest": cache.identity.digest(),
-        "cache_reused": cache.reused,
-        "feature_bundle": job.feature_bundle,
-        "preprocessing_spec": asdict(normalized_spec),
-    }
+    preprocessing_evidence = _resource_identity_evidence(
+        job,
+        normalized_spec,
+        cache.identity,
+        cache_reused=cache.reused,
+        training_source_sha256=training_source_sha256,
+    )
     if preflight_result.status != "completed":
         return CampaignJobResult(
             job.candidate_id,
@@ -349,10 +471,7 @@ def run_worker(job: CampaignJob, data_dir: Path, output_dir: Path, cache_root: P
         checkpoint_binding={
             "config_sha256": _job_sha(job),
             "cache_sha256": cache.identity.digest(),
-            "training_source_sha256": sha256(
-                (Path(__file__).resolve().parents[1] / "independent_dl" / "training.py").read_bytes()
-                + (Path(__file__).resolve().parents[1] / "independent_dl" / "models" / "tabm.py").read_bytes()
-            ).hexdigest(),
+            "training_source_sha256": training_source_sha256,
         },
         model_metadata=cache.model_metadata,
     )
@@ -375,6 +494,7 @@ def run_worker(job: CampaignJob, data_dir: Path, output_dir: Path, cache_root: P
         {
             "wall_seconds": time.monotonic() - started,
             **preprocessing_evidence,
+            **_artifact_hash_evidence(trained.checkpoint, predictions_path),
             "preflight": asdict(preflight_result),
         }
     )
@@ -405,15 +525,21 @@ class SubprocessCampaignRuntime:
         result_path = path / "worker_result.json"
         if not result_path.is_file():
             return None
-        payload = json.loads(result_path.read_text(encoding="utf-8"))
+        try:
+            payload = json.loads(result_path.read_text(encoding="utf-8"))
+            if not isinstance(payload, dict):
+                return None
+            result = _result_from_payload(payload)
+        except (OSError, UnicodeError, TypeError, ValueError, KeyError):
+            return None
         if payload.get("job_sha256") != _job_sha(job):
             return None
-        result = _result_from_payload(payload)
-        if result.status == "completed" and not (
-            result.checkpoint is not None
-            and result.checkpoint.is_file()
-            and result.predictions_path is not None
-            and result.predictions_path.is_file()
+        if result.candidate_id != job.candidate_id:
+            return None
+        if result.status not in {"completed", "inconclusive", "failed"}:
+            return None
+        if result.status == "completed" and not _valid_completed_result(
+            path, job, result
         ):
             return None
         return result
@@ -505,7 +631,7 @@ class SubprocessCampaignRuntime:
                 if stale_result_path.is_file():
                     stale_result_path.unlink()
                 job_path = job_dir / "job.json"
-                _atomic_json(job_path, asdict(job))
+                _atomic_json(job_path, _job_payload(job))
                 env = _worker_environment(gpu)
                 command = [
                     self.python,
