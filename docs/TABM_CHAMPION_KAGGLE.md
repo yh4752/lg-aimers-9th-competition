@@ -83,3 +83,63 @@ review ZIP은 지표, 예측, 자원 사용량, 선택 판정과 규칙 검증 �
 제출 파일이 아니다. 파일명을 바꾸거나 제출 ZIP으로 사용하지 않는다. 실제 제출물
 생성은 후보 승인, 모든 게이트, 현재 아티팩트 해시와 당일 공식 규칙 재확인이 끝난 뒤
 별도 작업으로만 진행한다.
+
+## Stage C seed 앙상블 감사
+
+Stage C가 끝난 뒤에는 GPU를 다시 쓰지 않고, 이미 저장된 시간 전이 OOF 예측으로
+seed 단독 모델과 두 가지 고정 평균을 비교한다. 이 단계는 새 모델을 학습하거나 평가
+데이터를 읽지 않는다. `2022->2023`, `2023->2024` 두 fold의 train OOF만 사용하므로
+평가 데이터 독립 원칙도 유지된다.
+
+입력은 다음 두 파일이다.
+
+- 완료된 `tabm_search_stage_C_review_bundle.zip`
+- 공식 데이터의 `train.csv`
+
+Colab에서 받은 `tabm_colab_stage_C_delivery.zip`은 바깥 전달 묶음이다. 그 안의
+`tabm_search_stage_C_review_bundle.zip`을 먼저 꺼내서 사용한다. 현재 검증 완료된 바깥
+묶음의 SHA-256은
+`f054e8e819d1053299fef4749a32e923db9136e20fc9c12cda79bbc7ef8c484a`, 그 안의
+review SHA-256은
+`461c4422cebdc7383577ad6c53b044bfe3d9d15b667383e454591135e4242d2c`이다. 중간에
+끝난 예전 Stage C review는 완료되지 않은 seed가 있어 감사 도구가 거부한다.
+
+저장소 루트에서 아래 명령을 실행한다. CPU 기준 약 2~5분, RAM 약 1~2GB를 예상하며
+GPU는 필요 없다.
+
+```bash
+python tools/audit_tabm_seed_ensemble.py \
+  --stage-c-review /path/to/tabm_search_stage_C_review_bundle.zip \
+  --train-csv /path/to/train.csv \
+  --output-dir artifacts/tabm_seed_ensemble_audit
+```
+
+비교 대상과 판정 기준은 코드 실행 전에 고정되어 있다.
+
+- 단독 seed: `42`, `2026`, `3407`
+- 평균: `42+3407`, `42+2026+3407`
+- 승격 조건: 두 fold 가중 Brier 개선이 `0.00003` 이상이고 어느 fold도
+  `0.00003`보다 많이 나빠지지 않을 것
+
+성공하면 검토 전용 `tabm_seed_ensemble_audit_review.zip` 하나가 생기며 마지막 로그는
+아래와 같다. 같은 입력과 같은 출력 폴더로 다시 실행하면 파일을 덮어쓰지 않고
+`reused=true`로 끝난다.
+
+```text
+TABM_ENSEMBLE_AUDIT_SUCCESS decision=promoted|keep_single review=... sha256=... reused=false|true
+```
+
+결과 ZIP은 원본 경로, row ID, 예측 행을 담지 않고 판정과 원본·설정 해시만 담는다.
+다음 명령으로 전달 전 무결성을 다시 확인할 수 있다.
+
+```bash
+python tools/audit_tabm_seed_ensemble.py \
+  --verify-review artifacts/tabm_seed_ensemble_audit/tabm_seed_ensemble_audit_review.zip
+```
+
+```text
+TABM_ENSEMBLE_REVIEW_VERIFIED decision=promoted|keep_single review=... sha256=...
+```
+
+오류는 `TABM_ENSEMBLE_AUDIT_ERROR stage=...`로 시작한다. 이 ZIP도 제출물이 아니며,
+감사 결과가 `promoted`일 때만 선택된 평균을 다음 전체 학습 설계에 반영한다.

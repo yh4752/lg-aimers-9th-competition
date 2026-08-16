@@ -49,6 +49,8 @@ Expected: 계약 파일과 loader가 없어 실패한다.
 
 ```json
 {
+  "schema_version": 1,
+  "stage_c_campaign_config_sha256": "5fd4845eeed60e311911e30fdff4090b511bf7485c6ee0540c6458a525b8e9c3",
   "folds": ["2022->2023", "2023->2024"],
   "seeds": [42, 2026, 3407],
   "ensembles": {

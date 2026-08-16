@@ -14,6 +14,7 @@ import pandas as pd
 _CONTRACT_PATH = Path(__file__).with_name("score_improvement_contract.json")
 _TOP_LEVEL_KEYS = {
     "schema_version",
+    "stage_c_campaign_config_sha256",
     "folds",
     "seeds",
     "ensembles",
@@ -26,6 +27,7 @@ _ENSEMBLE_SEEDS = {
     "mean_all": frozenset(_SEEDS),
     "mean_42_3407": frozenset((42, 3407)),
 }
+_STAGE_C_CANDIDATE_PREFIX = "c_final__a__p2__piecewise_linear__bce__plateau__s42"
 
 
 class EnsembleAuditError(ValueError):
@@ -34,6 +36,7 @@ class EnsembleAuditError(ValueError):
 
 @dataclass(frozen=True)
 class EnsembleAuditContract:
+    stage_c_campaign_config_sha256: str
     folds: tuple[str, ...]
     seeds: tuple[int, ...]
     ensembles: Mapping[str, Mapping[int, float]]
@@ -97,6 +100,16 @@ def _finite_number(value: object, label: str) -> float:
     if not math.isfinite(result):
         raise EnsembleAuditError(f"{label} must be finite")
     return result
+
+
+def _sha256(value: object, label: str) -> str:
+    if (
+        not isinstance(value, str)
+        or len(value) != 64
+        or any(character not in "0123456789abcdef" for character in value)
+    ):
+        raise EnsembleAuditError(f"{label} must be a lowercase SHA-256")
+    return value
 
 
 def _ordered_tuple(
@@ -180,12 +193,27 @@ def load_ensemble_contract(path: str | Path | None = None) -> EnsembleAuditContr
         raise EnsembleAuditError("gates must be non-negative")
 
     return EnsembleAuditContract(
+        stage_c_campaign_config_sha256=_sha256(
+            payload["stage_c_campaign_config_sha256"],
+            "stage_c_campaign_config_sha256",
+        ),
         folds=folds,  # type: ignore[arg-type]
         seeds=seeds,  # type: ignore[arg-type]
         ensembles=_ensembles(payload["ensembles"], seeds),  # type: ignore[arg-type]
         min_weighted_gain=min_gain,
         max_fold_degrade=max_degrade,
     )
+
+
+def prediction_member(fold: str, seed: int) -> str:
+    if fold not in _FOLDS or seed not in _SEEDS:
+        raise EnsembleAuditError(f"unknown fold or seed: {fold}/{seed}")
+    train_year, validation_year = fold.split("->")
+    candidate_id = (
+        f"{_STAGE_C_CANDIDATE_PREFIX}__s{seed}"
+        f"__tr{train_year}__va{validation_year}"
+    )
+    return f"predictions/{candidate_id}.csv"
 
 
 def _required_columns(frame: pd.DataFrame, required: set[str], label: str) -> None:

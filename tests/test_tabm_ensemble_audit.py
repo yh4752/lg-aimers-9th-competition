@@ -1,7 +1,11 @@
 from __future__ import annotations
 
 import json
+from hashlib import sha256
 from pathlib import Path
+import subprocess
+import sys
+from zipfile import ZIP_DEFLATED, ZipFile
 
 import numpy as np
 import pandas as pd
@@ -11,7 +15,9 @@ from experiments.tabm_campaign.ensemble_audit import (
     EnsembleAuditError,
     audit_prediction_frames,
     load_ensemble_contract,
+    prediction_member,
 )
+from experiments.tabm_campaign.artifacts import StageEvidence, write_stage_bundles
 
 
 CONTRACT_PATH = (
@@ -46,6 +52,10 @@ def test_contract_seals_folds_seeds_ensembles_and_gates() -> None:
     }
     assert contract.min_weighted_gain == pytest.approx(0.00003)
     assert contract.max_fold_degrade == pytest.approx(0.00003)
+    assert (
+        contract.stage_c_campaign_config_sha256
+        == "5fd4845eeed60e311911e30fdff4090b511bf7485c6ee0540c6458a525b8e9c3"
+    )
 
     with pytest.raises(TypeError):
         contract.ensembles["mean_all"][42] = 1.0  # type: ignore[index]
@@ -231,3 +241,172 @@ def test_audit_rejects_duplicate_or_incomplete_truth() -> None:
     incomplete = _truth().iloc[:-1].copy()
     with pytest.raises(EnsembleAuditError, match="row_id set differs"):
         audit_prediction_frames(load_ensemble_contract(), _prediction_frames(), incomplete)
+
+
+def _stage_c_review(tmp_path: Path) -> Path:
+    frames = _prediction_frames()
+    predictions: dict[str, bytes] = {}
+    metrics: list[dict[str, object]] = []
+    for (fold, seed), frame in frames.items():
+        name = prediction_member(fold, seed)
+        predictions[name] = frame.to_csv(index=False).encode("utf-8")
+        metrics.append(
+            {
+                "candidate_id": Path(name).stem,
+                "status": "completed",
+                "brier": 0.1,
+                "predictions": "predictions.csv",
+            }
+        )
+    evidence = StageEvidence(
+        version="C",
+        campaign_config_sha256=(
+            "5fd4845eeed60e311911e30fdff4090b511bf7485c6ee0540c6458a525b8e9c3"
+        ),
+        prior_manifest_sha256="2" * 64,
+        review_members={
+            **predictions,
+            "metrics/job_results.json": json.dumps(metrics).encode("utf-8"),
+            "logs/stage.log": b"completed\n",
+        },
+        resume_members={"stage_state.json": b"{}"},
+    )
+    return write_stage_bundles(tmp_path / "source", evidence).review
+
+
+def test_cli_writes_minimal_hash_bound_review_and_verifies_it(tmp_path: Path) -> None:
+    stage_c_review = _stage_c_review(tmp_path)
+    train_csv = tmp_path / "train.csv"
+    _truth().to_csv(train_csv, index=False)
+    output_dir = tmp_path / "output"
+    tool = Path(__file__).parents[1] / "tools" / "audit_tabm_seed_ensemble.py"
+
+    completed = subprocess.run(
+        [
+            sys.executable,
+            str(tool),
+            "--stage-c-review",
+            str(stage_c_review),
+            "--train-csv",
+            str(train_csv),
+            "--output-dir",
+            str(output_dir),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert "TABM_ENSEMBLE_AUDIT_SUCCESS decision=promoted" in completed.stdout
+    review = output_dir / "tabm_seed_ensemble_audit_review.zip"
+    with ZipFile(review) as archive:
+        assert set(archive.namelist()) == {
+            "audit.log",
+            "ensemble_audit.json",
+            "manifest.json",
+        }
+        manifest = json.loads(archive.read("manifest.json"))
+        audit = json.loads(archive.read("ensemble_audit.json"))
+        all_bytes = b"".join(archive.read(name) for name in archive.namelist())
+
+    assert manifest["artifact_kind"] == "tabm_seed_ensemble_audit_review"
+    assert manifest["source_review_sha256"] == sha256(stage_c_review.read_bytes()).hexdigest()
+    assert manifest["train_csv_sha256"] == sha256(train_csv.read_bytes()).hexdigest()
+    assert set(manifest["prediction_members"]) == {
+        prediction_member(fold, seed)
+        for fold in ("2022->2023", "2023->2024")
+        for seed in (42, 2026, 3407)
+    }
+    assert audit["decision"] == "promoted"
+    assert audit["selected_candidate_id"] == "mean_42_3407"
+    assert str(stage_c_review).encode() not in all_bytes
+    assert str(train_csv).encode() not in all_bytes
+    assert b"TRAIN_2023_1" not in all_bytes
+
+    verified = subprocess.run(
+        [sys.executable, str(tool), "--verify-review", str(review)],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert verified.returncode == 0, verified.stderr
+    assert "TABM_ENSEMBLE_REVIEW_VERIFIED decision=promoted" in verified.stdout
+
+    tampered = tmp_path / "tampered_review.zip"
+    with ZipFile(review) as source, ZipFile(
+        tampered, "w", compression=ZIP_DEFLATED
+    ) as destination:
+        for name in source.namelist():
+            value = source.read(name)
+            if name == "audit.log":
+                value += b"tampered\n"
+            destination.writestr(name, value)
+    rejected = subprocess.run(
+        [sys.executable, str(tool), "--verify-review", str(tampered)],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert rejected.returncode == 1
+    assert "TABM_ENSEMBLE_AUDIT_ERROR stage=verify" in rejected.stdout
+    assert "SHA-256" in rejected.stdout
+
+
+def test_cli_is_rerun_safe_and_rejects_incomplete_stage_c_jobs(tmp_path: Path) -> None:
+    stage_c_review = _stage_c_review(tmp_path)
+    train_csv = tmp_path / "train.csv"
+    _truth().to_csv(train_csv, index=False)
+    output_dir = tmp_path / "output"
+    tool = Path(__file__).parents[1] / "tools" / "audit_tabm_seed_ensemble.py"
+    command = [
+        sys.executable,
+        str(tool),
+        "--stage-c-review",
+        str(stage_c_review),
+        "--train-csv",
+        str(train_csv),
+        "--output-dir",
+        str(output_dir),
+    ]
+
+    first = subprocess.run(command, check=False, capture_output=True, text=True)
+    second = subprocess.run(command, check=False, capture_output=True, text=True)
+    assert first.returncode == second.returncode == 0
+    assert "reused=true" in second.stdout
+
+    with ZipFile(stage_c_review) as archive:
+        members = {name: archive.read(name) for name in archive.namelist() if name != "manifest.json"}
+    metrics = json.loads(members["metrics/job_results.json"])
+    metrics[0]["status"] = "inconclusive"
+    members["metrics/job_results.json"] = json.dumps(metrics).encode("utf-8")
+    incomplete = write_stage_bundles(
+        tmp_path / "incomplete",
+        StageEvidence(
+            version="C",
+            campaign_config_sha256=(
+                "5fd4845eeed60e311911e30fdff4090b511bf7485c6ee0540c6458a525b8e9c3"
+            ),
+            prior_manifest_sha256="2" * 64,
+            review_members=members,
+            resume_members={"stage_state.json": b"{}"},
+        ),
+    ).review
+    rejected = subprocess.run(
+        [
+            sys.executable,
+            str(tool),
+            "--stage-c-review",
+            str(incomplete),
+            "--train-csv",
+            str(train_csv),
+            "--output-dir",
+            str(tmp_path / "rejected"),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert rejected.returncode == 1
+    assert "TABM_ENSEMBLE_AUDIT_ERROR stage=input" in rejected.stdout
+    assert "completed" in rejected.stdout
