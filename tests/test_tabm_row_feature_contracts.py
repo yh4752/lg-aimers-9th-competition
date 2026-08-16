@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import FrozenInstanceError
 from pathlib import Path
 from typing import Any
@@ -135,6 +136,15 @@ def test_baseline_matches_sealed_champion_candidate() -> None:
         candidate["loss"],
         candidate["scheduler"],
         candidate["learning_rate"],
+    )
+    assert (
+        contract.baseline.weight_decay,
+        contract.baseline.effective_batch_size,
+        contract.baseline.micro_batch_size,
+    ) == (
+        champion["optimization"]["weight_decay"],
+        champion["optimization"]["effective_batch_size"],
+        champion["optimization"]["micro_batch_size"],
     )
 
 
@@ -351,6 +361,94 @@ def test_contract_rejects_missing_nonregular_and_symlink_paths(tmp_path: Path) -
     link.symlink_to(target)
     with pytest.raises(RowFeatureContractError, match="symlink"):
         load_row_feature_proxy_contract(link)
+
+
+def test_contract_rejects_symlinked_ancestor_directory(tmp_path: Path) -> None:
+    real_directory = tmp_path / "real"
+    real_directory.mkdir()
+    contract = real_directory / "contract.json"
+    contract.write_bytes(CONFIG.read_bytes())
+    linked_directory = tmp_path / "linked"
+    linked_directory.symlink_to(real_directory, target_is_directory=True)
+
+    with pytest.raises(RowFeatureContractError, match="symlink"):
+        load_row_feature_proxy_contract(linked_directory / "contract.json")
+
+
+def test_contract_rejects_leaf_swapped_to_symlink_before_secure_open(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = tmp_path / "contract.json"
+    target.write_bytes(CONFIG.read_bytes())
+    original = tmp_path / "original.json"
+    real_open = os.open
+    swapped = False
+
+    def swap_then_open(path: str, flags: int, *args: Any, **kwargs: Any) -> int:
+        nonlocal swapped
+        if not swapped and path == target.name and kwargs.get("dir_fd") is not None:
+            target.rename(original)
+            target.symlink_to(original)
+            swapped = True
+        return real_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(os, "open", swap_then_open)
+
+    with pytest.raises(RowFeatureContractError, match="symlink"):
+        load_row_feature_proxy_contract(target)
+    assert swapped is True
+
+
+def test_contract_secure_reader_accepts_regular_relative_and_absolute_paths(
+    tmp_path: Path,
+) -> None:
+    contract = tmp_path / "contract.json"
+    contract.write_bytes(CONFIG.read_bytes())
+    relative = Path(os.path.relpath(contract, Path.cwd()))
+
+    assert load_row_feature_proxy_contract(relative).stage == "P"
+    assert load_row_feature_proxy_contract(contract.absolute()).stage == "P"
+
+
+def test_contract_secure_reader_closes_every_opened_descriptor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    contract = tmp_path / "contract.json"
+    contract.write_bytes(CONFIG.read_bytes())
+    real_open = os.open
+    real_close = os.close
+    opened: set[int] = set()
+    observed_open_count = 0
+
+    def tracking_open(path: str, flags: int, *args: Any, **kwargs: Any) -> int:
+        nonlocal observed_open_count
+        descriptor = real_open(path, flags, *args, **kwargs)
+        opened.add(descriptor)
+        observed_open_count += 1
+        return descriptor
+
+    def tracking_close(descriptor: int) -> None:
+        try:
+            real_close(descriptor)
+        finally:
+            opened.discard(descriptor)
+
+    monkeypatch.setattr(os, "open", tracking_open)
+    monkeypatch.setattr(os, "close", tracking_close)
+
+    assert load_row_feature_proxy_contract(contract).stage == "P"
+    assert observed_open_count >= 2
+    assert opened == set()
+
+
+@pytest.mark.parametrize("capability", ["O_NOFOLLOW", "O_DIRECTORY"])
+def test_contract_rejects_unavailable_secure_traversal_capability(
+    monkeypatch: pytest.MonkeyPatch, capability: str
+) -> None:
+    monkeypatch.delattr(os, capability)
+
+    with pytest.raises(RowFeatureContractError, match="secure path traversal"):
+        load_row_feature_proxy_contract(CONFIG)
 
 
 def test_contract_rejects_malformed_json_and_utf8(tmp_path: Path) -> None:

@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import errno
 import json
 import math
+import os
 import re
 import stat
 from dataclasses import dataclass
@@ -119,6 +121,8 @@ _TRAINING_KEYS = {"max_epochs", "min_epochs", "patience"}
 _BUDGET_KEYS = {"wall_seconds", "new_job_guard_seconds"}
 _PROXY_GATE_KEYS = {"mean_delta_max", "worst_seed_delta_max"}
 
+_NATIVE_OS_OPEN = os.open
+
 _OFFICIAL_TRAIN_SHA256 = (
     "d2081186b458b49f60b082be480c273135833e15ba59a76d033af28bcf8763ff"
 )
@@ -218,22 +222,129 @@ def _require_string_tuple(value: Any, label: str) -> tuple[str, ...]:
     return result
 
 
+def _secure_open_flags() -> tuple[int, int]:
+    no_follow = getattr(os, "O_NOFOLLOW", None)
+    directory = getattr(os, "O_DIRECTORY", None)
+    if (
+        not isinstance(no_follow, int)
+        or no_follow == 0
+        or not isinstance(directory, int)
+        or directory == 0
+        or _NATIVE_OS_OPEN not in os.supports_dir_fd
+    ):
+        raise RowFeatureContractError(
+            "secure path traversal is unavailable on this platform"
+        )
+    return os.O_RDONLY | directory | no_follow, os.O_RDONLY | no_follow
+
+
+def _is_symlink_component(directory_fd: int, component: str) -> bool:
+    try:
+        component_stat = os.stat(
+            component,
+            dir_fd=directory_fd,
+            follow_symlinks=False,
+        )
+    except (NotImplementedError, OSError, TypeError):
+        return False
+    return stat.S_ISLNK(component_stat.st_mode)
+
+
+def _raise_open_error(
+    error: OSError,
+    contract_path: str,
+    *,
+    directory_fd: int | None = None,
+    component: str | None = None,
+) -> None:
+    if error.errno == errno.ENOENT:
+        message = f"contract file is missing: {contract_path}"
+    elif error.errno == errno.ELOOP or (
+        directory_fd is not None
+        and component is not None
+        and _is_symlink_component(directory_fd, component)
+    ):
+        message = f"contract path must not contain a symlink: {contract_path}"
+    elif error.errno == errno.ENOTDIR:
+        message = f"contract path contains a non-directory component: {contract_path}"
+    elif error.errno in {errno.EACCES, errno.EPERM}:
+        message = f"permission denied while opening contract file: {contract_path}"
+    else:
+        message = f"cannot securely open contract file: {contract_path}"
+    raise RowFeatureContractError(message) from error
+
+
 def _read_contract_bytes(path: str | Path) -> bytes:
-    contract_path = Path(path)
+    parent_flags, leaf_flags = _secure_open_flags()
     try:
-        mode = contract_path.lstat().st_mode
-    except FileNotFoundError as error:
-        raise RowFeatureContractError(f"contract file is missing: {contract_path}") from error
-    except OSError as error:
-        raise RowFeatureContractError(f"cannot inspect contract file: {error}") from error
-    if stat.S_ISLNK(mode):
-        raise RowFeatureContractError("contract file must not be a symlink")
-    if not stat.S_ISREG(mode):
+        lexical_path = os.path.abspath(os.fspath(path))
+    except (OSError, TypeError, ValueError) as error:
+        raise RowFeatureContractError("contract path is invalid") from error
+    parent_path, leaf = os.path.split(lexical_path)
+    if not leaf:
         raise RowFeatureContractError("contract file must be a regular file")
+
+    open_descriptors: set[int] = set()
+    directory_fd: int | None = None
+    leaf_fd: int | None = None
     try:
-        return contract_path.read_bytes()
+        try:
+            directory_fd = os.open(os.sep, parent_flags)
+        except OSError as error:
+            _raise_open_error(error, lexical_path)
+        open_descriptors.add(directory_fd)
+
+        components = tuple(part for part in parent_path.split(os.sep) if part)
+        for component in components:
+            try:
+                next_fd = os.open(
+                    component,
+                    parent_flags,
+                    dir_fd=directory_fd,
+                )
+            except OSError as error:
+                _raise_open_error(
+                    error,
+                    lexical_path,
+                    directory_fd=directory_fd,
+                    component=component,
+                )
+            open_descriptors.add(next_fd)
+            os.close(directory_fd)
+            open_descriptors.remove(directory_fd)
+            directory_fd = next_fd
+
+        try:
+            leaf_fd = os.open(leaf, leaf_flags, dir_fd=directory_fd)
+        except OSError as error:
+            _raise_open_error(
+                error,
+                lexical_path,
+                directory_fd=directory_fd,
+                component=leaf,
+            )
+        open_descriptors.add(leaf_fd)
+        if not stat.S_ISREG(os.fstat(leaf_fd).st_mode):
+            raise RowFeatureContractError("contract file must be a regular file")
+
+        chunks: list[bytes] = []
+        while True:
+            chunk = os.read(leaf_fd, 1024 * 1024)
+            if not chunk:
+                return b"".join(chunks)
+            chunks.append(chunk)
     except OSError as error:
-        raise RowFeatureContractError(f"cannot read contract file: {error}") from error
+        raise RowFeatureContractError(
+            f"cannot securely read contract file: {lexical_path}"
+        ) from error
+    finally:
+        for descriptor in tuple(open_descriptors):
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+            finally:
+                open_descriptors.discard(descriptor)
 
 
 def _parse_contract(data: bytes) -> dict[str, Any]:
