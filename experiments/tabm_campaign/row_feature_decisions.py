@@ -54,6 +54,16 @@ class ProxyDecision:
 
 _ALLOWED_STATUSES = {"completed", "inconclusive", "failed"}
 _EXPECTED_SEEDS = (42, 3407)
+_DECISION_STATUSES = {"complete", "incomplete", "blocked"}
+_CLASSIFICATIONS = {"strong", "safety", "rejected"}
+_MISSING_LABELS = (
+    *(f"baseline@{seed}" for seed in _EXPECTED_SEEDS),
+    *(
+        f"{bundle}@{seed}"
+        for bundle in ROW_FEATURE_BUNDLES
+        for seed in _EXPECTED_SEEDS
+    ),
+)
 
 
 def _validate_contract(contract: RowFeatureProxyContract) -> None:
@@ -99,6 +109,13 @@ def _empty_decision(status: str, reason: str) -> ProxyDecision:
     return ProxyDecision(status, reason, (), (), (), ())
 
 
+def _at_most(value: float, limit: float) -> bool:
+    return value <= limit or (
+        value > limit
+        and math.isclose(value, limit, rel_tol=0.0, abs_tol=1e-15)
+    )
+
+
 def decide_proxy_survivors(
     metrics: Iterable[ProxyMetric],
     contract: RowFeatureProxyContract,
@@ -126,11 +143,26 @@ def decide_proxy_survivors(
             )
         evidence[pair] = (metric.status, brier)
 
+    if any(
+        evidence.get((None, seed), (None, None))[0] == "failed"
+        for seed in contract.seeds
+    ):
+        return _empty_decision("blocked", "baseline_failed")
+
+    failed_bundles = tuple(
+        bundle
+        for bundle in contract.feature_bundles
+        if any(
+            evidence.get((bundle, seed), (None, None))[0] == "failed"
+            for seed in contract.seeds
+        )
+    )
     expected = [
         *((None, seed) for seed in contract.seeds),
         *(
             (bundle, seed)
             for bundle in contract.feature_bundles
+            if bundle not in failed_bundles
             for seed in contract.seeds
         ),
     ]
@@ -143,14 +175,13 @@ def decide_proxy_survivors(
         return _empty_decision("incomplete", f"missing_evidence:{','.join(labels)}")
 
     baseline_statuses = [evidence[(None, seed)][0] for seed in contract.seeds]
-    if "failed" in baseline_statuses:
-        return _empty_decision("blocked", "baseline_failed")
     if "inconclusive" in baseline_statuses:
         return _empty_decision("incomplete", "baseline_inconclusive")
 
     inconclusive_bundles = [
         bundle
         for bundle in contract.feature_bundles
+        if bundle not in failed_bundles
         if any(
             evidence[(bundle, seed)][0] == "inconclusive"
             for seed in contract.seeds
@@ -162,11 +193,6 @@ def decide_proxy_survivors(
             f"feature_inconclusive:{','.join(inconclusive_bundles)}",
         )
 
-    failed_bundles = tuple(
-        bundle
-        for bundle in contract.feature_bundles
-        if any(evidence[(bundle, seed)][0] == "failed" for seed in contract.seeds)
-    )
     computed: list[tuple[str, Mapping[int, float], float, float, bool]] = []
     for bundle in contract.feature_bundles:
         if bundle in failed_bundles:
@@ -178,8 +204,11 @@ def decide_proxy_survivors(
         mean_delta = sum(seed_delta.values()) / len(seed_delta)
         worst_seed_delta = max(seed_delta.values())
         strong = (
-            mean_delta <= contract.proxy_gate.mean_delta_max
-            and worst_seed_delta <= contract.proxy_gate.worst_seed_delta_max
+            _at_most(mean_delta, contract.proxy_gate.mean_delta_max)
+            and _at_most(
+                worst_seed_delta,
+                contract.proxy_gate.worst_seed_delta_max,
+            )
         )
         computed.append(
             (bundle, seed_delta, mean_delta, worst_seed_delta, strong)
@@ -219,9 +248,132 @@ def decide_proxy_survivors(
     )
 
 
+def _ordered_bundle_tuple(value: Any, label: str) -> tuple[str, ...]:
+    if type(value) is not tuple:
+        raise RowFeatureDecisionError(f"decision {label} must be a tuple")
+    if any(
+        type(bundle) is not str or bundle not in ROW_FEATURE_BUNDLES
+        for bundle in value
+    ):
+        raise RowFeatureDecisionError(f"decision {label} contains an unknown bundle")
+    positions = [ROW_FEATURE_BUNDLES.index(bundle) for bundle in value]
+    if len(set(value)) != len(value) or positions != sorted(positions):
+        raise RowFeatureDecisionError(
+            f"decision {label} must be unique and in sealed bundle order"
+        )
+    return value
+
+
+def _is_ordered_subset(values: tuple[str, ...], expected: tuple[str, ...]) -> bool:
+    if not values or len(set(values)) != len(values):
+        return False
+    try:
+        positions = [expected.index(value) for value in values]
+    except ValueError:
+        return False
+    return positions == sorted(positions)
+
+
+def _valid_incomplete_reason(reason: str | None) -> bool:
+    if reason == "baseline_inconclusive":
+        return True
+    if type(reason) is not str:
+        return False
+    if reason.startswith("feature_inconclusive:"):
+        values = tuple(reason.removeprefix("feature_inconclusive:").split(","))
+        return _is_ordered_subset(values, ROW_FEATURE_BUNDLES)
+    if reason.startswith("missing_evidence:"):
+        values = tuple(reason.removeprefix("missing_evidence:").split(","))
+        return _is_ordered_subset(values, _MISSING_LABELS)
+    return False
+
+
+def _validate_proxy_decision(decision: ProxyDecision) -> None:
+    if type(decision) is not ProxyDecision:
+        raise RowFeatureDecisionError("decision must be exactly a ProxyDecision")
+    if type(decision.status) is not str or decision.status not in _DECISION_STATUSES:
+        raise RowFeatureDecisionError("decision status is invalid")
+    if decision.reason is not None and type(decision.reason) is not str:
+        raise RowFeatureDecisionError("decision reason must be a string or None")
+
+    strong = _ordered_bundle_tuple(decision.strong_survivors, "strong_survivors")
+    safety = _ordered_bundle_tuple(decision.safety_survivors, "safety_survivors")
+    failed = _ordered_bundle_tuple(decision.failed_bundles, "failed_bundles")
+    if type(decision.rows) is not tuple:
+        raise RowFeatureDecisionError("decision rows must be a tuple")
+    if set(strong) & set(safety) or set(strong) & set(failed) or set(safety) & set(failed):
+        raise RowFeatureDecisionError("decision bundle groups must be disjoint")
+    if len(safety) > 1:
+        raise RowFeatureDecisionError("decision may have at most one safety survivor")
+
+    if decision.status != "complete":
+        if decision.status == "blocked":
+            reason_valid = decision.reason == "baseline_failed"
+        else:
+            reason_valid = _valid_incomplete_reason(decision.reason)
+        if not reason_valid:
+            raise RowFeatureDecisionError("decision reason contradicts its status")
+        if strong or safety or failed or decision.rows:
+            raise RowFeatureDecisionError(
+                "non-complete decision must not contain bundles or rows"
+            )
+        return
+
+    if decision.reason is not None:
+        raise RowFeatureDecisionError("complete decision reason must be None")
+    expected_rows = tuple(
+        bundle for bundle in ROW_FEATURE_BUNDLES if bundle not in failed
+    )
+    actual_rows: list[str] = []
+    for row in decision.rows:
+        if type(row) is not BundleDecision:
+            raise RowFeatureDecisionError("every decision row must be exactly BundleDecision")
+        if type(row.bundle) is not str or row.bundle not in ROW_FEATURE_BUNDLES:
+            raise RowFeatureDecisionError("decision row contains an unknown bundle")
+        if not isinstance(row.seed_delta, Mapping):
+            raise RowFeatureDecisionError("decision row seed_delta must be a mapping")
+        seeds = tuple(row.seed_delta)
+        if (
+            any(type(seed) is not int for seed in seeds)
+            or seeds != _EXPECTED_SEEDS
+        ):
+            raise RowFeatureDecisionError(
+                "decision row seed_delta keys must equal (42, 3407) in order"
+            )
+        numbers = (
+            *(row.seed_delta[seed] for seed in _EXPECTED_SEEDS),
+            row.mean_delta,
+            row.worst_seed_delta,
+        )
+        if any(type(value) is not float or not math.isfinite(value) for value in numbers):
+            raise RowFeatureDecisionError("decision row numbers must be finite floats")
+        if (
+            type(row.classification) is not str
+            or row.classification not in _CLASSIFICATIONS
+        ):
+            raise RowFeatureDecisionError("decision row classification is invalid")
+        expected_classification = (
+            "strong"
+            if row.bundle in strong
+            else "safety"
+            if row.bundle in safety
+            else "rejected"
+        )
+        if row.classification != expected_classification:
+            raise RowFeatureDecisionError(
+                "decision row classification contradicts survivor tuples"
+            )
+        actual_rows.append(row.bundle)
+    if tuple(actual_rows) != expected_rows:
+        raise RowFeatureDecisionError(
+            "decision rows must cover nonfailed bundles in sealed order"
+        )
+
+
 def proxy_decision_payload(decision: ProxyDecision) -> dict[str, Any]:
     """Return a fresh JSON-ready representation of a proxy decision."""
 
+    _validate_proxy_decision(decision)
     return {
         "status": decision.status,
         "reason": decision.reason,

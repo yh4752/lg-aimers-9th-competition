@@ -40,6 +40,14 @@ class _ProxyMetricSubclass(ProxyMetric):
     pass
 
 
+class _BundleDecisionSubclass(BundleDecision):
+    pass
+
+
+class _ProxyDecisionSubclass(ProxyDecision):
+    pass
+
+
 def _evidence(
     *,
     baseline: dict[int, float] | None = None,
@@ -88,6 +96,36 @@ def test_strong_gate_boundary_equality_passes() -> None:
     assert row.worst_seed_delta == gate.worst_seed_delta_max
     assert row.classification == "strong"
     assert BUNDLES[0] in decision.strong_survivors
+
+
+def test_common_baseline_mean_boundary_representation_noise_passes() -> None:
+    decision = decide_proxy_survivors(
+        _evidence(
+            baseline={seed: 0.3 for seed in SEEDS},
+            deltas={BUNDLES[0]: (-0.00003, -0.00003)},
+        ),
+        CONTRACT,
+    )
+
+    row = _row(decision, BUNDLES[0])
+    assert row.mean_delta > CONTRACT.proxy_gate.mean_delta_max
+    assert row.mean_delta - CONTRACT.proxy_gate.mean_delta_max < 1e-15
+    assert row.classification == "strong"
+
+
+def test_worst_seed_boundary_representation_noise_passes() -> None:
+    decision = decide_proxy_survivors(
+        _evidence(
+            baseline={SEEDS[0]: 0.00003, SEEDS[1]: 0.3},
+            deltas={BUNDLES[0]: (0.00005, -0.00012)},
+        ),
+        CONTRACT,
+    )
+
+    row = _row(decision, BUNDLES[0])
+    assert row.worst_seed_delta > CONTRACT.proxy_gate.worst_seed_delta_max
+    assert row.worst_seed_delta - CONTRACT.proxy_gate.worst_seed_delta_max < 1e-15
+    assert row.classification == "strong"
 
 
 def test_just_outside_mean_gate_is_not_strong() -> None:
@@ -227,6 +265,94 @@ def test_baseline_failure_on_either_seed_blocks(seed: int) -> None:
         failed_bundles=(),
         rows=(),
     )
+
+
+def test_observed_baseline_failure_blocks_even_when_grid_is_missing() -> None:
+    decision = decide_proxy_survivors(
+        [ProxyMetric(None, SEEDS[0], "failed", None)],
+        CONTRACT,
+    )
+
+    assert decision == ProxyDecision(
+        status="blocked",
+        reason="baseline_failed",
+        strong_survivors=(),
+        safety_survivors=(),
+        failed_bundles=(),
+        rows=(),
+    )
+
+
+def test_failed_bundle_ignores_its_inconclusive_counterpart() -> None:
+    failed = BUNDLES[0]
+    independent = BUNDLES[1]
+    decision = decide_proxy_survivors(
+        _evidence(
+            statuses={
+                (failed, SEEDS[0]): "failed",
+                (failed, SEEDS[1]): "inconclusive",
+            },
+            deltas={independent: (-0.0001, -0.0001)},
+        ),
+        CONTRACT,
+    )
+
+    assert decision.status == "complete"
+    assert decision.failed_bundles == (failed,)
+    assert decision.strong_survivors == (independent,)
+    assert failed not in {row.bundle for row in decision.rows}
+
+
+def test_failed_bundle_ignores_its_missing_counterpart() -> None:
+    failed = BUNDLES[0]
+    metrics = [
+        metric
+        for metric in _evidence(statuses={(failed, SEEDS[0]): "failed"})
+        if (metric.bundle, metric.seed) != (failed, SEEDS[1])
+    ]
+
+    decision = decide_proxy_survivors(metrics, CONTRACT)
+
+    assert decision.status == "complete"
+    assert decision.failed_bundles == (failed,)
+    assert [row.bundle for row in decision.rows] == list(BUNDLES[1:])
+
+
+def test_failed_bundle_does_not_hide_unrelated_missing_evidence() -> None:
+    failed = BUNDLES[0]
+    independent = BUNDLES[1]
+    missing_seed = SEEDS[1]
+    metrics = [
+        metric
+        for metric in _evidence(statuses={(failed, SEEDS[0]): "failed"})
+        if (metric.bundle, metric.seed) != (independent, missing_seed)
+    ]
+
+    decision = decide_proxy_survivors(metrics, CONTRACT)
+
+    assert decision.status == "incomplete"
+    assert decision.reason == f"missing_evidence:{independent}@{missing_seed}"
+    assert decision.strong_survivors == decision.safety_survivors == ()
+    assert decision.rows == ()
+
+
+def test_failed_bundle_does_not_hide_unrelated_inconclusive_evidence() -> None:
+    failed = BUNDLES[0]
+    independent = BUNDLES[1]
+    decision = decide_proxy_survivors(
+        _evidence(
+            statuses={
+                (failed, SEEDS[0]): "failed",
+                (independent, SEEDS[1]): "inconclusive",
+            }
+        ),
+        CONTRACT,
+    )
+
+    assert decision.status == "incomplete"
+    assert decision.reason == f"feature_inconclusive:{independent}"
+    assert decision.strong_survivors == decision.safety_survivors == ()
+    assert decision.rows == ()
 
 
 def test_missing_pair_returns_incomplete_and_names_the_evidence() -> None:
@@ -456,23 +582,136 @@ def test_payload_is_plain_json_ready_shape_and_json_is_canonical() -> None:
     assert _row(decision, BUNDLES[0]).seed_delta[SEEDS[0]] != 123.0
 
 
-def test_json_rejects_nonfinite_values() -> None:
-    invalid = ProxyDecision(
-        status="complete",
-        reason=None,
-        strong_survivors=(),
-        safety_survivors=(),
-        failed_bundles=(),
-        rows=(
-            BundleDecision(
-                BUNDLES[0],
-                {SEEDS[0]: float("nan")},
-                0.0,
-                0.0,
-                "rejected",
-            ),
-        ),
+def test_serializers_accept_normal_decision_states_deterministically() -> None:
+    complete = decide_proxy_survivors(_evidence(), CONTRACT)
+    missing = decide_proxy_survivors(_evidence()[:-1], CONTRACT)
+    blocked = decide_proxy_survivors(
+        [ProxyMetric(None, SEEDS[0], "failed", None)], CONTRACT
     )
 
-    with pytest.raises(ValueError, match="JSON compliant"):
-        proxy_decision_json(invalid)
+    for decision in (complete, missing, blocked):
+        assert proxy_decision_payload(decision) == proxy_decision_payload(decision)
+        assert proxy_decision_json(decision) == proxy_decision_json(decision)
+
+
+def _invalid_serialization_decision(case: str) -> ProxyDecision:
+    valid = decide_proxy_survivors(
+        _evidence(deltas={BUNDLES[0]: (-0.0001, -0.0001)}), CONTRACT
+    )
+    first = valid.rows[0]
+    if case == "decision_subclass":
+        return _ProxyDecisionSubclass(
+            valid.status,
+            valid.reason,
+            valid.strong_survivors,
+            valid.safety_survivors,
+            valid.failed_bundles,
+            valid.rows,
+        )
+    if case == "row_subclass":
+        row = _BundleDecisionSubclass(
+            first.bundle,
+            first.seed_delta,
+            first.mean_delta,
+            first.worst_seed_delta,
+            first.classification,
+        )
+        return replace(valid, rows=(row, *valid.rows[1:]))
+    if case == "unknown_status":
+        return replace(valid, status="unknown")
+    if case == "unknown_incomplete_reason":
+        return ProxyDecision(
+            "incomplete",
+            "missing_evidence:not-a-bundle@999",
+            (),
+            (),
+            (),
+            (),
+        )
+    if case == "unordered_incomplete_reason":
+        return ProxyDecision(
+            "incomplete",
+            f"feature_inconclusive:{BUNDLES[1]},{BUNDLES[0]}",
+            (),
+            (),
+            (),
+            (),
+        )
+    if case == "unknown_bundle":
+        return replace(valid, rows=(replace(first, bundle="unknown"), *valid.rows[1:]))
+    if case == "unknown_classification":
+        row = replace(first, classification="maybe")
+        return replace(valid, rows=(row, *valid.rows[1:]))
+    if case == "missing_seed":
+        row = replace(first, seed_delta={SEEDS[0]: first.seed_delta[SEEDS[0]]})
+        return replace(valid, rows=(row, *valid.rows[1:]))
+    if case == "reversed_seeds":
+        row = replace(
+            first,
+            seed_delta={seed: first.seed_delta[seed] for seed in reversed(SEEDS)},
+        )
+        return replace(valid, rows=(row, *valid.rows[1:]))
+    if case == "extra_seed":
+        row = replace(first, seed_delta={**first.seed_delta, 999: 0.0})
+        return replace(valid, rows=(row, *valid.rows[1:]))
+    if case == "nonfinite_seed_delta":
+        row = replace(
+            first,
+            seed_delta={SEEDS[0]: float("nan"), SEEDS[1]: 0.0},
+        )
+        return replace(valid, rows=(row, *valid.rows[1:]))
+    if case == "nonfinite_mean":
+        row = replace(first, mean_delta=float("inf"))
+        return replace(valid, rows=(row, *valid.rows[1:]))
+    if case == "nonfinite_worst":
+        row = replace(first, worst_seed_delta=float("-inf"))
+        return replace(valid, rows=(row, *valid.rows[1:]))
+    if case == "contradictory_survivors":
+        return replace(valid, strong_survivors=())
+    if case == "duplicate_survivors":
+        return replace(valid, strong_survivors=(BUNDLES[0], BUNDLES[0]))
+    if case == "unordered_survivors":
+        return replace(valid, strong_survivors=(BUNDLES[1], BUNDLES[0]))
+    if case == "overlapping_survivors":
+        return replace(valid, safety_survivors=(BUNDLES[0],))
+    if case == "contradictory_rows":
+        return replace(valid, rows=valid.rows[:-1])
+    if case == "nontuple_rows":
+        return replace(valid, rows=list(valid.rows))  # type: ignore[arg-type]
+    if case == "contradictory_reason":
+        return replace(valid, reason="complete_but_has_reason")
+    raise AssertionError(f"unknown test case: {case}")
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "decision_subclass",
+        "row_subclass",
+        "unknown_status",
+        "unknown_incomplete_reason",
+        "unordered_incomplete_reason",
+        "unknown_bundle",
+        "unknown_classification",
+        "missing_seed",
+        "reversed_seeds",
+        "extra_seed",
+        "nonfinite_seed_delta",
+        "nonfinite_mean",
+        "nonfinite_worst",
+        "contradictory_survivors",
+        "duplicate_survivors",
+        "unordered_survivors",
+        "overlapping_survivors",
+        "contradictory_rows",
+        "nontuple_rows",
+        "contradictory_reason",
+    ],
+)
+@pytest.mark.parametrize("serializer", [proxy_decision_payload, proxy_decision_json])
+def test_serializers_reject_invalid_manual_decisions(
+    case: str,
+    serializer: Any,
+) -> None:
+    with pytest.raises(RowFeatureDecisionError):
+        serializer(_invalid_serialization_decision(case))
