@@ -83,6 +83,12 @@ _STATUSES = {"completed", "failed", "inconclusive"}
 _DISPOSITIONS = {"completed", "failed", "inconclusive", "not_started"}
 _SHA_RE = re.compile(r"[0-9a-f]{64}")
 _GENERATED_CELL_PREFIXES = ("COLAB_", "KAGGLE_")
+_MAX_CHECKPOINT_BYTES = 1024 * 1024 * 1024
+_MAX_CONTROL_MEMBER_BYTES = 16 * 1024 * 1024
+_MAX_TABM_NUMERIC_FEATURES = 4096
+_MAX_TABM_PIECEWISE_BINS = 48
+_MAX_TABM_INPUT_WIDTH = 131_072
+_MAX_TABM_TENSOR_NUMEL = 50_000_000
 
 
 def _canonical_json(value: object) -> bytes:
@@ -410,6 +416,12 @@ def _validate_checkpoint_payload(
     """Safely validate the restart state written by independent_dl.training."""
 
     try:
+        checkpoint_size = path.stat().st_size
+    except OSError as error:
+        raise RowFeatureProxyError("checkpoint payload size cannot be read") from error
+    if checkpoint_size <= 0 or checkpoint_size > _MAX_CHECKPOINT_BYTES:
+        raise RowFeatureProxyError("checkpoint payload exceeds the Stage P size limit")
+    try:
         import numpy as np
         import torch
 
@@ -473,6 +485,10 @@ def _validate_checkpoint_payload(
         raise RowFeatureProxyError(
             "checkpoint payload candidate, epoch, best epoch, or metric is invalid"
         )
+    if result.brier is not None and not math.isclose(
+        result.brier, best_brier, rel_tol=1e-12, abs_tol=1e-12
+    ):
+        raise RowFeatureProxyError("checkpoint best Brier differs from result Brier")
     validation_curve = payload["validation_curve"]
     time_curve = payload["validation_time_curve"]
     curves_valid = (
@@ -521,17 +537,9 @@ def _validate_checkpoint_payload(
         or not math.isclose(elapsed, time_curve[-1][1], rel_tol=0.0, abs_tol=1e-9)
     ):
         raise RowFeatureProxyError("checkpoint best metric does not match its curve")
-    if (
-        not isinstance(payload["scaler"], Mapping)
-        or type(payload["python_rng"]) is not tuple
-        or type(payload["numpy_rng"]) is not tuple
-        or not isinstance(payload["torch_rng"], torch.Tensor)
-        or type(payload["cuda_rng"]) is not list
-        or payload["adapter_state"] != meta_adapter_state
-    ):
-        raise RowFeatureProxyError(
-            "checkpoint scaler, RNG, or adapter state is invalid"
-        )
+    _validate_restart_state(payload, torch, np)
+    if payload["adapter_state"] != meta_adapter_state:
+        raise RowFeatureProxyError("checkpoint adapter state is invalid")
     parameter_tensors = _validate_tabm_model_state(job, payload["model"], torch)
     optimizer_lr = _validate_adamw_state(
         job,
@@ -562,8 +570,81 @@ def _valid_finite_tensor(
         and value.device.type == "cpu"
         and value.dtype == dtype
         and tuple(value.shape) == shape
+        and value.numel() <= _MAX_TABM_TENSOR_NUMEL
+        and value.is_contiguous()
+        and value.untyped_storage().nbytes() >= value.numel() * value.element_size()
         and bool(torch.isfinite(value).all().item())
     )
+
+
+def _validate_restart_state(payload: Mapping[str, object], torch: object, np: object) -> None:
+    scaler = payload["scaler"]
+    scaler_keys = {
+        "scale",
+        "growth_factor",
+        "backoff_factor",
+        "growth_interval",
+        "_growth_tracker",
+    }
+    if (
+        not isinstance(scaler, Mapping)
+        or set(scaler) != scaler_keys
+        or type(scaler["scale"]) is not float
+        or not math.isfinite(scaler["scale"])
+        or scaler["scale"] <= 0.0
+        or scaler["growth_factor"] != 2.0
+        or scaler["backoff_factor"] != 0.5
+        or scaler["growth_interval"] != 2000
+        or type(scaler["_growth_tracker"]) is not int
+        or not 0 <= scaler["_growth_tracker"] < 2000
+    ):
+        raise RowFeatureProxyError("checkpoint AMP scaler state is invalid")
+    try:
+        isolated_scaler = torch.amp.GradScaler("cpu", enabled=True)
+        isolated_scaler.load_state_dict(dict(scaler))
+    except Exception as error:
+        raise RowFeatureProxyError("checkpoint AMP scaler cannot be restored") from error
+    try:
+        import random
+
+        random.Random().setstate(payload["python_rng"])
+        np.random.RandomState().set_state(payload["numpy_rng"])
+    except Exception as error:
+        raise RowFeatureProxyError("checkpoint Python or NumPy RNG cannot be restored") from error
+    torch_rng = payload["torch_rng"]
+    reference_rng = torch.Generator(device="cpu").get_state()
+    if (
+        not isinstance(torch_rng, torch.Tensor)
+        or torch_rng.device.type != "cpu"
+        or torch_rng.dtype != torch.uint8
+        or torch_rng.layout != torch.strided
+        or not torch_rng.is_contiguous()
+        or tuple(torch_rng.shape) != tuple(reference_rng.shape)
+        or torch_rng.untyped_storage().nbytes() < torch_rng.numel()
+    ):
+        raise RowFeatureProxyError("checkpoint Torch RNG state is invalid")
+    try:
+        torch.Generator(device="cpu").set_state(torch_rng)
+    except Exception as error:
+        raise RowFeatureProxyError("checkpoint Torch RNG cannot be restored") from error
+    cuda_rng = payload["cuda_rng"]
+    if (
+        type(cuda_rng) not in {list, tuple}
+        or len(cuda_rng) != 1
+        or any(
+            not isinstance(state, torch.Tensor)
+            or state.device.type != "cpu"
+            or state.dtype != torch.uint8
+            or state.layout != torch.strided
+            or state.ndim != 1
+            or state.numel() <= 0
+            or state.numel() > 1024 * 1024
+            or not state.is_contiguous()
+            or state.untyped_storage().nbytes() < state.numel()
+            for state in cuda_rng
+        )
+    ):
+        raise RowFeatureProxyError("checkpoint CUDA RNG state is invalid")
 
 
 def _validate_tabm_model_state(
@@ -571,7 +652,7 @@ def _validate_tabm_model_state(
     value: object,
     torch: object,
 ) -> tuple[object, ...]:
-    if not isinstance(value, Mapping):
+    if job.num_embedding != "piecewise_linear" or not isinstance(value, Mapping):
         raise RowFeatureProxyError("checkpoint TabM model state is invalid")
     state = value
     numeric_keys = {
@@ -613,7 +694,12 @@ def _validate_tabm_model_state(
     n_num = int(linear0.shape[0])
     n_bins = int(impl.shape[1])
     first_width = int(first_block.shape[1])
-    if first_width < n_num * 32:
+    if (
+        n_num > _MAX_TABM_NUMERIC_FEATURES
+        or n_bins > _MAX_TABM_PIECEWISE_BINS
+        or first_width > _MAX_TABM_INPUT_WIDTH
+        or first_width < n_num * 32
+    ):
         raise RowFeatureProxyError("checkpoint TabM input width is invalid")
 
     float_shapes = {
@@ -636,6 +722,8 @@ def _validate_tabm_model_state(
                 f"{prefix}.bias": (job.k, job.width),
             }
         )
+    if sum(math.prod(shape) for shape in float_shapes.values()) > _MAX_TABM_TENSOR_NUMEL:
+        raise RowFeatureProxyError("checkpoint TabM tensors exceed the size limit")
     if any(
         not _valid_finite_tensor(
             state[name], shape, torch, dtype=torch.float32
@@ -650,6 +738,8 @@ def _validate_tabm_model_state(
         or mask.device.type != "cpu"
         or mask.dtype != torch.bool
         or tuple(mask.shape) != (n_num, n_bins)
+        or not mask.is_contiguous()
+        or mask.untyped_storage().nbytes() < mask.numel()
     ):
         raise RowFeatureProxyError("checkpoint TabM embedding mask is invalid")
 
@@ -1209,6 +1299,69 @@ def _read_json_bytes(value: bytes, label: str) -> object:
         raise RowFeatureProxyError(f"{label} is not valid UTF-8 JSON") from error
 
 
+def _read_zip_control_member(
+    archive: ZipFile,
+    name: str,
+    expected_sha256: str,
+) -> bytes:
+    info = archive.getinfo(name)
+    if info.file_size > _MAX_CONTROL_MEMBER_BYTES:
+        raise RowFeatureProxyError(f"resume control member exceeds the size limit: {name}")
+    digest = sha256()
+    value = bytearray()
+    with archive.open(info, "r") as source:
+        while chunk := source.read(1024 * 1024):
+            value.extend(chunk)
+            digest.update(chunk)
+    if digest.hexdigest() != expected_sha256:
+        raise RowFeatureProxyError(f"resume member changed after verification: {name}")
+    return bytes(value)
+
+
+def _zip_member_sha256(archive: ZipFile, name: str) -> str:
+    digest = sha256()
+    with archive.open(name, "r") as source:
+        while chunk := source.read(1024 * 1024):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _atomic_restore_member(
+    archive: ZipFile,
+    name: str,
+    target: Path,
+    expected_sha256: str,
+) -> None:
+    info = archive.getinfo(name)
+    if name.endswith(("/checkpoint.pt", "/best_checkpoint.pt")) and (
+        info.file_size <= 0 or info.file_size > _MAX_CHECKPOINT_BYTES
+    ):
+        raise RowFeatureProxyError(f"resume checkpoint exceeds the size limit: {name}")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary = tempfile.mkstemp(
+        prefix=f".{target.name}-", dir=target.parent
+    )
+    try:
+        digest = sha256()
+        with archive.open(info, "r") as source, os.fdopen(descriptor, "wb") as output:
+            while chunk := source.read(1024 * 1024):
+                output.write(chunk)
+                digest.update(chunk)
+            output.flush()
+            os.fsync(output.fileno())
+        if digest.hexdigest() != expected_sha256:
+            raise RowFeatureProxyError(
+                f"resume member changed after verification: {name}"
+            )
+        os.replace(temporary, target)
+    except Exception:
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
+        raise
+
+
 def _load_local_state(
     state_path: Path,
     *,
@@ -1254,9 +1407,19 @@ def _restore_resume(
     jobs: tuple[CampaignJob, ...],
 ) -> tuple[dict[str, object], dict[str, dict[str, object]], str]:
     try:
+        with ZipFile(resume_path, "r") as archive:
+            _validate_archive_entries(archive, label="resume")
+            if any(
+                info.filename.endswith(("/checkpoint.pt", "/best_checkpoint.pt"))
+                and (info.file_size <= 0 or info.file_size > _MAX_CHECKPOINT_BYTES)
+                for info in archive.infolist()
+            ):
+                raise ArtifactError("resume checkpoint exceeds the Stage P size limit")
         verified = verify_resume_bundle(resume_path)
     except ArtifactError as error:
         raise RowFeatureProxyError(f"resume bundle is untrusted: {error}") from error
+    except Exception as error:
+        raise RowFeatureProxyError(f"resume bundle cannot be inspected: {error}") from error
     if verified.version != _VERSION or verified.campaign_config_sha256 != contract_sha:
         raise RowFeatureProxyError("resume version or contract SHA-256 differs")
     try:
@@ -1267,68 +1430,101 @@ def _restore_resume(
                 raise RowFeatureProxyError(
                     "resume member set changed after verification"
                 )
-            members: dict[str, bytes] = {}
-            for name, expected_hash in verified.member_sha256.items():
-                value = archive.read(name)
-                if sha256(value).hexdigest() != expected_hash:
-                    raise RowFeatureProxyError(
-                        f"resume member changed after verification: {name}"
+            manifest_bytes = _read_zip_control_member(
+                archive,
+                "manifest.json",
+                verified.manifest_sha256,
+            )
+            if sha256(manifest_bytes).hexdigest() != verified.manifest_sha256:
+                raise RowFeatureProxyError("resume manifest changed after verification")
+            if not _BASE_MEMBERS.issubset(verified.member_sha256):
+                raise RowFeatureProxyError(
+                    "resume member set differs from its explicit state schema"
+                )
+            controls = {
+                name: _read_zip_control_member(
+                    archive, name, verified.member_sha256[name]
+                )
+                for name in _BASE_MEMBERS
+            }
+            if controls[_CONFIG_MEMBER] != config_bytes:
+                raise RowFeatureProxyError(
+                    "resume contains the wrong exact contract bytes"
+                )
+            state = _validate_state_header(
+                _read_json_bytes(controls[_STATE_MEMBER], "resume stage state"),
+                contract_sha=contract_sha,
+                train_sha=train_sha,
+                code_sha=code_sha,
+                jobs=jobs,
+            )
+            if state["prior_manifest_sha256"] != verified.prior_manifest_sha256:
+                raise RowFeatureProxyError("resume state prior manifest binding differs")
+            rows = _validated_rows(state, jobs)
+            resume_decision = _decision(jobs, rows, contract)
+            if state["stage_complete"] != (
+                resume_decision.status in {"complete", "blocked"}
+            ):
+                raise RowFeatureProxyError(
+                    "resume stage_complete contradicts its results"
+                )
+            expected = _resume_expected_members(rows)
+            if set(verified.member_sha256) != expected:
+                raise RowFeatureProxyError(
+                    "resume member set differs from its explicit state schema"
+                )
+            if controls[_METRICS_MEMBER] != _canonical_json(state["results"]):
+                raise RowFeatureProxyError("resume metrics differ from stage state")
+            if controls[_LOG_MEMBER] != _stage_log(state, resume_decision):
+                raise RowFeatureProxyError("resume log differs from stage state")
+
+            jobs_root = output_dir / "jobs"
+            if jobs_root.exists() and (
+                jobs_root.is_symlink() or not jobs_root.is_dir()
+            ):
+                raise RowFeatureProxyError(
+                    "resume jobs root must be a regular directory"
+                )
+            jobs_root.mkdir(parents=True, exist_ok=True)
+            for row in rows.values():
+                artifacts = row["artifacts"]
+                for binding in artifacts.values():  # type: ignore[union-attr]
+                    member = binding["path"]
+                    if verified.member_sha256[member] != binding["sha256"]:
+                        raise RowFeatureProxyError(
+                            f"resume artifact binding differs: {member}"
+                        )
+                    target = output_dir / member
+                    if target.parent.exists() and (
+                        target.parent.is_symlink() or not target.parent.is_dir()
+                    ):
+                        raise RowFeatureProxyError(
+                            "resume candidate directory is unsafe"
+                        )
+                    _atomic_restore_member(
+                        archive,
+                        member,
+                        target,
+                        binding["sha256"],
                     )
-                members[name] = value
+                if row["status"] == "completed":
+                    prediction = f"predictions/{row['candidate_id']}.csv"
+                    artifact = artifacts["predictions.csv"]  # type: ignore[index]
+                    if (
+                        verified.member_sha256[prediction]
+                        != artifact["sha256"]
+                        or _zip_member_sha256(archive, prediction)
+                        != artifact["sha256"]
+                    ):
+                        raise RowFeatureProxyError(
+                            "resume completed prediction copies differ"
+                        )
+    except RowFeatureProxyError:
+        raise
     except ArtifactError as error:
         raise RowFeatureProxyError(f"resume bundle is untrusted: {error}") from error
-    if members.get(_CONFIG_MEMBER) != config_bytes:
-        raise RowFeatureProxyError("resume contains the wrong exact contract bytes")
-    if _STATE_MEMBER not in members:
-        raise RowFeatureProxyError("resume stage state is missing")
-    state = _validate_state_header(
-        _read_json_bytes(members[_STATE_MEMBER], "resume stage state"),
-        contract_sha=contract_sha,
-        train_sha=train_sha,
-        code_sha=code_sha,
-        jobs=jobs,
-    )
-    if state["prior_manifest_sha256"] != verified.prior_manifest_sha256:
-        raise RowFeatureProxyError("resume state prior manifest binding differs")
-    rows = _validated_rows(state, jobs)
-    resume_decision = _decision(jobs, rows, contract)
-    if state["stage_complete"] != (
-        resume_decision.status in {"complete", "blocked"}
-    ):
-        raise RowFeatureProxyError(
-            "resume stage_complete contradicts its results"
-        )
-    expected = _resume_expected_members(rows)
-    if set(members) != expected:
-        raise RowFeatureProxyError("resume member set differs from its explicit state schema")
-    if members[_METRICS_MEMBER] != _canonical_json(state["results"]):
-        raise RowFeatureProxyError("resume metrics differ from stage state")
-    if members[_LOG_MEMBER] != _stage_log(state, resume_decision):
-        raise RowFeatureProxyError("resume log differs from stage state")
-    for row in rows.values():
-        artifacts = row["artifacts"]
-        for binding in artifacts.values():  # type: ignore[union-attr]
-            member = binding["path"]
-            value = members[member]
-            if sha256(value).hexdigest() != binding["sha256"]:
-                raise RowFeatureProxyError(f"resume artifact binding differs: {member}")
-        if row["status"] == "completed":
-            prediction = f"predictions/{row['candidate_id']}.csv"
-            artifact = artifacts["predictions.csv"]  # type: ignore[index]
-            if members[prediction] != members[artifact["path"]]:
-                raise RowFeatureProxyError("resume completed prediction copies differ")
-    jobs_root = output_dir / "jobs"
-    if jobs_root.exists() and (jobs_root.is_symlink() or not jobs_root.is_dir()):
-        raise RowFeatureProxyError("resume jobs root must be a regular directory")
-    jobs_root.mkdir(parents=True, exist_ok=True)
-    for row in rows.values():
-        for binding in row["artifacts"].values():  # type: ignore[union-attr]
-            target = output_dir / binding["path"]
-            if target.parent.exists() and (
-                target.parent.is_symlink() or not target.parent.is_dir()
-            ):
-                raise RowFeatureProxyError("resume candidate directory is unsafe")
-            _atomic_bytes(target, members[binding["path"]])
+    except Exception as error:
+        raise RowFeatureProxyError(f"cannot restore resume bundle: {error}") from error
     _verify_local_artifacts(output_dir, rows)
     return state, rows, verified.manifest_sha256
 
@@ -1426,7 +1622,7 @@ def _bundle_members(
     state: dict[str, object],
     rows: Mapping[str, dict[str, object]],
     decision: ProxyDecision,
-) -> tuple[dict[str, bytes], dict[str, bytes]]:
+) -> tuple[dict[str, bytes | Path], dict[str, bytes | Path]]:
     state_bytes = _canonical_json(state)
     metrics_bytes = _canonical_json(state["results"])
     log_bytes = _stage_log(state, decision)
@@ -1445,14 +1641,13 @@ def _bundle_members(
             path = output_dir / binding["path"]
             if not _regular_file(path) or _file_sha256(path) != binding["sha256"]:
                 raise RowFeatureProxyError(f"artifact changed before publication: {binding['path']}")
-            resume[binding["path"]] = path.read_bytes()
+            resume[binding["path"]] = path
         if row["status"] == "completed":
             prediction_binding = artifacts["predictions.csv"]  # type: ignore[index]
             prediction_path = output_dir / prediction_binding["path"]
             name = f"predictions/{row['candidate_id']}.csv"
-            value = prediction_path.read_bytes()
-            review[name] = value
-            resume[name] = value
+            review[name] = prediction_path
+            resume[name] = prediction_path
     return review, resume
 
 

@@ -225,3 +225,78 @@ def test_verifier_enforces_member_and_total_uncompressed_size_limits(
     monkeypatch.setattr(artifact_module, "_MAX_ZIP_TOTAL_UNCOMPRESSED_BYTES", 100)
     with pytest.raises(ArtifactError, match="total uncompressed"):
         write_stage_bundles(tmp_path / "total", evidence)
+
+
+@pytest.mark.parametrize("kind", ["review", "resume"])
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("version", 1),
+        ("version", []),
+        ("campaign_config_sha256", 1),
+        ("campaign_config_sha256", []),
+        ("campaign_config_sha256", None),
+        ("prior_manifest_sha256", 1),
+        ("prior_manifest_sha256", []),
+        ("member_hash", 1),
+        ("member_hash", []),
+        ("member_hash", None),
+    ],
+)
+def test_verifiers_reject_non_string_manifest_bindings_as_artifact_error(
+    tmp_path: Path, kind: str, field: str, value: object
+) -> None:
+    paths = write_stage_bundles(tmp_path / "source", _evidence())
+    source = paths.review if kind == "review" else paths.resume
+    assert source is not None
+    target = tmp_path / f"{kind}-{field}.zip"
+    with ZipFile(source) as archive:
+        members = {name: archive.read(name) for name in archive.namelist()}
+    manifest = json.loads(members["manifest.json"])
+    if field == "member_hash":
+        member = next(iter(manifest["members"]))
+        manifest["members"][member] = value
+    else:
+        manifest[field] = value
+    members["manifest.json"] = json.dumps(
+        manifest, sort_keys=True, separators=(",", ":")
+    ).encode()
+    with ZipFile(target, "w", compression=ZIP_DEFLATED) as archive:
+        for name, member_value in members.items():
+            archive.writestr(name, member_value)
+
+    verifier = verify_review_bundle if kind == "review" else verify_resume_bundle
+    with pytest.raises(ArtifactError):
+        verifier(target)
+
+
+def test_stage_p_stream_writer_rejects_symlink_swap_after_manifest_hash(
+    tmp_path: Path, monkeypatch
+) -> None:
+    source = tmp_path / "checkpoint.pt"
+    replacement = tmp_path / "replacement.pt"
+    source.write_bytes(b"same bytes")
+    replacement.write_bytes(b"same bytes")
+    original_digest = artifact_module._file_digest
+    swapped = False
+
+    def digest_then_swap(path: Path) -> str:
+        nonlocal swapped
+        digest = original_digest(path)
+        if path == source and not swapped:
+            swapped = True
+            source.unlink()
+            source.symlink_to(replacement)
+        return digest
+
+    monkeypatch.setattr(artifact_module, "_file_digest", digest_then_swap)
+    evidence = StageEvidence(
+        "P",
+        "5" * 64,
+        None,
+        {"state/stage_state.json": b"{}"},
+        {"jobs/rfp__baseline__s42/checkpoint.pt": source},
+    )
+
+    with pytest.raises(ArtifactError, match="safe regular file"):
+        write_stage_bundles(tmp_path / "out", evidence)

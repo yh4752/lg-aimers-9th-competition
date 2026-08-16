@@ -21,6 +21,7 @@ _MAX_ZIP_MEMBER_UNCOMPRESSED_BYTES = 2 * 1024 * 1024 * 1024
 _MAX_ZIP_TOTAL_UNCOMPRESSED_BYTES = 8 * 1024 * 1024 * 1024
 _MAX_ZIP_COMPRESSION_RATIO = 200.0
 _MIN_RATIO_CHECK_BYTES = 64 * 1024
+_MAX_MANIFEST_BYTES = 8 * 1024 * 1024
 
 
 @dataclass(frozen=True)
@@ -28,8 +29,8 @@ class StageEvidence:
     version: str
     campaign_config_sha256: str
     prior_manifest_sha256: str | None
-    review_members: Mapping[str, bytes]
-    resume_members: Mapping[str, bytes]
+    review_members: Mapping[str, bytes | Path]
+    resume_members: Mapping[str, bytes | Path]
 
 
 @dataclass(frozen=True)
@@ -69,8 +70,56 @@ def _digest(value: bytes) -> str:
     return sha256(value).hexdigest()
 
 
-def _valid_sha(value: str | None) -> bool:
-    return value is not None and len(value) == 64 and all(c in "0123456789abcdef" for c in value)
+def _valid_sha(value: object) -> bool:
+    return type(value) is str and len(value) == 64 and all(
+        c in "0123456789abcdef" for c in value
+    )
+
+
+def _open_regular_descriptor(path: Path) -> tuple[int, os.stat_result]:
+    absolute = Path(os.path.abspath(os.fspath(path)))
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | nofollow
+    directory = os.open(absolute.anchor, directory_flags)
+    try:
+        for component in absolute.parts[1:-1]:
+            child = os.open(
+                component,
+                directory_flags,
+                dir_fd=directory,
+            )
+            os.close(directory)
+            directory = child
+        descriptor = os.open(
+            absolute.name,
+            os.O_RDONLY | nofollow,
+            dir_fd=directory,
+        )
+    except OSError as error:
+        raise ArtifactError(f"bundle source is not a safe regular file: {path}") from error
+    finally:
+        os.close(directory)
+    try:
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISREG(metadata.st_mode):
+            raise ArtifactError(f"bundle source is not a regular file: {path}")
+        return descriptor, metadata
+    except Exception:
+        os.close(descriptor)
+        raise
+
+
+def _file_digest(path: Path) -> str:
+    digest = sha256()
+    descriptor, _ = _open_regular_descriptor(path)
+    with os.fdopen(descriptor, "rb") as handle:
+        while chunk := handle.read(1024 * 1024):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _member_digest(value: bytes | Path) -> str:
+    return _digest(value) if type(value) is bytes else _file_digest(value)
 
 
 def _validate_member_name(name: str) -> None:
@@ -110,6 +159,8 @@ def _validate_archive_entries(archive: ZipFile, *, label: str) -> list[str]:
             raise ArtifactError(
                 f"{label} bundle member exceeds the uncompressed size limit: {info.filename}"
             )
+        if info.filename == "manifest.json" and info.file_size > _MAX_MANIFEST_BYTES:
+            raise ArtifactError(f"{label} bundle manifest exceeds the size limit")
         total_size += info.file_size
         if total_size > _MAX_ZIP_TOTAL_UNCOMPRESSED_BYTES:
             raise ArtifactError(f"{label} bundle exceeds the total uncompressed size limit")
@@ -142,11 +193,26 @@ def _validate_evidence(evidence: StageEvidence) -> None:
         raise ArtifactError("Versions A-C and P require resume evidence")
     for name, value in [*evidence.review_members.items(), *evidence.resume_members.items()]:
         _validate_member_name(name)
-        if not isinstance(value, bytes):
+        if type(value) is bytes:
+            continue
+        if (
+            evidence.version == "P"
+            and isinstance(value, Path)
+        ):
+            descriptor, _ = _open_regular_descriptor(value)
+            os.close(descriptor)
+            continue
+        if evidence.version == "P":
+            raise ArtifactError(f"Stage P bundle member must be bytes or a regular file: {name}")
+        else:
             raise ArtifactError(f"bundle member must be bytes: {name}")
 
 
-def _manifest(evidence: StageEvidence, kind: str, members: Mapping[str, bytes]) -> bytes:
+def _manifest(
+    evidence: StageEvidence,
+    kind: str,
+    members: Mapping[str, bytes | Path],
+) -> bytes:
     return _canonical_json(
         {
             "schema_version": 1,
@@ -155,7 +221,9 @@ def _manifest(evidence: StageEvidence, kind: str, members: Mapping[str, bytes]) 
             "version": evidence.version,
             "campaign_config_sha256": evidence.campaign_config_sha256,
             "prior_manifest_sha256": evidence.prior_manifest_sha256,
-            "members": {name: _digest(value) for name, value in sorted(members.items())},
+            "members": {
+                name: _member_digest(value) for name, value in sorted(members.items())
+            },
         }
     )
 
@@ -174,6 +242,60 @@ def _zip_bytes(evidence: StageEvidence, kind: str, members: Mapping[str, bytes])
             info.external_attr = 0o100644 << 16
             archive.writestr(info, all_members[name])
     return buffer.getvalue(), _digest(manifest)
+
+
+def _atomic_zip_publish(
+    path: Path,
+    evidence: StageEvidence,
+    kind: str,
+    members: Mapping[str, bytes | Path],
+) -> tuple[str, str]:
+    """Publish Stage P without materializing file members or the ZIP in memory."""
+
+    manifest = _manifest(evidence, kind, members)
+    expected = json.loads(manifest)["members"]
+    all_members: dict[str, bytes | Path] = {**members, "manifest.json": manifest}
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{path.name}-", dir=path.parent
+    )
+    os.close(descriptor)
+    try:
+        with ZipFile(
+            temporary_name, "w", compression=ZIP_DEFLATED, compresslevel=9
+        ) as archive:
+            for name in sorted(all_members):
+                value = all_members[name]
+                info = ZipInfo(name, date_time=_ZIP_TIMESTAMP)
+                info.compress_type = ZIP_DEFLATED
+                info.create_system = 3
+                info.external_attr = 0o100644 << 16
+                observed = sha256()
+                if type(value) is bytes:
+                    info.file_size = len(value)
+                    with archive.open(info, "w") as destination:
+                        destination.write(value)
+                        observed.update(value)
+                else:
+                    descriptor, metadata = _open_regular_descriptor(value)
+                    info.file_size = metadata.st_size
+                    with os.fdopen(descriptor, "rb") as source:
+                        with archive.open(info, "w") as destination:
+                            while chunk := source.read(1024 * 1024):
+                                destination.write(chunk)
+                                observed.update(chunk)
+                if name != "manifest.json" and observed.hexdigest() != expected[name]:
+                    raise ArtifactError(f"bundle member changed during publication: {name}")
+        with open(temporary_name, "rb") as handle:
+            os.fsync(handle.fileno())
+        os.replace(temporary_name, path)
+    except Exception:
+        try:
+            os.unlink(temporary_name)
+        except FileNotFoundError:
+            pass
+        raise
+    return _file_digest(path), _digest(manifest)
 
 
 def _atomic_publish(path: Path, value: bytes) -> None:
@@ -214,20 +336,35 @@ def write_stage_bundles(
     _validate_evidence(evidence)
     _validate_bundle_prefix(bundle_prefix)
     root = Path(output_dir)
-    review_bytes, review_manifest_sha = _zip_bytes(evidence, "review", evidence.review_members)
     review = root / f"{bundle_prefix}_{evidence.version}_review_bundle.zip"
-    _atomic_publish(review, review_bytes)
+    if evidence.version == "P":
+        review_sha, review_manifest_sha = _atomic_zip_publish(
+            review, evidence, "review", evidence.review_members
+        )
+    else:
+        review_bytes, review_manifest_sha = _zip_bytes(
+            evidence, "review", evidence.review_members  # type: ignore[arg-type]
+        )
+        _atomic_publish(review, review_bytes)
+        review_sha = _digest(review_bytes)
 
     resume: Path | None = None
     resume_sha: str | None = None
     manifest_sha = review_manifest_sha
     if evidence.version != "D":
-        resume_bytes, manifest_sha = _zip_bytes(evidence, "resume", evidence.resume_members)
         resume = root / f"{bundle_prefix}_{evidence.version}_resume_bundle.zip"
-        _atomic_publish(resume, resume_bytes)
-        resume_sha = _digest(resume_bytes)
+        if evidence.version == "P":
+            resume_sha, manifest_sha = _atomic_zip_publish(
+                resume, evidence, "resume", evidence.resume_members
+            )
+        else:
+            resume_bytes, manifest_sha = _zip_bytes(
+                evidence, "resume", evidence.resume_members  # type: ignore[arg-type]
+            )
+            _atomic_publish(resume, resume_bytes)
+            resume_sha = _digest(resume_bytes)
         verify_resume_bundle(resume)
-    return BundlePaths(review, resume, _digest(review_bytes), resume_sha, manifest_sha)
+    return BundlePaths(review, resume, review_sha, resume_sha, manifest_sha)
 
 
 def verify_review_bundle(path: str | Path) -> VerifiedReview:
@@ -247,28 +384,34 @@ def verify_review_bundle(path: str | Path) -> VerifiedReview:
             if not isinstance(expected, dict) or set(expected) != set(names) - {"manifest.json"}:
                 raise ArtifactError("review member manifest differs")
             for name, expected_hash in expected.items():
-                if _digest(archive.read(name)) != expected_hash:
+                if not _valid_sha(expected_hash):
+                    raise ArtifactError(f"review member SHA-256 is invalid: {name}")
+                digest = sha256()
+                with archive.open(name, "r") as member:
+                    while chunk := member.read(1024 * 1024):
+                        digest.update(chunk)
+                if digest.hexdigest() != expected_hash:
                     raise ArtifactError(f"review member SHA-256 differs: {name}")
+            version = manifest.get("version")
+            config_sha = manifest.get("campaign_config_sha256")
+            prior_sha = manifest.get("prior_manifest_sha256")
+            if type(version) is not str or version not in _VERSIONS:
+                raise ArtifactError("review version must be A, B, C, D, or P")
+            if not _valid_sha(config_sha) or (
+                version not in {"A", "P"} and not _valid_sha(prior_sha)
+            ) or (prior_sha is not None and not _valid_sha(prior_sha)):
+                raise ArtifactError("review manifest hash binding is invalid")
     except ArtifactError:
         raise
     except Exception as exc:
         raise ArtifactError(f"cannot verify review bundle: {exc}") from exc
-    version = str(manifest.get("version"))
-    config_sha = str(manifest.get("campaign_config_sha256"))
-    prior_sha = manifest.get("prior_manifest_sha256")
-    if version not in set(_VERSIONS):
-        raise ArtifactError("review version must be A, B, C, D, or P")
-    if not _valid_sha(config_sha) or (
-        version not in {"A", "P"} and not _valid_sha(prior_sha)
-    ) or (prior_sha is not None and not _valid_sha(prior_sha)):
-        raise ArtifactError("review manifest hash binding is invalid")
     return VerifiedReview(
         bundle,
         version,
         config_sha,
-        None if prior_sha is None else str(prior_sha),
+        prior_sha,
         _digest(manifest_bytes),
-        {str(name): str(value) for name, value in expected.items()},
+        dict(expected),
     )
 
 
@@ -287,26 +430,32 @@ def verify_resume_bundle(path: str | Path) -> VerifiedResume:
             if not isinstance(expected, dict) or set(expected) != set(names) - {"manifest.json"}:
                 raise ArtifactError("resume member manifest differs")
             for name, expected_hash in expected.items():
-                if _digest(archive.read(name)) != expected_hash:
+                if not _valid_sha(expected_hash):
+                    raise ArtifactError(f"resume member SHA-256 is invalid: {name}")
+                digest = sha256()
+                with archive.open(name, "r") as member:
+                    while chunk := member.read(1024 * 1024):
+                        digest.update(chunk)
+                if digest.hexdigest() != expected_hash:
                     raise ArtifactError(f"resume member SHA-256 differs: {name}")
+            version = manifest.get("version")
+            if type(version) is not str or version not in {"A", "B", "C", "P"}:
+                raise ArtifactError("resume version must be A, B, C, or P")
+            config_sha = manifest.get("campaign_config_sha256")
+            prior_sha = manifest.get("prior_manifest_sha256")
+            if not _valid_sha(config_sha) or (
+                version not in {"A", "P"} and not _valid_sha(prior_sha)
+            ) or (prior_sha is not None and not _valid_sha(prior_sha)):
+                raise ArtifactError("resume manifest hash binding is invalid")
     except ArtifactError:
         raise
     except Exception as exc:
         raise ArtifactError(f"cannot verify resume bundle: {exc}") from exc
-    version = str(manifest.get("version"))
-    if version not in {"A", "B", "C", "P"}:
-        raise ArtifactError("resume version must be A, B, C, or P")
-    config_sha = str(manifest.get("campaign_config_sha256"))
-    prior_sha = manifest.get("prior_manifest_sha256")
-    if not _valid_sha(config_sha) or (
-        version not in {"A", "P"} and not _valid_sha(prior_sha)
-    ) or (prior_sha is not None and not _valid_sha(prior_sha)):
-        raise ArtifactError("resume manifest hash binding is invalid")
     return VerifiedResume(
         bundle,
         version,
         config_sha,
-        None if prior_sha is None else str(prior_sha),
+        prior_sha,
         _digest(manifest_bytes),
-        {str(name): str(value) for name, value in expected.items()},
+        dict(expected),
     )

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 from hashlib import sha256
 from pathlib import Path
 from zipfile import ZIP_DEFLATED, ZipFile
@@ -16,6 +17,9 @@ from experiments.tabm_campaign.row_feature_contracts import (
 from experiments.tabm_campaign.row_feature_proxy import (
     _code_file_paths,
     _code_sha256,
+    _bundle_members,
+    _decision,
+    _valid_finite_tensor,
     _validate_checkpoint_payload,
     RowFeatureProxyError,
     build_proxy_jobs,
@@ -38,12 +42,16 @@ def _write_training_checkpoint(
     import numpy as np
     import torch
 
-    def compact(shape: tuple[int, ...]):
-        return torch.zeros(1, dtype=torch.float32).expand(shape)
-
     n_num = 2
     n_bins = 2
     first_width = n_num * 32 + 3
+    generator = torch.Generator(device="cpu").manual_seed(7)
+    shared = torch.rand(job.width * job.width, generator=generator)
+
+    def compact(shape: tuple[int, ...]):
+        size = math.prod(shape)
+        return shared[:size].view(shape)
+
     model = {
         "model.num_module.linear0.weight": compact((n_num, 32)),
         "model.num_module.linear0.bias": compact((n_num, 32)),
@@ -131,11 +139,17 @@ def _write_training_checkpoint(
         "model": model,
         "optimizer": optimizer,
         "scheduler": scheduler,
-        "scaler": {},
+        "scaler": {
+            "scale": 65536.0,
+            "growth_factor": 2.0,
+            "backoff_factor": 0.5,
+            "growth_interval": 2000,
+            "_growth_tracker": 3,
+        },
         "python_rng": random.getstate(),
         "numpy_rng": np.random.get_state(),
         "torch_rng": torch.get_rng_state(),
-        "cuda_rng": [],
+        "cuda_rng": [torch.get_rng_state().clone()],
         "adapter_state": None,
     }
     if missing_key is not None:
@@ -395,6 +409,11 @@ class _CorruptCheckpointRuntime(_DeadlineFallbackRuntime):
             "empty_optimizer",
             "mismatched_optimizer",
             "unrelated_scheduler",
+            "bad_scaler",
+            "bad_python_rng",
+            "bad_numpy_rng",
+            "bad_torch_rng",
+            "bad_cuda_rng",
         }:
             import torch
 
@@ -412,7 +431,20 @@ class _CorruptCheckpointRuntime(_DeadlineFallbackRuntime):
             elif self.corruption == "mismatched_optimizer":
                 checkpoint["optimizer"]["param_groups"][0]["params"] = [0]
             else:
-                checkpoint["scheduler"] = {"totally": "unrelated"}
+                if self.corruption == "unrelated_scheduler":
+                    checkpoint["scheduler"] = {"totally": "unrelated"}
+                elif self.corruption == "bad_scaler":
+                    checkpoint["scaler"] = {}
+                elif self.corruption == "bad_python_rng":
+                    checkpoint["python_rng"] = (1, 2)
+                elif self.corruption == "bad_numpy_rng":
+                    checkpoint["numpy_rng"] = ("bad",)
+                elif self.corruption == "bad_torch_rng":
+                    checkpoint["torch_rng"] = torch.zeros(2, dtype=torch.float32)
+                else:
+                    checkpoint["cuda_rng"] = [
+                        torch.zeros(2, dtype=torch.float32)
+                    ]
             torch.save(checkpoint, job_dir / "checkpoint.pt")
         return (result,)
 
@@ -820,6 +852,59 @@ def test_checkpoint_scheduler_uses_plateau_threshold_semantics(tmp_path: Path) -
     )
 
 
+@pytest.mark.parametrize("kind", ["expand", "as_strided"])
+def test_checkpoint_tensor_rejects_tiny_overlapping_storage(kind: str) -> None:
+    import torch
+
+    base = torch.zeros(1, dtype=torch.float32)
+    if kind == "expand":
+        tensor = base.expand(4096, 4096)
+    else:
+        tensor = torch.as_strided(base, (4096, 4096), (0, 0))
+
+    assert not _valid_finite_tensor(
+        tensor,
+        (4096, 4096),
+        torch,
+        dtype=torch.float32,
+    )
+
+
+def test_checkpoint_size_is_rejected_before_torch_load(
+    tmp_path: Path, monkeypatch
+) -> None:
+    import torch
+
+    job = build_proxy_jobs(CONTRACT)[0]
+    path = tmp_path / "checkpoint.pt"
+    _write_training_checkpoint(path, job)
+    result = CampaignJobResult(
+        job.candidate_id,
+        "inconclusive",
+        None,
+        None,
+        3,
+        path,
+        None,
+        {},
+        "worker_exceeded_deadline_grace",
+    )
+    monkeypatch.setattr(proxy_module, "_MAX_CHECKPOINT_BYTES", path.stat().st_size - 1)
+
+    def forbidden_load(*args, **kwargs):
+        raise AssertionError("oversized checkpoint must not reach torch.load")
+
+    monkeypatch.setattr(torch, "load", forbidden_load)
+    with pytest.raises(RowFeatureProxyError, match="size limit"):
+        _validate_checkpoint_payload(
+            job,
+            result,
+            path,
+            meta_epoch=2,
+            meta_adapter_state=None,
+        )
+
+
 @pytest.mark.parametrize(
     ("corruption", "message"),
     [
@@ -832,6 +917,11 @@ def test_checkpoint_scheduler_uses_plateau_threshold_semantics(tmp_path: Path) -
         ("empty_optimizer", "parameter groups"),
         ("mismatched_optimizer", "configuration"),
         ("unrelated_scheduler", "scheduler keys"),
+        ("bad_scaler", "scaler"),
+        ("bad_python_rng", "RNG"),
+        ("bad_numpy_rng", "RNG"),
+        ("bad_torch_rng", "RNG"),
+        ("bad_cuda_rng", "RNG"),
     ],
 )
 def test_inconclusive_checkpoint_payload_fails_closed(
@@ -1084,6 +1174,68 @@ def test_local_recovery_rejects_altered_completed_prediction(
         )
 
 
+def test_resume_rejects_prediction_and_result_forged_away_from_checkpoint_brier(
+    tmp_path: Path, monkeypatch
+) -> None:
+    data = _official_data(tmp_path, monkeypatch)
+    first = run_row_feature_proxy(
+        data_dir=data,
+        output_dir=tmp_path / "first",
+        runtime=_Runtime({"rfp__baseline__s3407": "inconclusive"}),
+        wall_deadline=10_000.0,
+        now=lambda: 1_000.0,
+    )
+    forged = tmp_path / "forged-brier.zip"
+    with ZipFile(first.bundles.resume) as archive:
+        members = {name: archive.read(name) for name in archive.namelist()}
+    state = json.loads(members["state/stage_state.json"])
+    row = state["results"][0]
+    prediction = b"row_id,target,probability\nr1,0,0.5\nr2,1,0.5\n"
+    prediction_sha = sha256(prediction).hexdigest()
+    prediction_member = row["artifacts"]["predictions.csv"]["path"]
+    members[prediction_member] = prediction
+    members[f"predictions/{row['candidate_id']}.csv"] = prediction
+    worker_member = row["artifacts"]["worker_result.json"]["path"]
+    worker_result = json.loads(members[worker_member])
+    worker_result["brier"] = 0.25
+    worker_result["resource_evidence"]["predictions_sha256"] = prediction_sha
+    worker_bytes = json.dumps(
+        worker_result, sort_keys=True, separators=(",", ":")
+    ).encode()
+    members[worker_member] = worker_bytes
+    row["brier"] = 0.25
+    row["resource_evidence"]["predictions_sha256"] = prediction_sha
+    row["artifacts"]["predictions.csv"]["sha256"] = prediction_sha
+    row["artifacts"]["worker_result.json"]["sha256"] = sha256(
+        worker_bytes
+    ).hexdigest()
+    members["state/stage_state.json"] = json.dumps(
+        state, sort_keys=True, separators=(",", ":")
+    ).encode()
+    members["metrics/job_results.json"] = json.dumps(
+        state["results"], sort_keys=True, separators=(",", ":")
+    ).encode()
+    manifest = json.loads(members["manifest.json"])
+    for name in manifest["members"]:
+        manifest["members"][name] = sha256(members[name]).hexdigest()
+    members["manifest.json"] = json.dumps(
+        manifest, sort_keys=True, separators=(",", ":")
+    ).encode()
+    with ZipFile(forged, "w", compression=ZIP_DEFLATED) as archive:
+        for name, value in members.items():
+            archive.writestr(name, value)
+
+    with pytest.raises(RowFeatureProxyError, match="checkpoint.*Brier"):
+        run_row_feature_proxy(
+            data_dir=data,
+            output_dir=tmp_path / "restored",
+            resume_bundle=forged,
+            runtime=_Runtime(),
+            wall_deadline=12_000.0,
+            now=lambda: 2_000.0,
+        )
+
+
 def test_local_recovery_rejects_noncanonical_not_started_state(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -1187,3 +1339,87 @@ def test_equivalent_runs_produce_identical_bundle_bytes(tmp_path: Path, monkeypa
     assert sha256(first.bundles.resume.read_bytes()).digest() == sha256(
         second.bundles.resume.read_bytes()
     ).digest()
+
+
+def test_checkpoint_bundle_publication_and_restore_are_streamed(
+    tmp_path: Path, monkeypatch
+) -> None:
+    data = _official_data(tmp_path, monkeypatch)
+    output = tmp_path / "first"
+    first = run_row_feature_proxy(
+        data_dir=data,
+        output_dir=output,
+        runtime=_Runtime(),
+        wall_deadline=10_000.0,
+        now=lambda: 1_000.0,
+    )
+    original_path_read = Path.read_bytes
+
+    def guarded_path_read(path: Path) -> bytes:
+        if path.name in {"checkpoint.pt", "best_checkpoint.pt"}:
+            raise AssertionError("checkpoint must not be materialized as bytes")
+        return original_path_read(path)
+
+    state = json.loads(first.state_path.read_bytes())
+    rows = {row["candidate_id"]: row for row in state["results"]}
+    jobs = build_proxy_jobs(CONTRACT)
+    with monkeypatch.context() as patch:
+        patch.setattr(Path, "read_bytes", guarded_path_read)
+        _bundle_members(
+            output_dir=output,
+            config_bytes=proxy_module._read_contract_bytes(
+                proxy_module.DEFAULT_ROW_FEATURE_PROXY_CONTRACT
+            ),
+            state=state,
+            rows=rows,
+            decision=_decision(jobs, rows, CONTRACT),
+        )
+
+    original_zip_read = ZipFile.read
+
+    def guarded_zip_read(archive, name, *args, **kwargs):
+        if str(name).endswith(("checkpoint.pt", "best_checkpoint.pt")):
+            raise AssertionError("checkpoint ZIP member must be streamed")
+        return original_zip_read(archive, name, *args, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(ZipFile, "read", guarded_zip_read)
+        run_row_feature_proxy(
+            data_dir=data,
+            output_dir=tmp_path / "restored",
+            resume_bundle=first.bundles.resume,
+            runtime=_Runtime(),
+            wall_deadline=12_000.0,
+            now=lambda: 2_000.0,
+        )
+
+
+def test_resume_checkpoint_size_is_rejected_before_member_read(
+    tmp_path: Path, monkeypatch
+) -> None:
+    data = _official_data(tmp_path, monkeypatch)
+    first = run_row_feature_proxy(
+        data_dir=data,
+        output_dir=tmp_path / "first",
+        runtime=_Runtime({"rfp__baseline__s42": "inconclusive"}),
+        wall_deadline=10_000.0,
+        now=lambda: 1_000.0,
+    )
+    monkeypatch.setattr(proxy_module, "_MAX_CHECKPOINT_BYTES", 100)
+    original_read = ZipFile.read
+
+    def guarded_read(archive, name, *args, **kwargs):
+        if str(name).endswith(("checkpoint.pt", "best_checkpoint.pt")):
+            raise AssertionError("oversized checkpoint must not be decompressed")
+        return original_read(archive, name, *args, **kwargs)
+
+    monkeypatch.setattr(ZipFile, "read", guarded_read)
+    with pytest.raises(RowFeatureProxyError, match="size limit"):
+        run_row_feature_proxy(
+            data_dir=data,
+            output_dir=tmp_path / "restored",
+            resume_bundle=first.bundles.resume,
+            runtime=_Runtime(),
+            wall_deadline=12_000.0,
+            now=lambda: 2_000.0,
+        )
