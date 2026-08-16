@@ -28,6 +28,7 @@
 
 **Files:**
 - Create: `experiments/tabm_campaign/score_improvement_contract.json`
+- Create: `experiments/tabm_campaign/ensemble_audit.py`
 - Test: `tests/test_tabm_ensemble_audit.py`
 
 - [ ] **Step 1: 계약 fixture 검사를 작성한다**
@@ -78,7 +79,7 @@ git commit -m "test: seal TabM ensemble audit contract"
 ### Task 2: 읽기 전용 OOF 감사기
 
 **Files:**
-- Create: `experiments/tabm_campaign/ensemble_audit.py`
+- Modify: `experiments/tabm_campaign/ensemble_audit.py`
 - Modify: `tests/test_tabm_ensemble_audit.py`
 
 - [ ] **Step 1: 정렬과 Brier 실패 테스트를 작성한다**
