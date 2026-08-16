@@ -50,6 +50,7 @@ class CampaignJob:
     max_epochs: int
     min_epochs: int
     patience: int
+    feature_bundle: str | None = None
 
 
 @dataclass(frozen=True)

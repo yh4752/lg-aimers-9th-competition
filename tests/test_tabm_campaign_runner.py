@@ -20,6 +20,37 @@ from experiments.tabm_campaign.runner import (
 )
 
 
+def test_campaign_job_accepts_legacy_json_without_feature_bundle(
+    tmp_path: Path,
+) -> None:
+    payload = {
+        "candidate_id": "legacy",
+        "capacity": "p2",
+        "k": 32,
+        "width": 512,
+        "blocks": 4,
+        "dropout": 0.1,
+        "num_embedding": "piecewise_linear",
+        "loss": "bce",
+        "scheduler": "plateau",
+        "learning_rate": 0.0006,
+        "seed": 42,
+        "train_end_year": 2023,
+        "valid_year": 2024,
+        "sample_mode": "proxy",
+        "max_epochs": 8,
+        "min_epochs": 3,
+        "patience": 3,
+    }
+
+    job_path = tmp_path / "legacy_job.json"
+    job_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    job = worker_module._job_from_json(job_path)
+
+    assert job.feature_bundle is None
+
+
 @pytest.fixture(autouse=True)
 def _isolate_runner_mechanics_from_the_retired_rules_contract(monkeypatch) -> None:
     """These tests cover scheduling; the retired campaign is not runnable now."""

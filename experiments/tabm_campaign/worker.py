@@ -12,6 +12,15 @@ import threading
 import time
 from typing import Mapping
 
+from experiments.independent_dl.preprocessing import (
+    PreprocessingSpec,
+    normalize_spec,
+)
+from experiments.independent_dl.row_features import (
+    ROW_FEATURE_BUNDLES,
+    row_segment_labels,
+)
+
 from .runner import CampaignJob, CampaignJobResult
 
 
@@ -45,6 +54,126 @@ def _job_sha(job: CampaignJob) -> str:
 def _job_from_json(path: Path) -> CampaignJob:
     raw = json.loads(path.read_text(encoding="utf-8"))
     return CampaignJob(**raw)
+
+
+def _preprocessing_spec(job: CampaignJob) -> PreprocessingSpec:
+    if job.feature_bundle is None:
+        return PreprocessingSpec("dl_standard", ("hand_matchup",))
+    if job.feature_bundle not in ROW_FEATURE_BUNDLES:
+        raise ValueError(f"unknown row feature bundle: {job.feature_bundle}")
+    return PreprocessingSpec(
+        "dl_standard", ("hand_matchup", job.feature_bundle)
+    )
+
+
+def _prediction_evidence_frame(
+    *,
+    fit_rows,
+    valid_rows,
+    valid_batch,
+    probability,
+    category_maps: Mapping[str, Mapping[object, object]],
+):
+    import numpy as np
+    import pandas as pd
+
+    required_fit = {"pitcher_id", "batter_id"}
+    required_valid = {
+        "row_id",
+        "control_success",
+        "game_type",
+        "pitcher_hand",
+        "batter_hand",
+        "pitcher_id",
+        "batter_id",
+        "li",
+        "inning",
+        "runner_on_2b",
+        "runner_on_3b",
+    }
+    missing_fit = sorted(required_fit.difference(fit_rows.columns))
+    missing_valid = sorted(required_valid.difference(valid_rows.columns))
+    if missing_fit or missing_valid:
+        raise RuntimeError(
+            "prediction evidence is missing required columns: "
+            f"fit={missing_fit}, valid={missing_valid}"
+        )
+
+    valid_row_ids = valid_rows["row_id"].astype(str).to_numpy(copy=False)
+    cache_row_ids = np.asarray(valid_batch.row_id).astype(str)
+    target = np.asarray(valid_batch.y, dtype="float64")
+    probability = np.asarray(probability, dtype="float64")
+    lengths = {
+        len(valid_rows),
+        len(valid_row_ids),
+        len(cache_row_ids),
+        len(target),
+        len(probability),
+        len(valid_batch.game_type),
+    }
+    if len(lengths) != 1:
+        raise RuntimeError("prediction evidence arrays must have equal lengths")
+    if len(set(valid_row_ids.tolist())) != len(valid_row_ids):
+        raise RuntimeError("prediction evidence row_id values must be unique")
+    if not np.array_equal(valid_row_ids, cache_row_ids):
+        raise RuntimeError(
+            "prediction evidence row_id order differs from cache.valid"
+        )
+    source_target = pd.to_numeric(
+        valid_rows["control_success"], errors="coerce"
+    ).to_numpy(dtype="float64")
+    if not np.isfinite(source_target).all() or not np.array_equal(
+        source_target, target
+    ):
+        raise RuntimeError("prediction evidence target differs from cache.valid.y")
+    if not np.isfinite(probability).all():
+        raise RuntimeError("prediction evidence probabilities must be finite")
+    if ((probability < 0.0) | (probability > 1.0)).any():
+        raise RuntimeError("prediction evidence probabilities must be in [0, 1]")
+
+    payload: dict[str, object] = {
+        "row_id": cache_row_ids,
+        "target": target.astype("int64"),
+        "probability": probability,
+        "game_type": np.asarray(valid_batch.game_type).astype(str),
+    }
+    if "game_month" in valid_rows:
+        payload["game_month"] = valid_rows["game_month"].to_numpy(copy=False)
+    for entity in ("pitcher_id", "batter_id"):
+        if entity in category_maps:
+            known = {str(value) for value in category_maps[entity]}
+            payload[f"{entity}_known"] = np.where(
+                valid_rows[entity]
+                .astype("string")
+                .fillna("__MISSING__")
+                .astype(str)
+                .isin(known),
+                "known",
+                "oov",
+            )
+
+    segment_sources = valid_rows.loc[
+        :,
+        [
+            "game_type",
+            "pitcher_hand",
+            "batter_hand",
+            "pitcher_id",
+            "batter_id",
+            "li",
+            "inning",
+            "runner_on_2b",
+            "runner_on_3b",
+        ],
+    ]
+    segments = row_segment_labels(
+        segment_sources,
+        set(fit_rows["pitcher_id"].tolist()),
+        set(fit_rows["batter_id"].tolist()),
+    )
+    for column in segments.columns:
+        payload[str(column)] = segments[column].to_numpy(copy=False)
+    return pd.DataFrame(payload)
 
 
 def _find_one(root: Path, name: str, *, required: bool) -> Path | None:
@@ -86,12 +215,13 @@ def _result_from_payload(payload: Mapping[str, object]) -> CampaignJobResult:
 
 
 def run_worker(job: CampaignJob, data_dir: Path, output_dir: Path, cache_root: Path, deadline: float) -> CampaignJobResult:
+    preprocessing_spec = _preprocessing_spec(job)
+    normalized_spec = normalize_spec(preprocessing_spec)
     import numpy as np
     import pandas as pd
 
     from experiments.independent_dl.models.common import import_runtime_module, metadata_from_train
     from experiments.independent_dl.models.tabm import TabMAdapter
-    from experiments.independent_dl.preprocessing import PreprocessingSpec
     from experiments.independent_dl.training import TrainRequest, fit_candidate
     from .cache import materialize_fixed_cache
     from .sampling import proxy_row_ids
@@ -129,7 +259,7 @@ def run_worker(job: CampaignJob, data_dir: Path, output_dir: Path, cache_root: P
             history=history,
             train_end_year=job.train_end_year,
             valid_year=job.valid_year,
-            spec=PreprocessingSpec("dl_standard", ("hand_matchup",)),
+            spec=preprocessing_spec,
             sample_ids=sample_ids,
         )
         try:
@@ -170,6 +300,12 @@ def run_worker(job: CampaignJob, data_dir: Path, output_dir: Path, cache_root: P
         return evidence
 
     preflight_result = preflight(job.candidate_id, architecture_probe)
+    preprocessing_evidence = {
+        "cache_digest": cache.identity.digest(),
+        "cache_reused": cache.reused,
+        "feature_bundle": job.feature_bundle,
+        "preprocessing_spec": asdict(normalized_spec),
+    }
     if preflight_result.status != "completed":
         return CampaignJobResult(
             job.candidate_id,
@@ -179,7 +315,10 @@ def run_worker(job: CampaignJob, data_dir: Path, output_dir: Path, cache_root: P
             0,
             None,
             None,
-            {"preflight": asdict(preflight_result)},
+            {
+                **preprocessing_evidence,
+                "preflight": asdict(preflight_result),
+            },
             f"{preflight_result.failure_type}: {preflight_result.message}",
         )
 
@@ -216,32 +355,22 @@ def run_worker(job: CampaignJob, data_dir: Path, output_dir: Path, cache_root: P
     started = time.monotonic()
     trained = fit_candidate(request, adapter, output_dir)
     probability = np.asarray(trained.predictions, dtype="float64")
-    target = np.asarray(cache.valid.y, dtype="float64")
+    prediction_frame = _prediction_evidence_frame(
+        fit_rows=fit_rows,
+        valid_rows=valid_rows,
+        valid_batch=cache.valid,
+        probability=probability,
+        category_maps=cache.state.category_maps,
+    )
+    target = prediction_frame["target"].to_numpy(dtype="float64")
     brier = float(np.mean(np.square(probability - target)))
     predictions_path = output_dir / "predictions.csv"
-    prediction_payload: dict[str, object] = {
-        "row_id": cache.valid.row_id.astype(str),
-        "target": target.astype("int64"),
-        "probability": probability,
-        "game_type": cache.valid.game_type.astype(str),
-    }
-    if "game_month" in valid_rows:
-        prediction_payload["game_month"] = valid_rows["game_month"].to_numpy(copy=False)
-    for entity in ("pitcher_id", "batter_id"):
-        if entity in valid_rows and entity in cache.state.category_maps:
-            known = set(str(value) for value in cache.state.category_maps[entity])
-            prediction_payload[f"{entity}_known"] = np.where(
-                valid_rows[entity].astype("string").fillna("__MISSING__").astype(str).isin(known),
-                "known",
-                "oov",
-            )
-    pd.DataFrame(prediction_payload).to_csv(predictions_path, index=False)
+    prediction_frame.to_csv(predictions_path, index=False)
     evidence = dict(trained.hardware)
     evidence.update(
         {
             "wall_seconds": time.monotonic() - started,
-            "cache_digest": cache.identity.digest(),
-            "cache_reused": cache.reused,
+            **preprocessing_evidence,
             "preflight": asdict(preflight_result),
         }
     )
@@ -266,7 +395,9 @@ class SubprocessCampaignRuntime:
         self.python = python
 
     @staticmethod
-    def _read_result(path: Path, job: CampaignJob) -> CampaignJobResult | None:
+    def _read_worker_result(
+        path: Path, job: CampaignJob
+    ) -> CampaignJobResult | None:
         result_path = path / "worker_result.json"
         if not result_path.is_file():
             return None
@@ -274,7 +405,18 @@ class SubprocessCampaignRuntime:
         if payload.get("job_sha256") != _job_sha(job):
             return None
         result = _result_from_payload(payload)
-        if result.status == "completed" and result.checkpoint is not None and not result.checkpoint.is_file():
+        if result.status == "completed" and (
+            result.checkpoint is None or not result.checkpoint.is_file()
+        ):
+            return None
+        return result
+
+    @classmethod
+    def _read_result(
+        cls, path: Path, job: CampaignJob
+    ) -> CampaignJobResult | None:
+        result = cls._read_worker_result(path, job)
+        if result is None or result.status != "completed":
             return None
         return result
 
@@ -303,28 +445,40 @@ class SubprocessCampaignRuntime:
                         process.kill()
                         process.wait(timeout=10)
                     thread.join(timeout=5)
-                    result = self._read_result(job_dir, job)
+                    result = self._read_worker_result(job_dir, job)
                     if result is None:
                         best = job_dir / "best_checkpoint.pt"
                         meta_path = job_dir / "checkpoint_meta.json"
                         completed_epochs = 0
                         best_epoch = None
+                        checkpoint = best if best.is_file() else None
                         if meta_path.is_file():
                             try:
                                 meta = json.loads(meta_path.read_text(encoding="utf-8"))
-                                completed_epochs = int(meta.get("epoch", -1)) + 1
-                            except (OSError, ValueError, json.JSONDecodeError):
-                                completed_epochs = 0
+                                if isinstance(meta, dict):
+                                    completed_epochs = int(meta.get("epoch", -1)) + 1
+                                    if "best_epoch" in meta:
+                                        best_epoch = int(meta["best_epoch"])
+                                    checkpoint_name = str(meta.get("checkpoint", ""))
+                                    resume_checkpoint = job_dir / Path(checkpoint_name).name
+                                    if checkpoint is None and resume_checkpoint.is_file():
+                                        checkpoint = resume_checkpoint
+                            except (OSError, TypeError, ValueError, json.JSONDecodeError):
+                                pass
                         result = CampaignJobResult(
                             job.candidate_id,
                             "inconclusive",
                             None,
                             best_epoch,
                             completed_epochs,
-                            best if best.is_file() else None,
+                            checkpoint,
                             None,
                             {},
                             "worker_exceeded_deadline_grace",
+                        )
+                        _atomic_json(
+                            job_dir / "worker_result.json",
+                            _serialize_result(result, _job_sha(job)),
                         )
                     results.append(result)
                     active.pop(gpu)
@@ -340,6 +494,9 @@ class SubprocessCampaignRuntime:
                     results.append(reused)
                     continue
                 job_dir.mkdir(parents=True, exist_ok=True)
+                stale_result_path = job_dir / "worker_result.json"
+                if stale_result_path.is_file():
+                    stale_result_path.unlink()
                 job_path = job_dir / "job.json"
                 _atomic_json(job_path, asdict(job))
                 env = _worker_environment(gpu)
@@ -367,9 +524,13 @@ class SubprocessCampaignRuntime:
             for gpu in finished:
                 process, thread, job, job_dir = active.pop(gpu)
                 thread.join(timeout=5)
-                result = self._read_result(job_dir, job)
+                result = self._read_worker_result(job_dir, job)
                 if result is None:
                     result = CampaignJobResult(job.candidate_id, "failed", None, None, 0, None, None, {}, f"worker_exit_code={process.returncode}")
+                    _atomic_json(
+                        job_dir / "worker_result.json",
+                        _serialize_result(result, _job_sha(job)),
+                    )
                 print(f"JOB_END job={job.candidate_id} gpu={gpu} status={result.status}", flush=True)
                 results.append(result)
             if not finished:
@@ -395,6 +556,7 @@ def _main(argv: list[str] | None = None) -> int:
     job_path = Path(args.job)
     job = _job_from_json(job_path)
     output_dir = Path(args.output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
     try:
         result = run_worker(job, Path(args.data_dir), output_dir, Path(args.cache_root), args.deadline)
     except Exception as exc:
