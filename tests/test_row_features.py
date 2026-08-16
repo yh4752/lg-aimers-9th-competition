@@ -123,6 +123,10 @@ def test_hand_state_interactions_can_derive_hand_matchup(
 ) -> None:
     result = add_row_feature_bundle(preprocessing_frame, "hand_state_interactions")
 
+    added = tuple(
+        column for column in result.columns if column not in preprocessing_frame.columns
+    )
+    assert added == EXPECTED_COLUMNS["hand_state_interactions"]
     assert "hand_matchup" not in result
     assert result["rf_hand_count_state"].tolist() == [
         "1_2_0_0",
@@ -150,6 +154,10 @@ def test_hand_state_interactions_can_derive_hand_matchup(
 def test_pitcher_batter_gap_has_exact_values(preprocessing_frame: pd.DataFrame) -> None:
     result = add_row_feature_bundle(preprocessing_frame, "pitcher_batter_gap")
 
+    added = tuple(
+        column for column in result.columns if column not in preprocessing_frame.columns
+    )
+    assert added == EXPECTED_COLUMNS["pitcher_batter_gap"]
     np.testing.assert_allclose(result["rf_success_gap"], [0.03, -0.03, 0.02, -0.02, 0.0])
     np.testing.assert_allclose(result["rf_middle_gap"], [0.06, 0.17, 0.25, 0.38, 0.44])
     np.testing.assert_allclose(
@@ -161,6 +169,10 @@ def test_pitcher_batter_gap_has_exact_values(preprocessing_frame: pd.DataFrame) 
 def test_recent_trend_has_exact_values(preprocessing_frame: pd.DataFrame) -> None:
     result = add_row_feature_bundle(preprocessing_frame, "recent_trend")
 
+    added = tuple(
+        column for column in result.columns if column not in preprocessing_frame.columns
+    )
+    assert added == EXPECTED_COLUMNS["recent_trend"]
     np.testing.assert_allclose(result["rf_success_prev1_prev5"], 0.0)
     np.testing.assert_allclose(result["rf_success_prev3_prev5"], 0.0)
     np.testing.assert_allclose(result["rf_success_prev1_career"], [-0.05, -0.05, 0.0, -0.10, 0.0])
@@ -181,6 +193,8 @@ def test_pitchmix_shape_normalizes_before_exact_derivation() -> None:
 
     result = add_row_feature_bundle(frame, "pitchmix_shape")
 
+    added = tuple(column for column in result.columns if column not in frame.columns)
+    assert added == EXPECTED_COLUMNS["pitchmix_shape"]
     expected_entropy = [
         -sum(value * np.log(value) for value in (0.6, 0.3, 0.1)) / np.log(3),
         -sum(value * np.log(value) for value in (0.5, 0.25, 0.25)) / np.log(3),
