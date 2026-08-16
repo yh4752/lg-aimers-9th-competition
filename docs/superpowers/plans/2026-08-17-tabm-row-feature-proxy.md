@@ -122,7 +122,8 @@ def add_row_feature_bundle(frame: pd.DataFrame, bundle: str) -> pd.DataFrame:
     if bundle not in ROW_FEATURE_BUNDLES:
         raise RowFeatureError(f"unknown row feature bundle: {bundle}")
     result = frame.copy()
-    _DERIVERS[bundle](result)
+    derive = _DERIVERS[bundle]
+    derive(result)
     if not result.index.equals(frame.index):
         raise RowFeatureError("row feature derivation changed row alignment")
     return result
