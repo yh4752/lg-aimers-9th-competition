@@ -22,7 +22,7 @@ from experiments.independent_dl.row_features import (
     row_segment_labels,
 )
 
-from .runner import CampaignJob, CampaignJobResult
+from .row_feature_runtime import CampaignJob, CampaignJobResult
 
 
 _RUNTIME_ROOT = Path(__file__).resolve().parents[2]

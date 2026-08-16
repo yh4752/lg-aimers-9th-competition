@@ -600,7 +600,7 @@ def test_wall_deadline_cannot_exceed_sealed_budget(tmp_path: Path, monkeypatch) 
         )
 
 
-def test_code_binding_covers_runtime_packages_and_file_set_changes(tmp_path: Path) -> None:
+def test_code_binding_covers_only_the_sealed_runtime_file_set(tmp_path: Path) -> None:
     production = {path.as_posix() for path in _code_file_paths()}
     assert any(path.endswith("independent_dl/progress.py") for path in production)
     assert any(
@@ -608,17 +608,20 @@ def test_code_binding_covers_runtime_packages_and_file_set_changes(tmp_path: Pat
         for path in production
     )
 
+    source_root = Path(proxy_module.__file__).resolve().parents[1]
     root = tmp_path / "experiments"
-    (root / "independent_dl").mkdir(parents=True)
-    (root / "tabm_campaign").mkdir()
-    (root / "independent_dl" / "a.py").write_text("A = 1\n", encoding="utf-8")
-    (root / "tabm_campaign" / "b.py").write_text("B = 1\n", encoding="utf-8")
+    for source in _code_file_paths():
+        destination = root / source.relative_to(source_root)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(source.read_bytes())
     initial = _code_sha256(root)
     added = root / "independent_dl" / "new_module.py"
     added.write_text("NEW = 1\n", encoding="utf-8")
-    assert _code_sha256(root) != initial
-    added.unlink()
     assert _code_sha256(root) == initial
+    added.unlink()
+    listed = root / "independent_dl" / "row_features.py"
+    listed.write_bytes(listed.read_bytes() + b"\n# changed\n")
+    assert _code_sha256(root) != initial
 
 
 def test_run_is_sequential_guarded_and_publishes_exact_evidence(
@@ -731,6 +734,38 @@ def test_budget_inconclusive_keeps_metric_but_bundles_only_training_artifacts(
         now=lambda: 2_000.0,
     )
     assert resumed_runtime.preexisting_checkpoints[0] == jobs[0].candidate_id
+
+
+def test_nested_optional_history_is_hash_bound_to_resume(
+    tmp_path: Path, monkeypatch
+) -> None:
+    data = _official_data(tmp_path, monkeypatch)
+    nested = data / "nested"
+    nested.mkdir()
+    history = nested / "trackman_history.csv"
+    history.write_bytes(b"pitcher_id,season\np1,2023\n")
+
+    run = run_row_feature_proxy(
+        data_dir=data,
+        output_dir=tmp_path / "out",
+        runtime=_BudgetRuntime(),
+        wall_deadline=10_000.0,
+        now=lambda: 1_000.0,
+    )
+    with ZipFile(run.bundles.resume) as archive:
+        state = json.loads(archive.read("state/stage_state.json"))
+    assert state["trackman_history_sha256"] == sha256(history.read_bytes()).hexdigest()
+
+    history.write_bytes(b"pitcher_id,season\np2,2023\n")
+    with pytest.raises(RowFeatureProxyError, match="trackman_history_sha256"):
+        run_row_feature_proxy(
+            data_dir=data,
+            output_dir=tmp_path / "resume",
+            resume_bundle=run.bundles.resume,
+            runtime=_BudgetRuntime(),
+            wall_deadline=12_000.0,
+            now=lambda: 2_000.0,
+        )
 
 
 def test_deadline_grace_fallback_is_bound_bundled_and_resumable(

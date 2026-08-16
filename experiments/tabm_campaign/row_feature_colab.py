@@ -150,6 +150,33 @@ def _zip_info(name: str) -> ZipInfo:
     return info
 
 
+def _publish_prepared_archive(
+    temporary: str,
+    destination: Path,
+    *,
+    replace: bool,
+) -> None:
+    if replace:
+        if destination.exists() and not destination.is_symlink():
+            try:
+                mode = destination.lstat().st_mode
+            except OSError as error:
+                raise RowFeatureColabError("cannot inspect existing output") from error
+            if not stat.S_ISREG(mode):
+                raise RowFeatureColabError(
+                    "replace output must be a regular file or symlink entry"
+                )
+        os.replace(temporary, destination)
+        return
+    try:
+        os.link(temporary, destination)
+    except FileExistsError as error:
+        raise RowFeatureColabError(f"output already exists: {destination}") from error
+    except OSError as error:
+        raise RowFeatureColabError(f"cannot publish output exclusively: {error}") from error
+    os.unlink(temporary)
+
+
 def prepare_input_archive(
     data_dir: str | Path,
     output: str | Path,
@@ -184,7 +211,7 @@ def prepare_input_archive(
     )
 
     destination = Path(output)
-    if destination.exists() and not replace:
+    if (destination.exists() or destination.is_symlink()) and not replace:
         raise RowFeatureColabError(f"output already exists: {destination}")
     destination.parent.mkdir(parents=True, exist_ok=True)
     descriptor, temporary = tempfile.mkstemp(
@@ -199,7 +226,7 @@ def prepare_input_archive(
         for name, path in sources.items():
             if file_sha256(path) != evidence[name]["sha256"]:
                 raise RowFeatureColabError(f"source changed during publication: {name}")
-        os.replace(temporary, destination)
+        _publish_prepared_archive(temporary, destination, replace=replace)
     except Exception:
         try:
             os.unlink(temporary)
@@ -418,12 +445,92 @@ def verify_stage_p_resume(
         "version": "P",
         "campaign_config_sha256": expected_contract_sha256,
         "official_train_sha256": verified_input.train_sha256,
+        "trackman_history_sha256": verified_input.history_sha256,
+        "input_manifest_sha256": verified_input.input_manifest_sha256,
         "code_sha256": expected_code_sha256,
     }
     for name, value in expected.items():
         if state.get(name) != value:
             raise RowFeatureColabError(f"resume {name} binding differs")
+    try:
+        from . import row_feature_proxy as proxy
+        from .row_feature_contracts import load_row_feature_proxy_contract
+
+        contract = load_row_feature_proxy_contract()
+        jobs = proxy.build_proxy_jobs(contract)
+        state = proxy._validate_state_header(
+            state,
+            contract_sha=expected_contract_sha256,
+            train_sha=verified_input.train_sha256,
+            history_sha=verified_input.history_sha256,
+            input_manifest_sha=verified_input.input_manifest_sha256,
+            code_sha=expected_code_sha256,
+            jobs=jobs,
+        )
+        rows = proxy._validated_rows(state, jobs)
+        decision = proxy._decision(jobs, rows, contract)
+        if state["stage_complete"] != (decision.status in {"complete", "blocked"}):
+            raise RowFeatureColabError(
+                "resume stage_complete contradicts its results"
+            )
+        if state["prior_manifest_sha256"] != verified.prior_manifest_sha256:
+            raise RowFeatureColabError("resume prior manifest binding differs")
+        if set(verified.member_sha256) != proxy._resume_expected_members(rows):
+            raise RowFeatureColabError(
+                "resume member set differs from its Stage P state"
+            )
+        for row in rows.values():
+            for binding in row["artifacts"].values():  # type: ignore[union-attr]
+                if verified.member_sha256.get(binding["path"]) != binding["sha256"]:
+                    raise RowFeatureColabError("resume artifact binding differs")
+        with ZipFile(source, "r") as archive:
+            if archive.read("metrics/job_results.json") != proxy._canonical_json(
+                state["results"]
+            ):
+                raise RowFeatureColabError("resume metrics differ from Stage P state")
+            if archive.read("logs/stage.log") != proxy._stage_log(state, decision):
+                raise RowFeatureColabError("resume log differs from Stage P state")
+            for row in rows.values():
+                if row["status"] != "completed":
+                    continue
+                prediction = f"predictions/{row['candidate_id']}.csv"
+                artifact = row["artifacts"]["predictions.csv"]  # type: ignore[index]
+                if (
+                    verified.member_sha256.get(prediction) != artifact["sha256"]
+                    or proxy._zip_member_sha256(archive, prediction)
+                    != artifact["sha256"]
+                ):
+                    raise RowFeatureColabError(
+                        "resume completed prediction copies differ"
+                    )
+    except RowFeatureColabError:
+        raise
+    except Exception as error:
+        raise RowFeatureColabError(f"resume Stage P state is invalid: {error}") from error
     return verified
+
+
+def register_verified_uploaded_resume(
+    source: str | Path,
+    *,
+    expected_contract_sha256: str,
+    expected_code_sha256: str,
+    verified_input: VerifiedInput,
+    on_verified_resume: Callable[[Path], None],
+) -> Path:
+    """Register an uploaded resume only after all Stage P bindings verify."""
+
+    if not callable(on_verified_resume):
+        raise RowFeatureColabError("verified resume callback must be callable")
+    path = Path(source)
+    verify_stage_p_resume(
+        path,
+        expected_contract_sha256=expected_contract_sha256,
+        expected_code_sha256=expected_code_sha256,
+        verified_input=verified_input,
+    )
+    on_verified_resume(path)
+    return path
 
 
 def _regular_file(path: Path, label: str) -> Path:
@@ -733,7 +840,7 @@ def _checkpoint_progress(path: Path, *, candidate_id: str, epoch: int) -> dict[s
 def _validated_active_row(snapshot_job_dir: Path, job) -> dict[str, object]:
     """Convert a copied epoch checkpoint into a resume row via Stage P validators."""
 
-    from .runner import CampaignJobResult
+    from .row_feature_runtime import CampaignJobResult
     from . import row_feature_proxy as proxy
     from .worker import (
         _atomic_json,
@@ -834,6 +941,8 @@ def publish_active_checkpoint_snapshot(
     contract_path: str | Path,
     contract_sha256: str,
     train_sha256: str,
+    history_sha256: str,
+    input_manifest_sha256: str,
     code_sha256: str,
     sequence: int,
 ) -> EmergencySnapshot:
@@ -843,6 +952,10 @@ def publish_active_checkpoint_snapshot(
 
     contract_sha256 = _require_sha(contract_sha256, "contract SHA-256")
     train_sha256 = _require_sha(train_sha256, "train SHA-256")
+    history_sha256 = _require_sha(history_sha256, "history SHA-256")
+    input_manifest_sha256 = _require_sha(
+        input_manifest_sha256, "input manifest SHA-256"
+    )
     code_sha256 = _require_sha(code_sha256, "code SHA-256")
     if type(sequence) is not int or sequence < 0:
         raise RowFeatureColabError("snapshot sequence must be nonnegative")
@@ -853,6 +966,8 @@ def publish_active_checkpoint_snapshot(
             proxy._read_json_bytes(state_path.read_bytes(), "local stage state"),
             contract_sha=contract_sha256,
             train_sha=train_sha256,
+            history_sha=history_sha256,
+            input_manifest_sha=input_manifest_sha256,
             code_sha=code_sha256,
             jobs=proxy.build_proxy_jobs(contract),
         )
@@ -889,6 +1004,8 @@ def publish_active_checkpoint_snapshot(
         snapshot_state = proxy._state_payload(
             contract_sha=contract_sha256,
             train_sha=train_sha256,
+            history_sha=history_sha256,
+            input_manifest_sha=input_manifest_sha256,
             code_sha=code_sha256,
             jobs=jobs,
             rows=rows,
@@ -994,6 +1111,8 @@ def publish_stable_state_snapshot(
     contract_path: str | Path,
     contract_sha256: str,
     train_sha256: str,
+    history_sha256: str,
+    input_manifest_sha256: str,
     code_sha256: str,
     sequence: int,
     candidate_id: str,
@@ -1010,6 +1129,8 @@ def publish_stable_state_snapshot(
             live_root / "stage_state.json",
             contract_sha=contract_sha256,
             train_sha=train_sha256,
+            history_sha=history_sha256,
+            input_manifest_sha=input_manifest_sha256,
             code_sha=code_sha256,
             jobs=jobs,
             output_dir=live_root,
@@ -1143,6 +1264,8 @@ class SnapshottingCampaignRuntime:
         contract_path: Path,
         contract_sha256: str,
         train_sha256: str,
+        history_sha256: str,
+        input_manifest_sha256: str,
         code_sha256: str,
         snapshot_interval_seconds: float,
         poll_seconds: float = 1.0,
@@ -1159,6 +1282,8 @@ class SnapshottingCampaignRuntime:
         self.contract_path = contract_path
         self.contract_sha256 = contract_sha256
         self.train_sha256 = train_sha256
+        self.history_sha256 = history_sha256
+        self.input_manifest_sha256 = input_manifest_sha256
         self.code_sha256 = code_sha256
         self.snapshot_interval_seconds = float(snapshot_interval_seconds)
         self.poll_seconds = float(poll_seconds)
@@ -1172,6 +1297,8 @@ class SnapshottingCampaignRuntime:
             contract_path=self.contract_path,
             contract_sha256=self.contract_sha256,
             train_sha256=self.train_sha256,
+            history_sha256=self.history_sha256,
+            input_manifest_sha256=self.input_manifest_sha256,
             code_sha256=self.code_sha256,
             sequence=self.store.next_sequence(),
         )
@@ -1189,6 +1316,8 @@ class SnapshottingCampaignRuntime:
                 contract_path=self.contract_path,
                 contract_sha256=self.contract_sha256,
                 train_sha256=self.train_sha256,
+                history_sha256=self.history_sha256,
+                input_manifest_sha256=self.input_manifest_sha256,
                 code_sha256=self.code_sha256,
                 sequence=self.store.next_sequence(),
                 candidate_id=job.candidate_id,
@@ -1306,6 +1435,11 @@ def run_supervised_stage(
     contract = load_row_feature_proxy_contract()
     contract_sha = row_feature_contract_sha256()
     code_sha = proxy._code_sha256()
+    data_dir = Path(data_dir)
+    history_sha = file_sha256(_regular_file(data_dir / "trackman_history.csv", "history"))
+    input_manifest_sha = file_sha256(
+        _regular_file(data_dir / "input_manifest.json", "input manifest")
+    )
     output_dir = Path(output_dir)
     store = _VerifiedSnapshotStore(
         snapshot_dir=Path(snapshot_dir),
@@ -1319,6 +1453,8 @@ def run_supervised_stage(
         contract_path=DEFAULT_ROW_FEATURE_PROXY_CONTRACT,
         contract_sha256=contract_sha,
         train_sha256=contract.official_train_sha256,
+        history_sha256=history_sha,
+        input_manifest_sha256=input_manifest_sha,
         code_sha256=code_sha,
         snapshot_interval_seconds=snapshot_interval_seconds,
     )
@@ -1331,6 +1467,8 @@ def run_supervised_stage(
             contract_path=DEFAULT_ROW_FEATURE_PROXY_CONTRACT,
             contract_sha256=contract_sha,
             train_sha256=contract.official_train_sha256,
+            history_sha256=history_sha,
+            input_manifest_sha256=input_manifest_sha,
             code_sha256=code_sha,
             sequence=store.next_sequence(),
             candidate_id=job.candidate_id,

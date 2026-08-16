@@ -38,7 +38,12 @@ from .row_feature_decisions import (
     decide_proxy_survivors,
     proxy_decision_json,
 )
-from .runner import CampaignJob, CampaignJobResult, CampaignRuntime
+from .row_feature_runtime import (
+    STAGE_P_RUNTIME_PYTHON_MEMBERS,
+    CampaignJob,
+    CampaignJobResult,
+    CampaignRuntime,
+)
 from .worker import (
     _job_payload,
     _job_sha,
@@ -64,7 +69,7 @@ class RowFeatureProxyRun:
 
 
 _VERSION = "P"
-_STATE_SCHEMA_VERSION = 1
+_STATE_SCHEMA_VERSION = 2
 _CONFIG_MEMBER = "config/row_feature_proxy_v1.json"
 _METRICS_MEMBER = "metrics/job_results.json"
 _DECISION_MEMBER = "decisions/proxy_decision.json"
@@ -85,7 +90,6 @@ _CHECKPOINT_NAMES = {"checkpoint.pt", "best_checkpoint.pt"}
 _STATUSES = {"completed", "failed", "inconclusive"}
 _DISPOSITIONS = {"completed", "failed", "inconclusive", "not_started"}
 _SHA_RE = re.compile(r"[0-9a-f]{64}")
-_GENERATED_CELL_PREFIXES = ("COLAB_", "KAGGLE_")
 _MAX_CHECKPOINT_BYTES = 1024 * 1024 * 1024
 _MAX_CONTROL_MEMBER_BYTES = 16 * 1024 * 1024
 _MAX_TABM_NUMERIC_FEATURES = 4096
@@ -116,6 +120,31 @@ def _official_train_file_sha256(path: Path) -> str:
     """Separate seam for tiny fixture tests; production hashes the whole file."""
 
     return _file_sha256(path)
+
+
+def _bound_input_file_sha256(data_dir: Path, name: str) -> str | None:
+    candidates: list[Path] = []
+    for root, directories, files in os.walk(data_dir, topdown=True, followlinks=False):
+        root_path = Path(root)
+        directories[:] = sorted(
+            entry for entry in directories if not (root_path / entry).is_symlink()
+        )
+        if name not in files:
+            continue
+        candidate = root_path / name
+        if not _regular_file(candidate):
+            raise RowFeatureProxyError(
+                f"official {name} must be a regular non-symlink file"
+            )
+        candidates.append(candidate)
+    if not candidates:
+        return None
+    if len(candidates) != 1:
+        raise RowFeatureProxyError(
+            f"data_dir must contain at most one regular non-symlink {name}; "
+            f"found={len(candidates)}"
+        )
+    return _file_sha256(candidates[0])
 
 
 def _regular_file(path: Path) -> bool:
@@ -173,22 +202,19 @@ def _find_official_train(data_dir: Path) -> Path:
 
 
 def _code_file_paths(experiments_root: Path | None = None) -> tuple[Path, ...]:
-    """Return the conservative Python source closure for Stage P execution."""
+    """Return the sealed Python source closure for Stage P execution."""
 
     root = (
         Path(__file__).resolve().parents[1]
         if experiments_root is None
         else Path(experiments_root).resolve()
     )
-    paths = list((root / "independent_dl").rglob("*.py"))
-    paths.extend(
-        path
-        for path in (root / "tabm_campaign").rglob("*.py")
-        if not path.name.startswith(_GENERATED_CELL_PREFIXES)
+    result = tuple(
+        root / PurePosixPath(member).relative_to("experiments")
+        for member in STAGE_P_RUNTIME_PYTHON_MEMBERS
     )
-    result = tuple(sorted(paths, key=lambda path: path.relative_to(root).as_posix()))
-    if not result:
-        raise RowFeatureProxyError("Stage P code source closure is empty")
+    if any(not path.is_file() for path in result):
+        raise RowFeatureProxyError("Stage P sealed source closure is incomplete")
     return result
 
 
@@ -1087,6 +1113,8 @@ def _state_payload(
     *,
     contract_sha: str,
     train_sha: str,
+    history_sha: str | None,
+    input_manifest_sha: str | None,
     code_sha: str,
     jobs: tuple[CampaignJob, ...],
     rows: Mapping[str, dict[str, object]],
@@ -1101,6 +1129,8 @@ def _state_payload(
         "stage_complete": terminal,
         "campaign_config_sha256": contract_sha,
         "official_train_sha256": train_sha,
+        "trackman_history_sha256": history_sha,
+        "input_manifest_sha256": input_manifest_sha,
         "code_sha256": code_sha,
         "prior_manifest_sha256": prior_manifest_sha,
         "jobs": _job_grid(jobs),
@@ -1123,6 +1153,8 @@ def _validate_state_header(
     *,
     contract_sha: str,
     train_sha: str,
+    history_sha: str | None,
+    input_manifest_sha: str | None,
     code_sha: str,
     jobs: tuple[CampaignJob, ...],
 ) -> dict[str, object]:
@@ -1134,6 +1166,8 @@ def _validate_state_header(
         "stage_complete",
         "campaign_config_sha256",
         "official_train_sha256",
+        "trackman_history_sha256",
+        "input_manifest_sha256",
         "code_sha256",
         "prior_manifest_sha256",
         "jobs",
@@ -1152,6 +1186,16 @@ def _validate_state_header(
     }
     for label, expected in bindings.items():
         if _parse_sha(state[label], label) != expected:
+            raise RowFeatureProxyError(f"stage state {label} binding differs")
+    optional_bindings = {
+        "trackman_history_sha256": history_sha,
+        "input_manifest_sha256": input_manifest_sha,
+    }
+    for label, expected in optional_bindings.items():
+        value = state[label]
+        if value is not None:
+            value = _parse_sha(value, label)
+        if value != expected:
             raise RowFeatureProxyError(f"stage state {label} binding differs")
     prior = state["prior_manifest_sha256"]
     if prior is not None:
@@ -1382,6 +1426,8 @@ def _load_local_state(
     *,
     contract_sha: str,
     train_sha: str,
+    history_sha: str | None,
+    input_manifest_sha: str | None,
     code_sha: str,
     jobs: tuple[CampaignJob, ...],
     output_dir: Path,
@@ -1392,6 +1438,8 @@ def _load_local_state(
         _read_json_bytes(state_path.read_bytes(), "local stage state"),
         contract_sha=contract_sha,
         train_sha=train_sha,
+        history_sha=history_sha,
+        input_manifest_sha=input_manifest_sha,
         code_sha=code_sha,
         jobs=jobs,
     )
@@ -1417,6 +1465,8 @@ def _restore_resume(
     config_bytes: bytes,
     contract_sha: str,
     train_sha: str,
+    history_sha: str | None,
+    input_manifest_sha: str | None,
     code_sha: str,
     contract: RowFeatureProxyContract,
     jobs: tuple[CampaignJob, ...],
@@ -1470,6 +1520,8 @@ def _restore_resume(
                 _read_json_bytes(controls[_STATE_MEMBER], "resume stage state"),
                 contract_sha=contract_sha,
                 train_sha=train_sha,
+                history_sha=history_sha,
+                input_manifest_sha=input_manifest_sha,
                 code_sha=code_sha,
                 jobs=jobs,
             )
@@ -1708,10 +1760,13 @@ def run_row_feature_proxy(
         raise RowFeatureProxyError(
             "wall_deadline exceeds now() + contract budget.wall_seconds"
         )
-    train_path = _find_official_train(Path(data_dir))
+    data_dir = Path(data_dir)
+    train_path = _find_official_train(data_dir)
     train_sha = _official_train_file_sha256(train_path)
     if train_sha != contract.official_train_sha256:
         raise RowFeatureProxyError("official train.csv SHA-256 differs from the contract")
+    history_sha = _bound_input_file_sha256(data_dir, "trackman_history.csv")
+    input_manifest_sha = _bound_input_file_sha256(data_dir, "input_manifest.json")
     code_sha = _code_sha256()
     jobs = build_proxy_jobs(contract)
     job_deadline = wall_deadline - contract.budget.new_job_guard_seconds
@@ -1734,6 +1789,8 @@ def run_row_feature_proxy(
             config_bytes=config_bytes,
             contract_sha=contract_sha,
             train_sha=train_sha,
+            history_sha=history_sha,
+            input_manifest_sha=input_manifest_sha,
             code_sha=code_sha,
             contract=contract,
             jobs=jobs,
@@ -1743,6 +1800,8 @@ def run_row_feature_proxy(
             state_path,
             contract_sha=contract_sha,
             train_sha=train_sha,
+            history_sha=history_sha,
+            input_manifest_sha=input_manifest_sha,
             code_sha=code_sha,
             jobs=jobs,
             output_dir=root,
@@ -1764,6 +1823,8 @@ def run_row_feature_proxy(
     state = _state_payload(
         contract_sha=contract_sha,
         train_sha=train_sha,
+        history_sha=history_sha,
+        input_manifest_sha=input_manifest_sha,
         code_sha=code_sha,
         jobs=jobs,
         rows=rows,
@@ -1795,6 +1856,8 @@ def run_row_feature_proxy(
         state = _state_payload(
             contract_sha=contract_sha,
             train_sha=train_sha,
+            history_sha=history_sha,
+            input_manifest_sha=input_manifest_sha,
             code_sha=code_sha,
             jobs=jobs,
             rows=rows,
@@ -1813,6 +1876,8 @@ def run_row_feature_proxy(
     state = _state_payload(
         contract_sha=contract_sha,
         train_sha=train_sha,
+        history_sha=history_sha,
+        input_manifest_sha=input_manifest_sha,
         code_sha=code_sha,
         jobs=jobs,
         rows=rows,

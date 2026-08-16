@@ -115,7 +115,6 @@ def test_prepare_input_rejects_wrong_hash_duplicates_nesting_and_symlinks(
             expected_train_sha256="0" * 64,
             campaign_config_sha256="c" * 64,
         )
-
     nested = data / "nested"
     nested.mkdir()
     (nested / "train.csv").write_bytes(TRAIN)
@@ -144,6 +143,66 @@ def test_prepare_input_rejects_wrong_hash_duplicates_nesting_and_symlinks(
             expected_train_sha256=sha256(TRAIN).hexdigest(),
             campaign_config_sha256="c" * 64,
         )
+
+
+def test_prepare_input_rejects_dangling_output_symlink_without_replace(
+    tmp_path: Path,
+) -> None:
+    data = tmp_path / "data"
+    _write_inputs(data)
+    output = tmp_path / "prepared.zip"
+    output.symlink_to(tmp_path / "missing-target.zip")
+
+    with pytest.raises(colab.RowFeatureColabError, match="exists"):
+        colab.prepare_input_archive(
+            data,
+            output,
+            expected_train_sha256=sha256(TRAIN).hexdigest(),
+            campaign_config_sha256="c" * 64,
+        )
+    assert output.is_symlink()
+
+
+def test_prepare_input_never_overwrites_a_concurrently_created_output(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    data = tmp_path / "data"
+    _write_inputs(data)
+    output = tmp_path / "prepared.zip"
+    real_link = os.link
+
+    def concurrent_create(source, destination) -> None:
+        Path(destination).write_bytes(b"concurrent owner")
+        real_link(source, destination)
+
+    monkeypatch.setattr(colab.os, "link", concurrent_create)
+    with pytest.raises(colab.RowFeatureColabError, match="exists"):
+        colab.prepare_input_archive(
+            data,
+            output,
+            expected_train_sha256=sha256(TRAIN).hexdigest(),
+            campaign_config_sha256="c" * 64,
+        )
+    assert output.read_bytes() == b"concurrent owner"
+
+
+def test_prepare_input_replace_explicitly_replaces_a_dangling_symlink(
+    tmp_path: Path,
+) -> None:
+    data = tmp_path / "data"
+    _write_inputs(data)
+    output = tmp_path / "prepared.zip"
+    output.symlink_to(tmp_path / "missing-target.zip")
+
+    colab.prepare_input_archive(
+        data,
+        output,
+        expected_train_sha256=sha256(TRAIN).hexdigest(),
+        campaign_config_sha256="c" * 64,
+        replace=True,
+    )
+    assert output.is_file()
+    assert not output.is_symlink()
 
 
 def test_data_archive_verifier_extracts_exact_members_and_binds_manifest(
@@ -231,36 +290,52 @@ def _stage_bundle(
     version: str = "P",
     contract_sha256: str = REAL_CONTRACT_SHA,
     train_sha256: str | None = None,
+    history_sha256: str | None = None,
+    input_manifest_sha256: str = "e" * 64,
     code_sha256: str = "d" * 64,
+    drop_state_key: str | None = None,
+    corrupt_log: bool = False,
 ):
-    state = colab.canonical_json(
-        {
-            "schema_version": 1,
-            "version": version,
-            "campaign_config_sha256": contract_sha256,
-            "official_train_sha256": train_sha256 or sha256(TRAIN).hexdigest(),
-            "code_sha256": code_sha256,
-        }
+    contract = load_row_feature_proxy_contract()
+    jobs = proxy.build_proxy_jobs(contract)
+    decision = proxy._decision(jobs, {}, contract)
+    state = proxy._state_payload(
+        contract_sha=contract_sha256,
+        train_sha=train_sha256 or sha256(TRAIN).hexdigest(),
+        history_sha=history_sha256 or sha256(HISTORY).hexdigest(),
+        input_manifest_sha=input_manifest_sha256,
+        code_sha=code_sha256,
+        jobs=jobs,
+        rows={},
+        prior_manifest_sha=None,
+        decision=decision,
     )
+    if drop_state_key is not None:
+        state.pop(drop_state_key)
     config = (
         REAL_CONTRACT_BYTES
         if contract_sha256 == REAL_CONTRACT_SHA
         else b"deliberately different contract fixture"
     )
+    payload_root = root / "payload"
+    payload_root.mkdir(parents=True)
+    review, resume = proxy._bundle_members(
+        output_dir=payload_root,
+        config_bytes=config,
+        state=state,
+        rows={},
+        decision=decision,
+    )
+    if corrupt_log:
+        resume["logs/stage.log"] = b"manifest-valid but semantically false\n"
     return write_stage_bundles(
         root,
         StageEvidence(
             version,
             contract_sha256,
             None,
-            {
-                "config/row_feature_proxy_v1.json": config,
-                "state/stage_state.json": state,
-            },
-            {
-                "config/row_feature_proxy_v1.json": config,
-                "state/stage_state.json": state,
-            },
+            review,
+            resume,
         ),
         bundle_prefix="tabm_row_feature_stage",
     )
@@ -296,6 +371,12 @@ def test_resume_requires_exact_stage_contract_code_and_input_bindings(
         _stage_bundle(tmp_path / "contract", contract_sha256="a" * 64).resume,
         _stage_bundle(tmp_path / "code", code_sha256="a" * 64).resume,
         _stage_bundle(tmp_path / "input", train_sha256="a" * 64).resume,
+        _stage_bundle(tmp_path / "history", history_sha256="a" * 64).resume,
+        _stage_bundle(
+            tmp_path / "manifest", input_manifest_sha256="a" * 64
+        ).resume,
+        _stage_bundle(tmp_path / "schema", drop_state_key="jobs").resume,
+        _stage_bundle(tmp_path / "log", corrupt_log=True).resume,
     )
     for resume in variants:
         assert resume is not None
@@ -306,6 +387,50 @@ def test_resume_requires_exact_stage_contract_code_and_input_bindings(
                 expected_code_sha256="d" * 64,
                 verified_input=verified_input,
             )
+
+
+def test_verified_uploaded_resume_is_registered_before_a_later_setup_error(
+    tmp_path: Path,
+) -> None:
+    verified_input = _verified_input(tmp_path)
+    resume = _stage_bundle(tmp_path / "uploaded").resume
+    assert resume is not None
+    latest: list[Path | None] = [None]
+    downloads: list[Path] = []
+
+    def remember(path: Path) -> None:
+        latest[0] = path
+
+    colab.register_verified_uploaded_resume(
+        resume,
+        expected_contract_sha256=REAL_CONTRACT_SHA,
+        expected_code_sha256="d" * 64,
+        verified_input=verified_input,
+        on_verified_resume=remember,
+    )
+    try:
+        raise RuntimeError("simulated dependency failure")
+    except RuntimeError:
+        if latest[0] is not None:
+            downloads.append(latest[0])
+    assert downloads == [resume]
+
+
+def test_untrusted_uploaded_resume_is_not_registered(tmp_path: Path) -> None:
+    verified_input = _verified_input(tmp_path)
+    resume = _stage_bundle(tmp_path / "uploaded", code_sha256="a" * 64).resume
+    assert resume is not None
+    latest: list[Path] = []
+
+    with pytest.raises(colab.RowFeatureColabError, match="code_sha256"):
+        colab.register_verified_uploaded_resume(
+            resume,
+            expected_contract_sha256=REAL_CONTRACT_SHA,
+            expected_code_sha256="d" * 64,
+            verified_input=verified_input,
+            on_verified_resume=latest.append,
+        )
+    assert latest == []
 
 
 def test_delivery_contains_only_recursively_verified_evidence(tmp_path: Path) -> None:
@@ -409,6 +534,8 @@ def test_active_checkpoint_snapshot_restores_the_same_completed_epoch(
     state = proxy._state_payload(
         contract_sha=contract_sha,
         train_sha=contract.official_train_sha256,
+        history_sha="b" * 64,
+        input_manifest_sha="e" * 64,
         code_sha=code_sha,
         jobs=jobs,
         rows={},
@@ -451,6 +578,8 @@ def test_active_checkpoint_snapshot_restores_the_same_completed_epoch(
         contract_path=DEFAULT_ROW_FEATURE_PROXY_CONTRACT,
         contract_sha256=contract_sha,
         train_sha256=contract.official_train_sha256,
+        history_sha256="b" * 64,
+        input_manifest_sha256="e" * 64,
         code_sha256=code_sha,
         sequence=7,
     )
@@ -463,6 +592,8 @@ def test_active_checkpoint_snapshot_restores_the_same_completed_epoch(
         config_bytes=DEFAULT_ROW_FEATURE_PROXY_CONTRACT.read_bytes(),
         contract_sha=contract_sha,
         train_sha=contract.official_train_sha256,
+        history_sha="b" * 64,
+        input_manifest_sha="e" * 64,
         code_sha=code_sha,
         contract=contract,
         jobs=jobs,

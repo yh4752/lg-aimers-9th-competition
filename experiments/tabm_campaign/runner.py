@@ -6,7 +6,7 @@ import time
 from dataclasses import asdict, dataclass, replace
 from hashlib import sha256
 from pathlib import Path
-from typing import Callable, Mapping, Protocol
+from typing import Callable, Mapping
 from zipfile import ZipFile
 
 from .artifacts import BundlePaths, StageEvidence, verify_resume_bundle, write_stage_bundles
@@ -19,6 +19,7 @@ from .decisions import (
     ensemble_verdict,
     temporal_verdict,
 )
+from .row_feature_runtime import CampaignJob, CampaignJobResult, CampaignRuntime
 
 
 VERSION_B_REFERENCE_CANDIDATE_ID = "a__p2__piecewise_linear__bce__plateau__s42"
@@ -32,59 +33,12 @@ class CampaignRunnerError(RuntimeError):
 
 
 @dataclass(frozen=True)
-class CampaignJob:
-    candidate_id: str
-    capacity: str
-    k: int
-    width: int
-    blocks: int
-    dropout: float
-    num_embedding: str
-    loss: str
-    scheduler: str
-    learning_rate: float
-    seed: int
-    train_end_year: int
-    valid_year: int
-    sample_mode: str
-    max_epochs: int
-    min_epochs: int
-    patience: int
-    feature_bundle: str | None = None
-
-
-@dataclass(frozen=True)
-class CampaignJobResult:
-    candidate_id: str
-    status: str
-    brier: float | None
-    best_epoch: int | None
-    completed_epochs: int
-    checkpoint: Path | None
-    predictions_path: Path | None
-    resource_evidence: Mapping[str, object]
-    failure: str | None
-
-
-@dataclass(frozen=True)
 class StageRunResult:
     version: str
     bundles: BundlePaths
     completed: tuple[str, ...]
     failed: tuple[str, ...]
     inconclusive: tuple[str, ...]
-
-
-class CampaignRuntime(Protocol):
-    def run_jobs(
-        self,
-        version: str,
-        jobs: tuple[CampaignJob, ...],
-        output_dir: Path,
-        *,
-        gpu_count: int,
-        job_deadline: float,
-    ) -> tuple[CampaignJobResult, ...]: ...
 
 
 _DEFAULT_CONFIG = Path(__file__).with_name("configs") / "champion_v1.json"

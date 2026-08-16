@@ -5,26 +5,24 @@ import gzip
 from hashlib import sha256
 import io
 from pathlib import Path
+import sys
 import tarfile
 
-
 ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from experiments.tabm_campaign.row_feature_runtime import (
+    STAGE_P_RUNTIME_PYTHON_MEMBERS,
+)
+
+
 OUTPUT = ROOT / "experiments/tabm_campaign/COLAB_ROW_FEATURE_PROXY_CELL.py"
 _LIMIT_BYTES = 1_000_000
 
 
 def _source_paths() -> list[Path]:
-    paths: list[Path] = []
-    for directory in (
-        ROOT / "experiments/independent_dl",
-        ROOT / "experiments/tabm_campaign",
-    ):
-        paths.extend(
-            path
-            for path in directory.rglob("*.py")
-            if "__pycache__" not in path.parts
-            and not path.name.startswith(("COLAB_", "KAGGLE_"))
-        )
+    paths = [ROOT / member for member in STAGE_P_RUNTIME_PYTHON_MEMBERS]
     paths.extend(
         (
             ROOT / "experiments/tabm_campaign/configs/row_feature_proxy_v1.json",
@@ -177,6 +175,11 @@ def remember_snapshot(snapshot) -> None:
     request_download(snapshot.path)
 
 
+def remember_uploaded_resume(path: Path) -> None:
+    latest_verified[0] = path
+    print(f"ROW_FEATURE_UPLOADED_RESUME_READY path={{path}}", flush=True)
+
+
 def publish_latest_verified_resume() -> None:
     path = latest_verified[0]
     if path is not None:
@@ -207,6 +210,7 @@ try:
     from experiments.tabm_campaign.row_feature_colab import (
         build_delivery,
         classify_and_verify_uploads,
+        register_verified_uploaded_resume,
         run_supervised_stage,
         verify_delivery,
     )
@@ -234,6 +238,14 @@ try:
         campaign_config_sha256=contract_sha,
         expected_code_sha256=code_sha,
     )
+    if resume_path is not None:
+        register_verified_uploaded_resume(
+            resume_path,
+            expected_contract_sha256=contract_sha,
+            expected_code_sha256=code_sha,
+            verified_input=verified_input,
+            on_verified_resume=remember_uploaded_resume,
+        )
     print(
         f"ROW_FEATURE_INPUTS_VERIFIED manifest_sha256={{verified_input.input_manifest_sha256}} "
         f"resume={{resume_path if resume_path is not None else 'none'}}",
