@@ -1,0 +1,35 @@
+{
+  "status": "rejected",
+  "candidate_id": "tabm_seed_ensemble",
+  "reason": "Both predeclared seed averages were worse than seed 3407 on weighted temporal OOF Brier and exceeded the per-fold degradation gate.",
+  "decision_basis": "predeclared_temporal_oof_gate",
+  "decision": "keep_single",
+  "selected_candidate_id": "seed_3407",
+  "row_count": 499032,
+  "gates": {
+    "minimum_weighted_brier_gain": 0.00003,
+    "maximum_fold_brier_degradation": 0.00003,
+    "mean_42_3407_passed": false,
+    "mean_all_passed": false
+  },
+  "diagnostic": {
+    "seed_3407_weighted_brier": 0.2494662365634297,
+    "mean_42_3407_weighted_brier": 0.24979144725619923,
+    "mean_42_3407_weighted_gain": -0.00032521069276952863,
+    "mean_42_3407_worst_fold_degradation": 0.0007213033862193408,
+    "mean_all_weighted_brier": 0.24978438281503082,
+    "mean_all_weighted_gain": -0.0003181462516011202,
+    "mean_all_worst_fold_degradation": 0.0007202911217726871,
+    "fold_row_counts": {
+      "2022->2023": 245525,
+      "2023->2024": 253507
+    }
+  },
+  "source_hashes": {
+    "stage_c_review_sha256": "461c4422cebdc7383577ad6c53b044bfe3d9d15b667383e454591135e4242d2c",
+    "stage_c_review_manifest_sha256": "42cff3d66a0ac9c3ca39ff1f1f495de66fddca3267a5c9b021867aaa947a693f",
+    "train_csv_sha256": "d2081186b458b49f60b082be480c273135833e15ba59a76d033af28bcf8763ff",
+    "audit_contract_sha256": "b5297791c9799162f208634642b23fc8b74616f2b2c01510e1f26e02e2fafa1a",
+    "audit_review_sha256": "9fd6b056d703f72a6adf15df67dec1d2d854c5362ab286bedefa872e980184c2"
+  }
+}

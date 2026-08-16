@@ -21,6 +21,7 @@
 | 13 | `xgboost_original_preproc_rescue` | XGBoost | 2023→2024 holdout 후 full fit | `lossguide_l31`, 2024 Brier `0.24826687414041645`, 기술 gate 7개 PASS | verified ready | — | [acceptance](acceptances/xgboost_original_preproc_rescue_acceptance.json) |
 | 14 | `xgboost_aggressive_capacity_v1` | XGBoost | 역사 fold 구조 탐색·최근 시즌 ensemble | depthwise d6·lossguide l63 4-member, local Brier `0.2479270213638507` | public scored; rules quarantine | `820.9583317093` | [result](acceptances/xgboost_aggressive_capacity_public_result.json) |
 | 15 | `tabm_hand_matchup_version_d_seed3407_v1` | TabM | 2022→2023·2023→2024 후 전체 학습 | 최신 Brier `0.2481108023`, 이전 Brier `0.2508657359`, 전체 학습 3 epoch | accepted; public scored | `872.3920184667` | [result](acceptances/tabm_hand_matchup_public_result.json) |
+| 16 | `tabm_seed_ensemble` | TabM seed 평균 | 2022→2023·2023→2024 OOF 499,032행 | seed 3407 Brier `0.2494662366`; 두 평균 모두 `0.000318` 이상 악화 | rejected; keep seed 3407 | — | [rejection](rejections/tabm_seed_ensemble_rejection.json) |
 
 ## 현재 결론
 
@@ -34,7 +35,7 @@
   점수와 연구 교훈만 보존하고 모델·ZIP·후처리를 재사용하거나 패키징하지 않는다.
 - 규칙 준수 단일 TabM은 Public `872.3920184667`을 기록해 현재 확인된 제출 중 가장
   높다. 최대 43 epoch 검증에서 최적 checkpoint가 2~3 epoch였으므로 같은 모델을 더
-  오래 학습하지 않는다. 다음 순서는 기존 OOF seed 앙상블 감사, 행 단위 파생변수,
-  규칙 준수 CatBoost blend와 OOF 보정이다.
+  오래 학습하지 않는다. 기존 OOF seed 앙상블도 단일 seed 3407보다 나빠 기각했다.
+  다음 순서는 행 단위 파생변수, 규칙 준수 CatBoost blend와 OOF 보정이다.
 - 대용량 OOF, 모델과 ZIP은 Google Drive에 두고 이 장부는 작은 evidence와 실행
   ID로 원본을 식별한다.
