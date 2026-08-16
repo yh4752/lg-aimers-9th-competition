@@ -11,6 +11,7 @@ import pytest
 from experiments.independent_dl.preprocessing import PreprocessingSpec
 from experiments.independent_dl import row_features
 from experiments.independent_dl.row_features import ROW_FEATURE_BUNDLES
+from experiments.tabm_campaign import cache as cache_module
 from experiments.tabm_campaign.cache import CacheError, CacheIdentity, materialize_fixed_cache
 
 
@@ -130,3 +131,54 @@ def test_cache_reuse_is_read_only_and_hash_checked(
     identity_path.write_text(identity_path.read_text().replace("sha256", "tampered", 1))
     with pytest.raises(CacheError):
         materialize_fixed_cache(tmp_path, **kwargs)
+
+
+def test_changed_row_feature_source_uses_fresh_full_fold_namespace(
+    preprocessing_train: pd.DataFrame,
+    preprocessing_valid: pd.DataFrame,
+    preprocessing_history: pd.DataFrame,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    real_file_sha256 = cache_module._file_sha256
+    real_materialize = cache_module.materialize_preprocessed_fold_cache
+    row_feature_hash = {"value": "1" * 64}
+    calls: list[tuple[Path, bool]] = []
+
+    def controlled_file_sha256(path: Path) -> str:
+        if path.name == "row_features.py":
+            return row_feature_hash["value"]
+        return real_file_sha256(path)
+
+    def tracked_materialize(cache_root, *args):
+        result = real_materialize(cache_root, *args)
+        calls.append((Path(cache_root), result.reused))
+        return result
+
+    monkeypatch.setattr(cache_module, "_file_sha256", controlled_file_sha256)
+    monkeypatch.setattr(
+        cache_module,
+        "materialize_preprocessed_fold_cache",
+        tracked_materialize,
+    )
+    kwargs = dict(
+        train=preprocessing_train,
+        valid=preprocessing_valid,
+        history=preprocessing_history,
+        train_end_year=2023,
+        valid_year=2024,
+        spec=PreprocessingSpec("dl_standard", ("hand_matchup", "count_context")),
+        sample_ids=(str(preprocessing_train.iloc[0]["row_id"]),),
+    )
+
+    first = materialize_fixed_cache(tmp_path, **kwargs)
+    row_feature_hash["value"] = "2" * 64
+    second = materialize_fixed_cache(tmp_path, **kwargs)
+
+    assert calls == [
+        (tmp_path / "full_folds" / ("1" * 64), False),
+        (tmp_path / "full_folds" / ("2" * 64), False),
+    ]
+    assert first.identity.row_feature_code_sha256 == "1" * 64
+    assert second.identity.row_feature_code_sha256 == "2" * 64
+    assert first.root != second.root

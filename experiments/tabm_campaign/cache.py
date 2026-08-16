@@ -229,7 +229,7 @@ def materialize_fixed_cache(
     )
     root = Path(cache_root).expanduser().resolve()
     base = materialize_preprocessed_fold_cache(
-        root / "full_folds",
+        root / "full_folds" / identity.row_feature_code_sha256,
         train,
         valid,
         history,

@@ -250,7 +250,12 @@ def test_row_feature_bundle_has_stable_fold_schema_and_partition(
     assert state.spec.components == ("hand_matchup", bundle)
     assert tuple(fitted.columns) == state.output_columns
     assert tuple(transformed.columns) == state.output_columns
-    assert set(ROW_FEATURE_OUTPUTS[bundle]).issubset(state.output_columns)
+    assert state.output_columns == (
+        state.source_columns + ("hand_matchup",) + ROW_FEATURE_OUTPUTS[bundle]
+    )
+    assert tuple(
+        column for column in state.output_columns if column.startswith("rf_")
+    ) == ROW_FEATURE_OUTPUTS[bundle]
     expected_categorical = set(ROW_FEATURE_CATEGORICAL[bundle])
     assert expected_categorical.issubset(state.categorical_columns)
     assert (
