@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
+import sys
 from dataclasses import FrozenInstanceError
 from pathlib import Path
 from typing import Any
@@ -441,7 +443,9 @@ def test_contract_secure_reader_closes_every_opened_descriptor(
     assert opened == set()
 
 
-@pytest.mark.parametrize("capability", ["O_NOFOLLOW", "O_DIRECTORY"])
+@pytest.mark.parametrize(
+    "capability", ["O_NOFOLLOW", "O_DIRECTORY", "O_NONBLOCK"]
+)
 def test_contract_rejects_unavailable_secure_traversal_capability(
     monkeypatch: pytest.MonkeyPatch, capability: str
 ) -> None:
@@ -449,6 +453,39 @@ def test_contract_rejects_unavailable_secure_traversal_capability(
 
     with pytest.raises(RowFeatureContractError, match="secure path traversal"):
         load_row_feature_proxy_contract(CONFIG)
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="FIFO creation is unavailable")
+def test_contract_rejects_fifo_without_blocking(tmp_path: Path) -> None:
+    fifo = tmp_path / "contract.json"
+    os.mkfifo(fifo)
+    script = """
+import sys
+from experiments.tabm_campaign.row_feature_contracts import (
+    RowFeatureContractError,
+    load_row_feature_proxy_contract,
+)
+
+try:
+    load_row_feature_proxy_contract(sys.argv[1])
+except RowFeatureContractError:
+    raise SystemExit(0)
+raise SystemExit(2)
+"""
+    process = subprocess.Popen(
+        [sys.executable, "-c", script, os.fspath(fifo)],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        stdout, stderr = process.communicate(timeout=1.0)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.communicate()
+        pytest.fail("contract loader blocked while opening a FIFO")
+
+    assert process.returncode == 0, (stdout, stderr)
 
 
 def test_contract_rejects_malformed_json_and_utf8(tmp_path: Path) -> None:

@@ -225,17 +225,23 @@ def _require_string_tuple(value: Any, label: str) -> tuple[str, ...]:
 def _secure_open_flags() -> tuple[int, int]:
     no_follow = getattr(os, "O_NOFOLLOW", None)
     directory = getattr(os, "O_DIRECTORY", None)
+    non_blocking = getattr(os, "O_NONBLOCK", None)
     if (
         not isinstance(no_follow, int)
         or no_follow == 0
         or not isinstance(directory, int)
         or directory == 0
+        or not isinstance(non_blocking, int)
+        or non_blocking == 0
         or _NATIVE_OS_OPEN not in os.supports_dir_fd
     ):
         raise RowFeatureContractError(
             "secure path traversal is unavailable on this platform"
         )
-    return os.O_RDONLY | directory | no_follow, os.O_RDONLY | no_follow
+    return (
+        os.O_RDONLY | directory | no_follow,
+        os.O_RDONLY | no_follow | non_blocking,
+    )
 
 
 def _is_symlink_component(directory_fd: int, component: str) -> bool:
