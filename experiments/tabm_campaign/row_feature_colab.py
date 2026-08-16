@@ -1600,6 +1600,7 @@ class SnapshottingCampaignRuntime:
         def monitor_loop() -> None:
             last_epoch = -1
             next_periodic: float | None = None
+            overdue_for_fresh = False
             while True:
                 until_periodic = (
                     self.poll_seconds
@@ -1622,12 +1623,14 @@ class SnapshottingCampaignRuntime:
                     pass
                 now = self.monotonic()
                 first_checkpoint = last_epoch < 0 and observed_epoch >= 0
-                periodic_checkpoint = (
+                periodic_boundary = (
                     next_periodic is not None
                     and now >= next_periodic
-                    and observed_epoch > last_epoch
                 )
-                if first_checkpoint or periodic_checkpoint:
+                fresh_checkpoint = observed_epoch > last_epoch and (
+                    periodic_boundary or overdue_for_fresh
+                )
+                if first_checkpoint or fresh_checkpoint:
                     try:
                         snapshot = self._active_snapshot(job)
                         self.store.accept(snapshot)
@@ -1639,6 +1642,18 @@ class SnapshottingCampaignRuntime:
                     else:
                         last_epoch = snapshot.epoch
                         next_periodic = now + self.snapshot_interval_seconds
+                        overdue_for_fresh = False
+                elif periodic_boundary:
+                    try:
+                        self.store.republish_latest()
+                    except Exception as error:
+                        print(
+                            f"ROW_FEATURE_SNAPSHOT_DEFERRED type={type(error).__name__} message={str(error).replace(' ', '_')}",
+                            flush=True,
+                        )
+                    finally:
+                        next_periodic = now + self.snapshot_interval_seconds
+                        overdue_for_fresh = True
 
         def monitor() -> None:
             try:

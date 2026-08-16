@@ -973,6 +973,9 @@ def test_active_snapshot_is_first_checkpoint_then_bounded_cadence(
             (first if len(accepted) == 1 else second).set()
             return snapshot
 
+        def republish_latest(self):
+            return self.latest
+
     class Delegate:
         def run_jobs(self, version, jobs, output_dir, **kwargs):
             job_dir = output_dir / job.candidate_id
@@ -1015,6 +1018,139 @@ def test_active_snapshot_is_first_checkpoint_then_bounded_cadence(
         "P", (job,), tmp_path / "jobs", gpu_count=1, job_deadline=time.time() + 4
     ) == ("done",)
     assert accepted == [0, 1]
+
+
+def test_stalled_epoch_republishes_latest_at_every_periodic_boundary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    job = proxy.build_proxy_jobs(load_row_feature_proxy_contract())[0]
+    publications: list[tuple[str, int]] = []
+
+    class Store:
+        latest = object()
+        snapshot_dir = tmp_path / "snapshots"
+
+        def accept(self, snapshot):
+            publications.append(("active", snapshot.epoch))
+            self.latest = snapshot
+            return snapshot
+
+        def republish_latest(self):
+            publications.append(("republish", self.latest.epoch))
+            return self.latest
+
+    class Delegate:
+        def run_jobs(self, version, jobs, output_dir, **kwargs):
+            job_dir = output_dir / job.candidate_id
+            job_dir.mkdir(parents=True)
+            (job_dir / "checkpoint_meta.json").write_text(
+                json.dumps({"epoch": 0}), encoding="utf-8"
+            )
+            time.sleep(0.35)
+            return ("done",)
+
+    runtime = colab.SnapshottingCampaignRuntime(
+        tmp_path / "data",
+        live_output_dir=tmp_path / "live",
+        store=Store(),
+        contract=load_row_feature_proxy_contract(),
+        contract_path=DEFAULT_ROW_FEATURE_PROXY_CONTRACT,
+        contract_sha256=REAL_CONTRACT_SHA,
+        train_sha256="a" * 64,
+        history_sha256="b" * 64,
+        input_manifest_sha256="c" * 64,
+        code_sha256="d" * 64,
+        snapshot_interval_seconds=0.1,
+        poll_seconds=0.005,
+        session_deadline=time.time() + 5,
+        delegate=Delegate(),
+    )
+    monkeypatch.setattr(
+        runtime,
+        "_active_snapshot",
+        lambda _job: colab.EmergencySnapshot(
+            tmp_path / "active.zip", "e" * 64, "f" * 64, job.candidate_id, 0
+        ),
+    )
+
+    assert runtime.run_jobs(
+        "P", (job,), tmp_path / "jobs", gpu_count=1, job_deadline=time.time() + 4
+    ) == ("done",)
+    assert publications[0] == ("active", 0)
+    assert len(publications) >= 4
+    assert all(kind == "republish" for kind, _ in publications[1:])
+
+
+def test_epoch_after_stale_boundary_replaces_snapshot_without_waiting_a_cadence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    job = proxy.build_proxy_jobs(load_row_feature_proxy_contract())[0]
+    first = threading.Event()
+    stale_boundary = threading.Event()
+    fresh = threading.Event()
+    publications: list[tuple[str, int]] = []
+
+    class Store:
+        latest = object()
+        snapshot_dir = tmp_path / "snapshots"
+
+        def accept(self, snapshot):
+            publications.append(("active", snapshot.epoch))
+            self.latest = snapshot
+            (first if snapshot.epoch == 0 else fresh).set()
+            return snapshot
+
+        def republish_latest(self):
+            publications.append(("republish", self.latest.epoch))
+            stale_boundary.set()
+            return self.latest
+
+    class Delegate:
+        def run_jobs(self, version, jobs, output_dir, **kwargs):
+            job_dir = output_dir / job.candidate_id
+            job_dir.mkdir(parents=True)
+            meta = job_dir / "checkpoint_meta.json"
+            meta.write_text(json.dumps({"epoch": 0}), encoding="utf-8")
+            assert first.wait(1)
+            assert stale_boundary.wait(1)
+            meta.write_text(json.dumps({"epoch": 1}), encoding="utf-8")
+            assert fresh.wait(0.05)
+            return ("done",)
+
+    runtime = colab.SnapshottingCampaignRuntime(
+        tmp_path / "data",
+        live_output_dir=tmp_path / "live",
+        store=Store(),
+        contract=load_row_feature_proxy_contract(),
+        contract_path=DEFAULT_ROW_FEATURE_PROXY_CONTRACT,
+        contract_sha256=REAL_CONTRACT_SHA,
+        train_sha256="a" * 64,
+        history_sha256="b" * 64,
+        input_manifest_sha256="c" * 64,
+        code_sha256="d" * 64,
+        snapshot_interval_seconds=0.1,
+        poll_seconds=0.005,
+        session_deadline=time.time() + 5,
+        delegate=Delegate(),
+    )
+
+    def snapshot(_job):
+        epoch = json.loads(
+            (tmp_path / "jobs" / job.candidate_id / "checkpoint_meta.json").read_text()
+        )["epoch"]
+        return colab.EmergencySnapshot(
+            tmp_path / f"{epoch}.zip", "e" * 64, "f" * 64, job.candidate_id, epoch
+        )
+
+    monkeypatch.setattr(runtime, "_active_snapshot", snapshot)
+    assert runtime.run_jobs(
+        "P", (job,), tmp_path / "jobs", gpu_count=1, job_deadline=time.time() + 4
+    ) == ("done",)
+    assert publications[:3] == [
+        ("active", 0),
+        ("republish", 0),
+        ("active", 1),
+    ]
 
 
 def test_snapshot_store_swaps_after_callback_and_removes_only_owned_old_zip(
