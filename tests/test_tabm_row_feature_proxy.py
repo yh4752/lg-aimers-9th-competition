@@ -9,13 +9,14 @@ import pytest
 
 from experiments.tabm_campaign import worker as worker_module
 from experiments.tabm_campaign import row_feature_proxy as proxy_module
-from experiments.tabm_campaign.runner import CampaignJobResult
+from experiments.tabm_campaign.runner import CampaignJob, CampaignJobResult
 from experiments.tabm_campaign.row_feature_contracts import (
     load_row_feature_proxy_contract,
 )
 from experiments.tabm_campaign.row_feature_proxy import (
     _code_file_paths,
     _code_sha256,
+    _validate_checkpoint_payload,
     RowFeatureProxyError,
     build_proxy_jobs,
     run_row_feature_proxy,
@@ -27,7 +28,7 @@ CONTRACT = load_row_feature_proxy_contract()
 
 def _write_training_checkpoint(
     path: Path,
-    candidate_id: str,
+    job: CampaignJob,
     *,
     epoch: int = 2,
     missing_key: str | None = None,
@@ -37,17 +38,99 @@ def _write_training_checkpoint(
     import numpy as np
     import torch
 
+    def compact(shape: tuple[int, ...]):
+        return torch.zeros(1, dtype=torch.float32).expand(shape)
+
+    n_num = 2
+    n_bins = 2
+    first_width = n_num * 32 + 3
+    model = {
+        "model.num_module.linear0.weight": compact((n_num, 32)),
+        "model.num_module.linear0.bias": compact((n_num, 32)),
+        "model.num_module.impl.weight": compact((n_num, n_bins)),
+        "model.num_module.impl.bias": compact((n_num, n_bins)),
+        "model.num_module.linear.weight": compact((n_num, n_bins, 32)),
+    }
+    parameter_names = [
+        "model.num_module.linear0.weight",
+        "model.num_module.linear0.bias",
+        "model.num_module.linear.weight",
+    ]
+    for block in range(job.blocks):
+        block_input = first_width if block == 0 else job.width
+        prefix = f"model.backbone.blocks.{block}.0"
+        model.update(
+            {
+                f"{prefix}.weight": compact((job.width, block_input)),
+                f"{prefix}.r": compact((job.k, block_input)),
+                f"{prefix}.s": compact((job.k, job.width)),
+                f"{prefix}.bias": compact((job.k, job.width)),
+            }
+        )
+        parameter_names.extend(
+            f"{prefix}.{suffix}" for suffix in ("weight", "r", "s", "bias")
+        )
+    model.update(
+        {
+            "model.output.weight": compact((job.k, job.width, 1)),
+            "model.output.bias": compact((job.k, 1)),
+        }
+    )
+    parameter_names.extend(("model.output.weight", "model.output.bias"))
+    optimizer = {
+        "state": {
+            index: {
+                "step": torch.tensor(3.0),
+                "exp_avg": compact(tuple(model[name].shape)),
+                "exp_avg_sq": compact(tuple(model[name].shape)),
+            }
+            for index, name in enumerate(parameter_names)
+        },
+        "param_groups": [
+            {
+                "lr": job.learning_rate,
+                "betas": (0.9, 0.999),
+                "eps": 1e-8,
+                "weight_decay": 0.0001,
+                "amsgrad": False,
+                "maximize": False,
+                "foreach": None,
+                "capturable": False,
+                "differentiable": False,
+                "fused": None,
+                "decoupled_weight_decay": True,
+                "params": list(range(len(parameter_names))),
+            }
+        ],
+    }
+    scheduler = {
+        "factor": 0.1,
+        "default_min_lr": 0,
+        "min_lrs": [0],
+        "patience": 10,
+        "cooldown": 0,
+        "cooldown_counter": 0,
+        "mode": "min",
+        "threshold": 0.0001,
+        "threshold_mode": "rel",
+        "eps": 1e-8,
+        "last_epoch": 3,
+        "_last_lr": [job.learning_rate],
+        "mode_worse": float("inf"),
+        "best": 0.04,
+        "num_bad_epochs": 1,
+    }
     payload = {
-        "candidate_id": candidate_id,
+        "candidate_id": job.candidate_id,
         "epoch": epoch,
         "best_epoch": 1,
         "best_brier": 0.04,
         "validation_curve": [(0, 0.08), (1, 0.04), (2, 0.05)],
         "validation_time_curve": [(0, 1.0, 0.08), (1, 2.0, 0.04), (2, 3.0, 0.05)],
         "elapsed_seconds": 3.0,
-        "model": {"weight": torch.tensor([1.0])},
-        "optimizer": {"state": {}, "param_groups": []},
-        "scheduler": {"last_epoch": epoch},
+        "model": model,
+        "optimizer": optimizer,
+        "scheduler": scheduler,
         "scaler": {},
         "python_rng": random.getstate(),
         "numpy_rng": np.random.get_state(),
@@ -83,7 +166,7 @@ class _Runtime:
         brier = None
         cache_digest = "c" * 64
         if status in {"completed", "inconclusive"}:
-            _write_training_checkpoint(job_dir / "checkpoint.pt", job.candidate_id)
+            _write_training_checkpoint(job_dir / "checkpoint.pt", job)
             import torch
 
             torch.save(
@@ -291,7 +374,7 @@ class _CorruptCheckpointRuntime(_DeadlineFallbackRuntime):
         elif self.corruption == "missing_optimizer":
             _write_training_checkpoint(
                 job_dir / "checkpoint.pt",
-                job.candidate_id,
+                job,
                 missing_key="optimizer",
             )
         elif self.corruption == "epoch_mismatch":
@@ -305,6 +388,31 @@ class _CorruptCheckpointRuntime(_DeadlineFallbackRuntime):
                 job_dir / "checkpoint.pt", map_location="cpu", weights_only=False
             )
             checkpoint["validation_curve"] = [(), (1, 0.04), (2, 0.05)]
+            torch.save(checkpoint, job_dir / "checkpoint.pt")
+        elif self.corruption in {
+            "bogus_model_key",
+            "wrong_model_shape",
+            "empty_optimizer",
+            "mismatched_optimizer",
+            "unrelated_scheduler",
+        }:
+            import torch
+
+            checkpoint = torch.load(
+                job_dir / "checkpoint.pt", map_location="cpu", weights_only=False
+            )
+            if self.corruption == "bogus_model_key":
+                checkpoint["model"]["bogus.weight"] = torch.ones(1)
+            elif self.corruption == "wrong_model_shape":
+                checkpoint["model"][
+                    "model.backbone.blocks.1.0.weight"
+                ] = torch.ones(1)
+            elif self.corruption == "empty_optimizer":
+                checkpoint["optimizer"] = {"state": {}, "param_groups": []}
+            elif self.corruption == "mismatched_optimizer":
+                checkpoint["optimizer"]["param_groups"][0]["params"] = [0]
+            else:
+                checkpoint["scheduler"] = {"totally": "unrelated"}
             torch.save(checkpoint, job_dir / "checkpoint.pt")
         return (result,)
 
@@ -597,16 +705,141 @@ def test_deadline_grace_fallback_is_bound_bundled_and_resumable(
     assert resumed_runtime.preexisting_checkpoints[0] == jobs[0].candidate_id
 
 
+def test_checkpoint_validator_accepts_actual_stage_p_cpu_states(tmp_path: Path) -> None:
+    import numpy as np
+    import torch
+
+    from experiments.independent_dl.models.common import ModelMetadata
+    from experiments.independent_dl.models.tabm import TabMAdapter
+
+    job = build_proxy_jobs(CONTRACT)[0]
+    path = tmp_path / "checkpoint.pt"
+    _write_training_checkpoint(path, job)
+    payload = torch.load(path, map_location="cpu", weights_only=False)
+    metadata = ModelMetadata(
+        n_num_features=2,
+        categorical_cardinalities=(3,),
+        train_x_num=None,
+        piecewise_bin_edges=(
+            np.array((-1.0, 0.0, 1.0), dtype="float32"),
+            np.array((-2.0, -1.0, 0.0, 2.0), dtype="float32"),
+        ),
+    )
+    adapter = TabMAdapter(loss_name=job.loss)
+    model = adapter.build(
+        {
+            "architecture": "tabm",
+            "k": job.k,
+            "width": job.width,
+            "blocks": job.blocks,
+            "dropout": job.dropout,
+            "num_embedding": job.num_embedding,
+        },
+        metadata,
+        "cpu",
+    )
+    optimizer = adapter.optimizer(
+        model,
+        {"learning_rate": job.learning_rate, "weight_decay": 0.0001},
+    )
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode="min")
+    for brier in (0.08, 0.04, 0.05):
+        for parameter in model.parameters():
+            parameter.grad = torch.zeros_like(parameter)
+        optimizer.step()
+        scheduler.step(brier)
+    payload.update(
+        {
+            "model": model.state_dict(),
+            "optimizer": optimizer.state_dict(),
+            "scheduler": scheduler.state_dict(),
+        }
+    )
+    torch.save(payload, path)
+    result = CampaignJobResult(
+        job.candidate_id,
+        "inconclusive",
+        None,
+        None,
+        3,
+        path,
+        None,
+        {},
+        "worker_exceeded_deadline_grace",
+    )
+
+    _validate_checkpoint_payload(
+        job,
+        result,
+        path,
+        meta_epoch=2,
+        meta_adapter_state=None,
+    )
+
+
+def test_checkpoint_scheduler_uses_plateau_threshold_semantics(tmp_path: Path) -> None:
+    import torch
+
+    job = build_proxy_jobs(CONTRACT)[0]
+    path = tmp_path / "checkpoint.pt"
+    _write_training_checkpoint(path, job)
+    payload = torch.load(path, map_location="cpu", weights_only=False)
+    payload.update(
+        {
+            "best_epoch": 1,
+            "best_brier": 0.079999,
+            "validation_curve": [(0, 0.08), (1, 0.079999), (2, 0.081)],
+            "validation_time_curve": [
+                (0, 1.0, 0.08),
+                (1, 2.0, 0.079999),
+                (2, 3.0, 0.081),
+            ],
+        }
+    )
+    payload["scheduler"]["best"] = 0.08
+    payload["scheduler"]["num_bad_epochs"] = 2
+    torch.save(payload, path)
+    result = CampaignJobResult(
+        job.candidate_id,
+        "inconclusive",
+        None,
+        None,
+        3,
+        path,
+        None,
+        {},
+        "worker_exceeded_deadline_grace",
+    )
+
+    _validate_checkpoint_payload(
+        job,
+        result,
+        path,
+        meta_epoch=2,
+        meta_adapter_state=None,
+    )
+
+
 @pytest.mark.parametrize(
-    "corruption",
-    ["damaged", "missing_optimizer", "epoch_mismatch", "malformed_curve"],
+    ("corruption", "message"),
+    [
+        ("damaged", "cannot be loaded"),
+        ("missing_optimizer", "payload keys"),
+        ("epoch_mismatch", "epoch binding"),
+        ("malformed_curve", "validation curves"),
+        ("bogus_model_key", "model keys"),
+        ("wrong_model_shape", "tensor shape"),
+        ("empty_optimizer", "parameter groups"),
+        ("mismatched_optimizer", "configuration"),
+        ("unrelated_scheduler", "scheduler keys"),
+    ],
 )
 def test_inconclusive_checkpoint_payload_fails_closed(
-    tmp_path: Path, monkeypatch, corruption: str
+    tmp_path: Path, monkeypatch, corruption: str, message: str
 ) -> None:
     data = _official_data(tmp_path, monkeypatch)
 
-    with pytest.raises(RowFeatureProxyError, match="checkpoint"):
+    with pytest.raises(RowFeatureProxyError, match=message):
         run_row_feature_proxy(
             data_dir=data,
             output_dir=tmp_path / corruption,

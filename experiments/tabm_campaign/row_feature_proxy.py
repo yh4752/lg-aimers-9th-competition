@@ -522,12 +522,7 @@ def _validate_checkpoint_payload(
     ):
         raise RowFeatureProxyError("checkpoint best metric does not match its curve")
     if (
-        not isinstance(payload["model"], Mapping)
-        or not payload["model"]
-        or not isinstance(payload["optimizer"], Mapping)
-        or not {"state", "param_groups"}.issubset(payload["optimizer"])
-        or not isinstance(payload["scheduler"], Mapping)
-        or not isinstance(payload["scaler"], Mapping)
+        not isinstance(payload["scaler"], Mapping)
         or type(payload["python_rng"]) is not tuple
         or type(payload["numpy_rng"]) is not tuple
         or not isinstance(payload["torch_rng"], torch.Tensor)
@@ -535,8 +530,292 @@ def _validate_checkpoint_payload(
         or payload["adapter_state"] != meta_adapter_state
     ):
         raise RowFeatureProxyError(
-            "checkpoint model, optimizer, scheduler, RNG, or adapter state is invalid"
+            "checkpoint scaler, RNG, or adapter state is invalid"
         )
+    parameter_tensors = _validate_tabm_model_state(job, payload["model"], torch)
+    optimizer_lr = _validate_adamw_state(
+        job,
+        payload["optimizer"],
+        parameter_tensors,
+        completed_epochs=epoch + 1,
+        torch=torch,
+    )
+    _validate_plateau_scheduler_state(
+        job,
+        payload["scheduler"],
+        epoch=epoch,
+        validation_curve=validation_curve,
+        optimizer_lr=optimizer_lr,
+    )
+
+
+def _valid_finite_tensor(
+    value: object,
+    shape: tuple[int, ...],
+    torch: object,
+    *,
+    dtype: object,
+) -> bool:
+    return (
+        isinstance(value, torch.Tensor)
+        and value.layout == torch.strided
+        and value.device.type == "cpu"
+        and value.dtype == dtype
+        and tuple(value.shape) == shape
+        and bool(torch.isfinite(value).all().item())
+    )
+
+
+def _validate_tabm_model_state(
+    job: CampaignJob,
+    value: object,
+    torch: object,
+) -> tuple[object, ...]:
+    if not isinstance(value, Mapping):
+        raise RowFeatureProxyError("checkpoint TabM model state is invalid")
+    state = value
+    numeric_keys = {
+        "model.num_module.linear0.weight",
+        "model.num_module.linear0.bias",
+        "model.num_module.impl.weight",
+        "model.num_module.impl.bias",
+        "model.num_module.linear.weight",
+    }
+    block_keys = {
+        f"model.backbone.blocks.{block}.0.{suffix}"
+        for block in range(job.blocks)
+        for suffix in ("weight", "r", "s", "bias")
+    }
+    required_keys = numeric_keys | block_keys | {
+        "model.output.weight",
+        "model.output.bias",
+    }
+    optional_keys = {"model.num_module.impl.mask"}
+    if not required_keys.issubset(state) or set(state) - required_keys - optional_keys:
+        raise RowFeatureProxyError("checkpoint TabM model keys are invalid")
+
+    linear0 = state["model.num_module.linear0.weight"]
+    impl = state["model.num_module.impl.weight"]
+    first_block = state["model.backbone.blocks.0.0.weight"]
+    if (
+        not isinstance(linear0, torch.Tensor)
+        or linear0.ndim != 2
+        or linear0.shape[0] <= 0
+        or tuple(linear0.shape[1:]) != (32,)
+        or not isinstance(impl, torch.Tensor)
+        or impl.ndim != 2
+        or impl.shape[0] != linear0.shape[0]
+        or impl.shape[1] <= 0
+        or not isinstance(first_block, torch.Tensor)
+        or first_block.ndim != 2
+    ):
+        raise RowFeatureProxyError("checkpoint TabM numerical embedding is invalid")
+    n_num = int(linear0.shape[0])
+    n_bins = int(impl.shape[1])
+    first_width = int(first_block.shape[1])
+    if first_width < n_num * 32:
+        raise RowFeatureProxyError("checkpoint TabM input width is invalid")
+
+    float_shapes = {
+        "model.num_module.linear0.weight": (n_num, 32),
+        "model.num_module.linear0.bias": (n_num, 32),
+        "model.num_module.impl.weight": (n_num, n_bins),
+        "model.num_module.impl.bias": (n_num, n_bins),
+        "model.num_module.linear.weight": (n_num, n_bins, 32),
+        "model.output.weight": (job.k, job.width, 1),
+        "model.output.bias": (job.k, 1),
+    }
+    for block in range(job.blocks):
+        block_input = first_width if block == 0 else job.width
+        prefix = f"model.backbone.blocks.{block}.0"
+        float_shapes.update(
+            {
+                f"{prefix}.weight": (job.width, block_input),
+                f"{prefix}.r": (job.k, block_input),
+                f"{prefix}.s": (job.k, job.width),
+                f"{prefix}.bias": (job.k, job.width),
+            }
+        )
+    if any(
+        not _valid_finite_tensor(
+            state[name], shape, torch, dtype=torch.float32
+        )
+        for name, shape in float_shapes.items()
+    ):
+        raise RowFeatureProxyError("checkpoint TabM tensor shape or dtype is invalid")
+    mask = state.get("model.num_module.impl.mask")
+    if mask is not None and (
+        not isinstance(mask, torch.Tensor)
+        or mask.layout != torch.strided
+        or mask.device.type != "cpu"
+        or mask.dtype != torch.bool
+        or tuple(mask.shape) != (n_num, n_bins)
+    ):
+        raise RowFeatureProxyError("checkpoint TabM embedding mask is invalid")
+
+    parameter_names = [
+        "model.num_module.linear0.weight",
+        "model.num_module.linear0.bias",
+        "model.num_module.linear.weight",
+    ]
+    for block in range(job.blocks):
+        prefix = f"model.backbone.blocks.{block}.0"
+        parameter_names.extend(
+            f"{prefix}.{suffix}" for suffix in ("weight", "r", "s", "bias")
+        )
+    parameter_names.extend(("model.output.weight", "model.output.bias"))
+    return tuple(state[name] for name in parameter_names)
+
+
+def _validate_adamw_state(
+    job: CampaignJob,
+    value: object,
+    parameters: tuple[object, ...],
+    *,
+    completed_epochs: int,
+    torch: object,
+) -> float:
+    if not isinstance(value, Mapping) or set(value) != {"state", "param_groups"}:
+        raise RowFeatureProxyError("checkpoint AdamW state keys are invalid")
+    state = value["state"]
+    groups = value["param_groups"]
+    group_keys = {
+        "params",
+        "lr",
+        "betas",
+        "eps",
+        "weight_decay",
+        "amsgrad",
+        "maximize",
+        "foreach",
+        "capturable",
+        "differentiable",
+        "fused",
+        "decoupled_weight_decay",
+    }
+    if (
+        not isinstance(state, Mapping)
+        or type(groups) is not list
+        or len(groups) != 1
+        or not isinstance(groups[0], Mapping)
+        or set(groups[0]) != group_keys
+    ):
+        raise RowFeatureProxyError("checkpoint AdamW parameter groups are invalid")
+    group = groups[0]
+    parameter_ids = group["params"]
+    expected_ids = list(range(len(parameters)))
+    if (
+        type(parameter_ids) is not list
+        or parameter_ids != expected_ids
+        or set(state) != set(expected_ids)
+        or group["betas"] != (0.9, 0.999)
+        or group["eps"] != 1e-8
+        or group["weight_decay"] != 0.0001
+        or group["amsgrad"] is not False
+        or group["maximize"] is not False
+        or group["foreach"] is not None
+        or group["capturable"] is not False
+        or group["differentiable"] is not False
+        or group["fused"] is not None
+        or group["decoupled_weight_decay"] is not True
+        or type(group["lr"]) is not float
+        or not math.isclose(
+            group["lr"], job.learning_rate, rel_tol=0.0, abs_tol=1e-15
+        )
+    ):
+        raise RowFeatureProxyError("checkpoint AdamW configuration is invalid")
+
+    optimizer_steps: set[int] = set()
+    for parameter_id, parameter in enumerate(parameters):
+        item = state[parameter_id]
+        if not isinstance(item, Mapping) or set(item) != {
+            "step",
+            "exp_avg",
+            "exp_avg_sq",
+        }:
+            raise RowFeatureProxyError("checkpoint AdamW parameter state is invalid")
+        step = item["step"]
+        if (
+            not isinstance(step, torch.Tensor)
+            or step.device.type != "cpu"
+            or step.dtype != torch.float32
+            or step.numel() != 1
+            or not math.isfinite(float(step.item()))
+            or not float(step.item()).is_integer()
+            or int(step.item()) < completed_epochs
+        ):
+            raise RowFeatureProxyError("checkpoint AdamW step is invalid")
+        optimizer_steps.add(int(step.item()))
+        for moment_name in ("exp_avg", "exp_avg_sq"):
+            moment = item[moment_name]
+            if not _valid_finite_tensor(
+                moment,
+                tuple(parameter.shape),
+                torch,
+                dtype=parameter.dtype,
+            ):
+                raise RowFeatureProxyError(
+                    "checkpoint AdamW moment shape or dtype is invalid"
+                )
+    if len(optimizer_steps) != 1:
+        raise RowFeatureProxyError("checkpoint AdamW parameter steps differ")
+    return group["lr"]
+
+
+def _validate_plateau_scheduler_state(
+    job: CampaignJob,
+    value: object,
+    *,
+    epoch: int,
+    validation_curve: list[tuple[int, float]],
+    optimizer_lr: float,
+) -> None:
+    required = {
+        "factor",
+        "default_min_lr",
+        "min_lrs",
+        "patience",
+        "cooldown",
+        "cooldown_counter",
+        "mode",
+        "threshold",
+        "threshold_mode",
+        "eps",
+        "last_epoch",
+        "_last_lr",
+        "mode_worse",
+        "best",
+        "num_bad_epochs",
+    }
+    if job.scheduler != "plateau" or not isinstance(value, Mapping) or set(value) != required:
+        raise RowFeatureProxyError("checkpoint plateau scheduler keys are invalid")
+    scheduler_best = math.inf
+    num_bad_epochs = 0
+    for _, brier in validation_curve:
+        if brier < scheduler_best * (1.0 - 0.0001):
+            scheduler_best = brier
+            num_bad_epochs = 0
+        else:
+            num_bad_epochs += 1
+    expected = {
+        "factor": 0.1,
+        "default_min_lr": 0,
+        "min_lrs": [0],
+        "patience": 10,
+        "cooldown": 0,
+        "cooldown_counter": 0,
+        "mode": "min",
+        "threshold": 0.0001,
+        "threshold_mode": "rel",
+        "eps": 1e-8,
+        "last_epoch": epoch + 1,
+        "_last_lr": [optimizer_lr],
+        "mode_worse": math.inf,
+        "best": scheduler_best,
+        "num_bad_epochs": num_bad_epochs,
+    }
+    if dict(value) != expected:
+        raise RowFeatureProxyError("checkpoint plateau scheduler state is invalid")
 
 
 def _validate_semantic_evidence(
