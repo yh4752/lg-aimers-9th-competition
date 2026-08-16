@@ -31,19 +31,19 @@
 - Create: `experiments/tabm_campaign/ensemble_audit.py`
 - Test: `tests/test_tabm_ensemble_audit.py`
 
-- [ ] **Step 1: 계약 fixture 검사를 작성한다**
+- [x] **Step 1: 계약 fixture 검사를 작성한다**
 
 세 seed, 두 fold, 단일 세 후보와 `mean_all`, `mean_42_3407`, 최소 평균 개선
 `0.00003`, 최대 fold 악화 `0.00003`이 정확히 선언됐는지 검사한다. 알 수 없는 seed,
 중복 조합, 음수 허용치와 합이 1이 아닌 가중치를 각각 거부하는 테스트를 작성한다.
 
-- [ ] **Step 2: 실패를 확인한다**
+- [x] **Step 2: 실패를 확인한다**
 
 Run: `.venv/bin/pytest tests/test_tabm_ensemble_audit.py -q`
 
 Expected: 계약 파일과 loader가 없어 실패한다.
 
-- [ ] **Step 3: 최소 계약과 loader를 구현한다**
+- [x] **Step 3: 최소 계약과 loader를 구현한다**
 
 계약에는 다음 조합만 넣는다.
 
@@ -65,13 +65,13 @@ Expected: 계약 파일과 loader가 없어 실패한다.
 loader는 unknown key와 유한하지 않은 수를 거부하고 정렬된 immutable dataclass를
 반환한다.
 
-- [ ] **Step 4: 계약 테스트를 통과시킨다**
+- [x] **Step 4: 계약 테스트를 통과시킨다**
 
 Run: `.venv/bin/pytest tests/test_tabm_ensemble_audit.py -q`
 
 Expected: contract 관련 테스트가 통과한다.
 
-- [ ] **Step 5: 커밋한다**
+- [x] **Step 5: 커밋한다**
 
 ```bash
 git add experiments/tabm_campaign/score_improvement_contract.json tests/test_tabm_ensemble_audit.py
@@ -84,32 +84,32 @@ git commit -m "test: seal TabM ensemble audit contract"
 - Modify: `experiments/tabm_campaign/ensemble_audit.py`
 - Modify: `tests/test_tabm_ensemble_audit.py`
 
-- [ ] **Step 1: 정렬과 Brier 실패 테스트를 작성한다**
+- [x] **Step 1: 정렬과 Brier 실패 테스트를 작성한다**
 
 작은 두 fold fixture로 순서가 섞인 예측을 `row_id`에 맞춰 복구하고, 누락·중복 ID,
 정답 불일치, `[0, 1]` 밖 확률과 NaN을 거부하는 테스트를 작성한다. 단일 seed와 두
 평균 조합의 Brier를 직접 계산한 값과 비교한다.
 
-- [ ] **Step 2: 실패를 확인한다**
+- [x] **Step 2: 실패를 확인한다**
 
 Run: `.venv/bin/pytest tests/test_tabm_ensemble_audit.py -q`
 
 Expected: `ensemble_audit` 모듈이 없어 실패한다.
 
-- [ ] **Step 3: 최소 감사기를 구현한다**
+- [x] **Step 3: 최소 감사기를 구현한다**
 
 `row_id`, `control_success`, `probability`만 읽고 merge 결과가 각 원본과 같은 행 수인지
 검사한다. 각 조합의 fold Brier, 검증 행 수 가중 Brier, 최선 단일 seed 대비 gain과
 worst fold delta를 계산한다. 계약 gate를 모두 통과한 단순 평균 중 가중 Brier가 가장
 낮은 하나만 `promoted`로 기록한다.
 
-- [ ] **Step 4: 전체 단위 테스트를 통과시킨다**
+- [x] **Step 4: 전체 단위 테스트를 통과시킨다**
 
 Run: `.venv/bin/pytest tests/test_tabm_ensemble_audit.py -q`
 
 Expected: 모든 정렬, 수치와 gate 테스트가 통과한다.
 
-- [ ] **Step 5: 커밋한다**
+- [x] **Step 5: 커밋한다**
 
 ```bash
 git add experiments/tabm_campaign/ensemble_audit.py tests/test_tabm_ensemble_audit.py
@@ -123,19 +123,19 @@ git commit -m "feat: audit TabM seed ensembles from OOF"
 - Modify: `tests/test_tabm_ensemble_audit.py`
 - Modify: `docs/TABM_CHAMPION_KAGGLE.md`
 
-- [ ] **Step 1: CLI fixture 테스트를 작성한다**
+- [x] **Step 1: CLI fixture 테스트를 작성한다**
 
 임시 Stage C ZIP과 작은 train CSV를 입력해 `ensemble_audit.json`, `manifest.json`과
 로그만 든 review ZIP이 생성되는지 검사한다. 입력 ZIP과 예측 CSV의 SHA-256이
 manifest에 남고 입력 경로, 원본 자료와 예측 행은 ZIP에 포함되지 않아야 한다.
 
-- [ ] **Step 2: 실패를 확인한다**
+- [x] **Step 2: 실패를 확인한다**
 
 Run: `.venv/bin/pytest tests/test_tabm_ensemble_audit.py -q`
 
 Expected: CLI 진입점이 없어 실패한다.
 
-- [ ] **Step 3: CLI를 구현한다**
+- [x] **Step 3: CLI를 구현한다**
 
 감사 모드는 `--stage-c-review`, `--train-csv`, `--output-dir` 세 인자를 받고, 검증
 모드는 이들과 상호 배타적인 `--verify-review` 하나만 받는다. 정상 종료는
@@ -143,13 +143,13 @@ Expected: CLI 진입점이 없어 실패한다.
 오류는 `TABM_ENSEMBLE_AUDIT_ERROR stage=<stage> type=<type> message=<message>`를
 출력한다. 어떤 경로에서도 모델 학습이나 제출 ZIP 생성을 호출하지 않는다.
 
-- [ ] **Step 4: 문서와 테스트를 확인한다**
+- [x] **Step 4: 문서와 테스트를 확인한다**
 
 Run: `.venv/bin/pytest tests/test_tabm_ensemble_audit.py -q && git diff --check`
 
 Expected: 테스트가 통과하고 whitespace 오류가 없다.
 
-- [ ] **Step 5: 커밋한다**
+- [x] **Step 5: 커밋한다**
 
 ```bash
 git add tools/audit_tabm_seed_ensemble.py tests/test_tabm_ensemble_audit.py docs/TABM_CHAMPION_KAGGLE.md
