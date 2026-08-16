@@ -116,6 +116,7 @@ def test_baseline_matches_sealed_champion_candidate() -> None:
     )
 
     assert (
+        contract.baseline.capacity,
         contract.baseline.k,
         contract.baseline.width,
         contract.baseline.blocks,
@@ -125,6 +126,7 @@ def test_baseline_matches_sealed_champion_candidate() -> None:
         contract.baseline.scheduler,
         contract.baseline.learning_rate,
     ) == (
+        candidate["capacity"],
         candidate["k"],
         candidate["width"],
         candidate["blocks"],
