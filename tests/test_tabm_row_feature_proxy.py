@@ -14,7 +14,8 @@ from experiments.tabm_campaign.row_feature_contracts import (
     load_row_feature_proxy_contract,
 )
 from experiments.tabm_campaign.row_feature_proxy import (
-    _CODE_FILES,
+    _code_file_paths,
+    _code_sha256,
     RowFeatureProxyError,
     build_proxy_jobs,
     run_row_feature_proxy,
@@ -22,6 +23,41 @@ from experiments.tabm_campaign.row_feature_proxy import (
 
 
 CONTRACT = load_row_feature_proxy_contract()
+
+
+def _write_training_checkpoint(
+    path: Path,
+    candidate_id: str,
+    *,
+    epoch: int = 2,
+    missing_key: str | None = None,
+) -> None:
+    import random
+
+    import numpy as np
+    import torch
+
+    payload = {
+        "candidate_id": candidate_id,
+        "epoch": epoch,
+        "best_epoch": 1,
+        "best_brier": 0.04,
+        "validation_curve": [(0, 0.08), (1, 0.04), (2, 0.05)],
+        "validation_time_curve": [(0, 1.0, 0.08), (1, 2.0, 0.04), (2, 3.0, 0.05)],
+        "elapsed_seconds": 3.0,
+        "model": {"weight": torch.tensor([1.0])},
+        "optimizer": {"state": {}, "param_groups": []},
+        "scheduler": {"last_epoch": epoch},
+        "scaler": {},
+        "python_rng": random.getstate(),
+        "numpy_rng": np.random.get_state(),
+        "torch_rng": torch.get_rng_state(),
+        "cuda_rng": [],
+        "adapter_state": None,
+    }
+    if missing_key is not None:
+        payload.pop(missing_key)
+    torch.save(payload, path)
 
 
 class _Runtime:
@@ -47,8 +83,13 @@ class _Runtime:
         brier = None
         cache_digest = "c" * 64
         if status in {"completed", "inconclusive"}:
-            (job_dir / "checkpoint.pt").write_bytes(f"checkpoint:{job.candidate_id}".encode())
-            (job_dir / "best_checkpoint.pt").write_bytes(f"best:{job.candidate_id}".encode())
+            _write_training_checkpoint(job_dir / "checkpoint.pt", job.candidate_id)
+            import torch
+
+            torch.save(
+                {"model": {"weight": torch.tensor([1.0])}, "epoch": 1},
+                job_dir / "best_checkpoint.pt",
+            )
             checkpoint = job_dir / "best_checkpoint.pt"
             worker_module._atomic_json(
                 job_dir / "checkpoint_meta.json",
@@ -56,7 +97,7 @@ class _Runtime:
                     "candidate_id": job.candidate_id,
                     "epoch": 2,
                     "checkpoint": "checkpoint.pt",
-                    "adapter_state": {},
+                    "adapter_state": None,
                     "checkpoint_binding": {
                         "config_sha256": worker_module._job_sha(job),
                         "cache_sha256": cache_digest,
@@ -92,7 +133,7 @@ class _Runtime:
             job.candidate_id,
             status,
             brier,
-            2 if checkpoint else None,
+            1 if checkpoint else None,
             3 if checkpoint else 0,
             checkpoint,
             predictions,
@@ -200,6 +241,72 @@ class _InvalidCompletedRuntime(_Runtime):
             payload["status"] = "failed"
             worker_module._atomic_json(job_dir / "worker_result.json", payload)
         return (invalid,)
+
+
+class _DeadlineFallbackRuntime(_Runtime):
+    def run_jobs(self, version, jobs, output_dir, *, gpu_count, job_deadline):
+        completed = super().run_jobs(
+            version,
+            jobs,
+            output_dir,
+            gpu_count=gpu_count,
+            job_deadline=job_deadline,
+        )[0]
+        job = jobs[0]
+        fallback = CampaignJobResult(
+            job.candidate_id,
+            "inconclusive",
+            None,
+            None,
+            completed.completed_epochs,
+            completed.checkpoint,
+            None,
+            {},
+            "worker_exceeded_deadline_grace",
+        )
+        worker_module._atomic_json(
+            output_dir / job.candidate_id / "worker_result.json",
+            worker_module._serialize_result(fallback, worker_module._job_sha(job)),
+        )
+        return (fallback,)
+
+
+class _CorruptCheckpointRuntime(_DeadlineFallbackRuntime):
+    def __init__(self, corruption: str) -> None:
+        super().__init__()
+        self.corruption = corruption
+
+    def run_jobs(self, version, jobs, output_dir, *, gpu_count, job_deadline):
+        result = super().run_jobs(
+            version,
+            jobs,
+            output_dir,
+            gpu_count=gpu_count,
+            job_deadline=job_deadline,
+        )[0]
+        job = jobs[0]
+        job_dir = output_dir / job.candidate_id
+        if self.corruption == "damaged":
+            (job_dir / "checkpoint.pt").write_bytes(b"not-a-checkpoint")
+        elif self.corruption == "missing_optimizer":
+            _write_training_checkpoint(
+                job_dir / "checkpoint.pt",
+                job.candidate_id,
+                missing_key="optimizer",
+            )
+        elif self.corruption == "epoch_mismatch":
+            meta = json.loads((job_dir / "checkpoint_meta.json").read_bytes())
+            meta["epoch"] = 1
+            worker_module._atomic_json(job_dir / "checkpoint_meta.json", meta)
+        elif self.corruption == "malformed_curve":
+            import torch
+
+            checkpoint = torch.load(
+                job_dir / "checkpoint.pt", map_location="cpu", weights_only=False
+            )
+            checkpoint["validation_curve"] = [(), (1, 0.04), (2, 0.05)]
+            torch.save(checkpoint, job_dir / "checkpoint.pt")
+        return (result,)
 
 
 def _official_data(tmp_path: Path, monkeypatch) -> Path:
@@ -326,24 +433,25 @@ def test_wall_deadline_cannot_exceed_sealed_budget(tmp_path: Path, monkeypatch) 
         )
 
 
-def test_code_binding_covers_all_stage_p_execution_sources() -> None:
-    assert {
-        "artifacts.py",
-        "row_feature_contracts.py",
-        "row_feature_decisions.py",
-        "row_feature_proxy.py",
-        "runner.py",
-        "worker.py",
-        "cache.py",
-        "sampling.py",
-        "training.py",
-        "../independent_dl/preprocessing.py",
-        "../independent_dl/row_features.py",
-        "../independent_dl/features.py",
-        "../independent_dl/training.py",
-        "../independent_dl/models/common.py",
-        "../independent_dl/models/tabm.py",
-    }.issubset(_CODE_FILES)
+def test_code_binding_covers_runtime_packages_and_file_set_changes(tmp_path: Path) -> None:
+    production = {path.as_posix() for path in _code_file_paths()}
+    assert any(path.endswith("independent_dl/progress.py") for path in production)
+    assert any(
+        path.endswith("independent_dl/feature_sources/trackman.py")
+        for path in production
+    )
+
+    root = tmp_path / "experiments"
+    (root / "independent_dl").mkdir(parents=True)
+    (root / "tabm_campaign").mkdir()
+    (root / "independent_dl" / "a.py").write_text("A = 1\n", encoding="utf-8")
+    (root / "tabm_campaign" / "b.py").write_text("B = 1\n", encoding="utf-8")
+    initial = _code_sha256(root)
+    added = root / "independent_dl" / "new_module.py"
+    added.write_text("NEW = 1\n", encoding="utf-8")
+    assert _code_sha256(root) != initial
+    added.unlink()
+    assert _code_sha256(root) == initial
 
 
 def test_run_is_sequential_guarded_and_publishes_exact_evidence(
@@ -456,6 +564,56 @@ def test_budget_inconclusive_keeps_metric_but_bundles_only_training_artifacts(
         now=lambda: 2_000.0,
     )
     assert resumed_runtime.preexisting_checkpoints[0] == jobs[0].candidate_id
+
+
+def test_deadline_grace_fallback_is_bound_bundled_and_resumable(
+    tmp_path: Path, monkeypatch
+) -> None:
+    data = _official_data(tmp_path, monkeypatch)
+    jobs = build_proxy_jobs(CONTRACT)
+    first = run_row_feature_proxy(
+        data_dir=data,
+        output_dir=tmp_path / "first",
+        runtime=_DeadlineFallbackRuntime(),
+        wall_deadline=10_000.0,
+        now=lambda: 1_000.0,
+    )
+
+    assert first.inconclusive == tuple(job.candidate_id for job in jobs)
+    with ZipFile(first.bundles.resume) as archive:
+        names = set(archive.namelist())
+    assert f"jobs/{jobs[0].candidate_id}/checkpoint.pt" in names
+    assert f"jobs/{jobs[0].candidate_id}/checkpoint_meta.json" in names
+
+    resumed_runtime = _Runtime()
+    run_row_feature_proxy(
+        data_dir=data,
+        output_dir=tmp_path / "second",
+        resume_bundle=first.bundles.resume,
+        runtime=resumed_runtime,
+        wall_deadline=12_000.0,
+        now=lambda: 2_000.0,
+    )
+    assert resumed_runtime.preexisting_checkpoints[0] == jobs[0].candidate_id
+
+
+@pytest.mark.parametrize(
+    "corruption",
+    ["damaged", "missing_optimizer", "epoch_mismatch", "malformed_curve"],
+)
+def test_inconclusive_checkpoint_payload_fails_closed(
+    tmp_path: Path, monkeypatch, corruption: str
+) -> None:
+    data = _official_data(tmp_path, monkeypatch)
+
+    with pytest.raises(RowFeatureProxyError, match="checkpoint"):
+        run_row_feature_proxy(
+            data_dir=data,
+            output_dir=tmp_path / corruption,
+            runtime=_CorruptCheckpointRuntime(corruption),
+            wall_deadline=10_000.0,
+            now=lambda: 1_000.0,
+        )
 
 
 def test_same_directory_reuses_completed_and_failed_but_reruns_inconclusive(
@@ -613,7 +771,12 @@ def test_resume_rejects_changed_code_binding(
         now=lambda: 1_000.0,
     )
 
-    monkeypatch.setattr(proxy_module, "_CODE_FILES", tuple(reversed(_CODE_FILES)))
+    production_files = proxy_module._code_file_paths()
+    monkeypatch.setattr(
+        proxy_module,
+        "_code_file_paths",
+        lambda root=None: tuple(reversed(production_files)),
+    )
     with pytest.raises(RowFeatureProxyError, match="code_sha256"):
         run_row_feature_proxy(
             data_dir=data,

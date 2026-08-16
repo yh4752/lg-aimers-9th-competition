@@ -82,23 +82,7 @@ _CHECKPOINT_NAMES = {"checkpoint.pt", "best_checkpoint.pt"}
 _STATUSES = {"completed", "failed", "inconclusive"}
 _DISPOSITIONS = {"completed", "failed", "inconclusive", "not_started"}
 _SHA_RE = re.compile(r"[0-9a-f]{64}")
-_CODE_FILES = (
-    "artifacts.py",
-    "row_feature_contracts.py",
-    "row_feature_decisions.py",
-    "row_feature_proxy.py",
-    "runner.py",
-    "worker.py",
-    "cache.py",
-    "sampling.py",
-    "training.py",
-    "../independent_dl/preprocessing.py",
-    "../independent_dl/row_features.py",
-    "../independent_dl/features.py",
-    "../independent_dl/training.py",
-    "../independent_dl/models/common.py",
-    "../independent_dl/models/tabm.py",
-)
+_GENERATED_CELL_PREFIXES = ("COLAB_", "KAGGLE_")
 
 
 def _canonical_json(value: object) -> bytes:
@@ -179,13 +163,39 @@ def _find_official_train(data_dir: Path) -> Path:
     return candidates[0]
 
 
-def _code_sha256() -> str:
-    root = Path(__file__).resolve().parent
+def _code_file_paths(experiments_root: Path | None = None) -> tuple[Path, ...]:
+    """Return the conservative Python source closure for Stage P execution."""
+
+    root = (
+        Path(__file__).resolve().parents[1]
+        if experiments_root is None
+        else Path(experiments_root).resolve()
+    )
+    paths = list((root / "independent_dl").rglob("*.py"))
+    paths.extend(
+        path
+        for path in (root / "tabm_campaign").rglob("*.py")
+        if not path.name.startswith(_GENERATED_CELL_PREFIXES)
+    )
+    result = tuple(sorted(paths, key=lambda path: path.relative_to(root).as_posix()))
+    if not result:
+        raise RowFeatureProxyError("Stage P code source closure is empty")
+    return result
+
+
+def _code_sha256(experiments_root: Path | None = None) -> str:
+    root = (
+        Path(__file__).resolve().parents[1]
+        if experiments_root is None
+        else Path(experiments_root).resolve()
+    )
     digest = sha256()
-    for relative in _CODE_FILES:
-        path = (root / relative).resolve()
+    for path in _code_file_paths(experiments_root):
         if not _regular_file(path):
-            raise RowFeatureProxyError(f"bound source file is not regular: {relative}")
+            raise RowFeatureProxyError(
+                f"bound source file is not regular: {path.relative_to(root)}"
+            )
+        relative = path.relative_to(root).as_posix()
         digest.update(relative.encode("utf-8"))
         digest.update(b"\0")
         digest.update(path.read_bytes())
@@ -358,6 +368,13 @@ def _validate_checkpoint_meta(
         )
     binding = meta["checkpoint_binding"]
     cache_digest = result.resource_evidence.get("cache_digest")
+    deadline_fallback = (
+        result.status == "inconclusive"
+        and result.failure == "worker_exceeded_deadline_grace"
+        and dict(result.resource_evidence) == {}
+    )
+    if cache_digest is None and deadline_fallback and isinstance(binding, dict):
+        cache_digest = binding.get("cache_sha256")
     expected_binding = {
         "config_sha256": _job_sha(job),
         "cache_sha256": cache_digest,
@@ -373,6 +390,153 @@ def _validate_checkpoint_meta(
         )
     if not _regular_file(job_dir / "checkpoint.pt"):
         raise RowFeatureProxyError("checkpoint metadata references a missing checkpoint")
+    _validate_checkpoint_payload(
+        job,
+        result,
+        job_dir / "checkpoint.pt",
+        meta_epoch=epoch,
+        meta_adapter_state=meta["adapter_state"],
+    )
+
+
+def _validate_checkpoint_payload(
+    job: CampaignJob,
+    result: CampaignJobResult,
+    path: Path,
+    *,
+    meta_epoch: int,
+    meta_adapter_state: object,
+) -> None:
+    """Safely validate the restart state written by independent_dl.training."""
+
+    try:
+        import numpy as np
+        import torch
+
+        safe_types = [
+            np.core.multiarray._reconstruct,
+            np.ndarray,
+            np.dtype,
+            type(np.dtype(np.uint32)),
+        ]
+        safe_globals = torch.serialization.safe_globals
+        with safe_globals(safe_types):
+            payload = torch.load(
+                path,
+                map_location="cpu",
+                weights_only=True,
+            )
+    except Exception as error:
+        raise RowFeatureProxyError(
+            f"checkpoint payload cannot be loaded safely: {error}"
+        ) from error
+    required = {
+        "candidate_id",
+        "epoch",
+        "best_epoch",
+        "best_brier",
+        "validation_curve",
+        "validation_time_curve",
+        "elapsed_seconds",
+        "model",
+        "optimizer",
+        "scheduler",
+        "scaler",
+        "python_rng",
+        "numpy_rng",
+        "torch_rng",
+        "cuda_rng",
+        "adapter_state",
+    }
+    if type(payload) is not dict or set(payload) != required:
+        raise RowFeatureProxyError("checkpoint payload keys are invalid")
+    epoch = payload["epoch"]
+    best_epoch = payload["best_epoch"]
+    best_brier = payload["best_brier"]
+    elapsed = payload["elapsed_seconds"]
+    if (
+        payload["candidate_id"] != job.candidate_id
+        or type(epoch) is not int
+        or epoch != meta_epoch
+        or type(best_epoch) is not int
+        or not 0 <= best_epoch <= epoch
+        or (
+            result.best_epoch is not None
+            and result.best_epoch != best_epoch
+        )
+        or type(best_brier) is not float
+        or not math.isfinite(best_brier)
+        or type(elapsed) is not float
+        or not math.isfinite(elapsed)
+        or elapsed < 0.0
+    ):
+        raise RowFeatureProxyError(
+            "checkpoint payload candidate, epoch, best epoch, or metric is invalid"
+        )
+    validation_curve = payload["validation_curve"]
+    time_curve = payload["validation_time_curve"]
+    curves_valid = (
+        type(validation_curve) is list
+        and len(validation_curve) == epoch + 1
+        and type(time_curve) is list
+        and len(time_curve) == epoch + 1
+    )
+    if curves_valid:
+        for expected_epoch, (metric_item, time_item) in enumerate(
+            zip(validation_curve, time_curve, strict=True)
+        ):
+            if (
+                type(metric_item) not in {list, tuple}
+                or len(metric_item) != 2
+                or type(metric_item[0]) is not int
+                or metric_item[0] != expected_epoch
+                or type(metric_item[1]) is not float
+                or not math.isfinite(metric_item[1])
+                or not 0.0 <= metric_item[1] <= 1.0
+                or type(time_item) not in {list, tuple}
+                or len(time_item) != 3
+                or type(time_item[0]) is not int
+                or time_item[0] != expected_epoch
+                or any(
+                    type(value) is not float or not math.isfinite(value)
+                    for value in time_item[1:]
+                )
+                or time_item[1] < 0.0
+                or time_item[2] != metric_item[1]
+            ):
+                curves_valid = False
+                break
+    if not curves_valid:
+        raise RowFeatureProxyError("checkpoint validation curves are invalid")
+    expected_best_epoch, expected_best_brier = min(
+        validation_curve, key=lambda item: item[1]
+    )
+    if (
+        best_epoch != expected_best_epoch
+        or not math.isclose(best_brier, expected_best_brier, rel_tol=0.0, abs_tol=1e-15)
+        or any(
+            current[1] < previous[1]
+            for previous, current in zip(time_curve, time_curve[1:])
+        )
+        or not math.isclose(elapsed, time_curve[-1][1], rel_tol=0.0, abs_tol=1e-9)
+    ):
+        raise RowFeatureProxyError("checkpoint best metric does not match its curve")
+    if (
+        not isinstance(payload["model"], Mapping)
+        or not payload["model"]
+        or not isinstance(payload["optimizer"], Mapping)
+        or not {"state", "param_groups"}.issubset(payload["optimizer"])
+        or not isinstance(payload["scheduler"], Mapping)
+        or not isinstance(payload["scaler"], Mapping)
+        or type(payload["python_rng"]) is not tuple
+        or type(payload["numpy_rng"]) is not tuple
+        or not isinstance(payload["torch_rng"], torch.Tensor)
+        or type(payload["cuda_rng"]) is not list
+        or payload["adapter_state"] != meta_adapter_state
+    ):
+        raise RowFeatureProxyError(
+            "checkpoint model, optimizer, scheduler, RNG, or adapter state is invalid"
+        )
 
 
 def _validate_semantic_evidence(
