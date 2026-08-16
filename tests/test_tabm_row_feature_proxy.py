@@ -768,6 +768,38 @@ def test_nested_optional_history_is_hash_bound_to_resume(
         )
 
 
+def test_post_training_bundle_streaming_stops_at_absolute_deadline(
+    tmp_path: Path, monkeypatch
+) -> None:
+    data = _official_data(tmp_path, monkeypatch)
+    packaging = [False]
+    ticks = [0]
+
+    class Runtime(_BudgetRuntime):
+        def run_jobs(self, *args, **kwargs):
+            result = super().run_jobs(*args, **kwargs)
+            packaging[0] = True
+            return result
+
+    def advancing_clock() -> float:
+        if not packaging[0]:
+            return 1_000.0
+        ticks[0] += 1
+        return 1_000.0 if ticks[0] < 5 else 10_000.0
+
+    output = tmp_path / "out"
+    with pytest.raises(TimeoutError, match="deadline"):
+        run_row_feature_proxy(
+            data_dir=data,
+            output_dir=output,
+            runtime=Runtime(),
+            wall_deadline=10_000.0,
+            now=advancing_clock,
+        )
+    assert not list(output.glob("tabm_row_feature_stage_P_*_bundle.zip"))
+    assert not list(output.glob(".tabm_row_feature_stage_P_*"))
+
+
 def test_deadline_grace_fallback_is_bound_bundled_and_resumable(
     tmp_path: Path, monkeypatch
 ) -> None:

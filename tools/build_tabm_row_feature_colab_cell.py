@@ -88,12 +88,24 @@ EMBEDDED_RUNTIME_B64 = "{encoded}"
 EXPECTED_RUNTIME_SHA256 = "{runtime_sha}"
 WORK_ROOT = Path("/content/tabm_row_feature_proxy")
 CODE_ROOT = WORK_ROOT / f"runtime_{{EXPECTED_RUNTIME_SHA256[:12]}}"
-INPUT_ROOT = WORK_ROOT / "uploads"
-DATA_ROOT = WORK_ROOT / "official_data"
-OUTPUT_ROOT = WORK_ROOT / "stage_P"
-SNAPSHOT_ROOT = WORK_ROOT / "snapshots"
-LOG_PATH = WORK_ROOT / "row_feature_proxy.log"
-DELIVERY_PATH = WORK_ROOT / "tabm_row_feature_stage_P_delivery.zip"
+
+
+def create_run_root(work_root: Path, run_id: str) -> Path:
+    if Path(run_id).name != run_id or run_id in {{"", ".", ".."}}:
+        raise RuntimeError("run identifier is unsafe")
+    root = work_root / "runs" / run_id
+    root.mkdir(parents=True, exist_ok=False)
+    return root
+
+
+RUN_ID = f"{{time.time_ns()}}_{{os.getpid()}}"
+RUN_ROOT = create_run_root(WORK_ROOT, RUN_ID)
+INPUT_ROOT = RUN_ROOT / "uploads"
+DATA_ROOT = RUN_ROOT / "official_data"
+OUTPUT_ROOT = RUN_ROOT / "stage_P"
+SNAPSHOT_ROOT = RUN_ROOT / "snapshots"
+LOG_PATH = RUN_ROOT / "row_feature_proxy.log"
+DELIVERY_PATH = RUN_ROOT / "tabm_row_feature_stage_P_delivery.zip"
 PROGRESS_MARKERS = ("JOB_START", "TRAINING_PROGRESS", "EPOCH_CHECKPOINTED")
 latest_verified = [None]
 
@@ -107,18 +119,38 @@ def fail(stage: str, error: Exception) -> None:
     traceback.print_exc()
 
 
-def extract_runtime(value: bytes) -> None:
-    temporary = CODE_ROOT.with_name(f".{{CODE_ROOT.name}}-extracting")
-    if CODE_ROOT.exists():
-        if CODE_ROOT.is_symlink() or not CODE_ROOT.is_dir():
-            raise RuntimeError("existing runtime path is unsafe")
-        shutil.rmtree(CODE_ROOT)
+def verify_extracted_runtime(archive_bytes: bytes) -> None:
+    if CODE_ROOT.is_symlink() or not CODE_ROOT.is_dir():
+        raise RuntimeError("existing runtime path is unsafe")
+    expected = {{}}
+    with tarfile.open(fileobj=io.BytesIO(archive_bytes), mode="r:gz") as runtime:
+        for member in runtime.getmembers():
+            stream = runtime.extractfile(member)
+            if stream is None:
+                raise RuntimeError(f"cannot read embedded runtime member: {{member.name}}")
+            expected[member.name] = hashlib.sha256(stream.read()).hexdigest()
+    observed = {{}}
+    for path in CODE_ROOT.rglob("*"):
+        if path.is_symlink() or not (path.is_dir() or path.is_file()):
+            raise RuntimeError(f"existing runtime member is unsafe: {{path}}")
+        if path.is_file():
+            name = path.relative_to(CODE_ROOT).as_posix()
+            observed[name] = hashlib.sha256(path.read_bytes()).hexdigest()
+    if observed != expected:
+        raise RuntimeError("existing runtime inventory or hash differs")
+
+
+def extract_runtime(archive_bytes: bytes) -> None:
+    temporary = CODE_ROOT.with_name(f".{{CODE_ROOT.name}}-{{RUN_ID}}-extracting")
+    if CODE_ROOT.exists() or CODE_ROOT.is_symlink():
+        verify_extracted_runtime(archive_bytes)
+        return
     if temporary.exists():
         if temporary.is_symlink() or not temporary.is_dir():
             raise RuntimeError("temporary runtime path is unsafe")
         shutil.rmtree(temporary)
     temporary.mkdir(parents=True)
-    with tarfile.open(fileobj=io.BytesIO(value), mode="r:gz") as runtime:
+    with tarfile.open(fileobj=io.BytesIO(archive_bytes), mode="r:gz") as runtime:
         members = runtime.getmembers()
         names = [member.name for member in members]
         if len(names) != len(set(names)) or len(names) > 256:
@@ -163,7 +195,9 @@ def upload_archives() -> list[Path]:
     return paths
 
 
-def request_download(path: Path) -> None:
+def request_download(path: Path, *, enforce_deadline: bool = True) -> None:
+    if enforce_deadline:
+        remaining_seconds()
     if path.is_symlink() or not path.is_file() or WORK_ROOT.resolve() not in path.resolve().parents:
         raise RuntimeError(f"download path is not verified under the work root: {{path}}")
     google.colab.files.download(str(path))
@@ -171,8 +205,8 @@ def request_download(path: Path) -> None:
 
 
 def remember_snapshot(snapshot) -> None:
-    latest_verified[0] = snapshot.path
     request_download(snapshot.path)
+    latest_verified[0] = snapshot.path
 
 
 def remember_uploaded_resume(path: Path) -> None:
@@ -183,13 +217,13 @@ def remember_uploaded_resume(path: Path) -> None:
 def publish_latest_verified_resume() -> None:
     path = latest_verified[0]
     if path is not None:
-        request_download(Path(path))
+        request_download(Path(path), enforce_deadline=False)
 
 
 def remaining_seconds() -> float:
     remaining = SESSION_DEADLINE - time.time()
     if remaining <= 0:
-        raise RuntimeError("absolute 10800-second Colab deadline expired")
+        raise TimeoutError("absolute 10800-second Colab deadline expired")
     return remaining
 
 
@@ -303,6 +337,7 @@ try:
         embedded_runtime_sha256=EXPECTED_RUNTIME_SHA256,
         campaign_config_sha256=contract_sha,
         code_sha256=code_sha,
+        check_deadline=remaining_seconds,
     )
     verified_delivery = verify_delivery(
         delivery,
@@ -310,6 +345,8 @@ try:
         embedded_runtime_sha256=EXPECTED_RUNTIME_SHA256,
         campaign_config_sha256=contract_sha,
         code_sha256=code_sha,
+        check_deadline=remaining_seconds,
+        temporary_dir=RUN_ROOT,
     )
     print(
         f"ROW_FEATURE_DELIVERY_READY path={{verified_delivery.path}} sha256={{verified_delivery.sha256}}",

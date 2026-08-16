@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import math
+import multiprocessing
 import os
 import re
 import shutil
@@ -64,6 +66,7 @@ _MAX_DATA_MEMBER_BYTES = 8 * 1024 * 1024 * 1024
 _MAX_DATA_TOTAL_BYTES = 12 * 1024 * 1024 * 1024
 _MAX_COMPRESSION_RATIO = 200.0
 _MIN_RATIO_BYTES = 64 * 1024
+_MAX_ACTIVE_CHECKPOINT_BYTES = 1024 * 1024 * 1024
 _DELIVERY_MEMBERS = {
     "tabm_row_feature_stage_P_review_bundle.zip",
     "tabm_row_feature_stage_P_resume_bundle.zip",
@@ -91,10 +94,18 @@ def canonical_json(value: object) -> bytes:
     ).encode("utf-8")
 
 
-def file_sha256(path: Path) -> str:
+def _check_deadline(check_deadline: Callable[[], None] | None) -> None:
+    if check_deadline is not None:
+        check_deadline()
+
+
+def file_sha256(
+    path: Path, check_deadline: Callable[[], None] | None = None
+) -> str:
     digest = sha256()
     with path.open("rb") as stream:
         while chunk := stream.read(1024 * 1024):
+            _check_deadline(check_deadline)
             digest.update(chunk)
     return digest.hexdigest()
 
@@ -539,11 +550,17 @@ def _regular_file(path: Path, label: str) -> Path:
     return path
 
 
-def _stream_zip_member(archive: ZipFile, name: str, path: Path) -> None:
+def _stream_zip_member(
+    archive: ZipFile,
+    name: str,
+    path: Path,
+    check_deadline: Callable[[], None] | None = None,
+) -> None:
     info = _zip_info(name)
     info.file_size = path.stat().st_size
     with path.open("rb") as source, archive.open(info, "w") as destination:
         while chunk := source.read(1024 * 1024):
+            _check_deadline(check_deadline)
             destination.write(chunk)
 
 
@@ -557,6 +574,7 @@ def build_delivery(
     embedded_runtime_sha256: str,
     campaign_config_sha256: str,
     code_sha256: str,
+    check_deadline: Callable[[], None] | None = None,
 ) -> Path:
     """Create the exact four-member delivery only after nested verification."""
 
@@ -572,12 +590,17 @@ def build_delivery(
         ),
         "code_sha256": _require_sha(code_sha256, "code SHA-256"),
     }
+    _check_deadline(check_deadline)
     review_bundle = _regular_file(Path(review_bundle), "review bundle")
     resume_bundle = _regular_file(Path(resume_bundle), "resume bundle")
     log_path = _regular_file(Path(log_path), "proxy log")
     try:
-        review = verify_review_bundle(review_bundle)
-        resume = verify_resume_bundle(resume_bundle)
+        review = verify_review_bundle(
+            review_bundle, check_deadline=check_deadline
+        )
+        resume = verify_resume_bundle(
+            resume_bundle, check_deadline=check_deadline
+        )
     except ArtifactError as error:
         raise RowFeatureColabError(f"nested bundle is untrusted: {error}") from error
     if (
@@ -598,7 +621,10 @@ def build_delivery(
         "row_feature_proxy.log": log_path,
     }
     evidence = {
-        name: {"size": path.stat().st_size, "sha256": file_sha256(path)}
+        name: {
+            "size": path.stat().st_size,
+            "sha256": file_sha256(path, check_deadline),
+        }
         for name, path in sources.items()
     }
     manifest = canonical_json(
@@ -622,8 +648,16 @@ def build_delivery(
     try:
         with ZipFile(temporary, "w", compression=ZIP_DEFLATED, compresslevel=9) as archive:
             for name in sorted(sources):
-                _stream_zip_member(archive, name, sources[name])
+                _stream_zip_member(archive, name, sources[name], check_deadline)
+            _check_deadline(check_deadline)
             archive.writestr(_zip_info("delivery_manifest.json"), manifest)
+        verify_delivery(
+            temporary,
+            **bindings,
+            check_deadline=check_deadline,
+            temporary_dir=output_path.parent,
+        )
+        _check_deadline(check_deadline)
         os.replace(temporary, output_path)
     except Exception:
         try:
@@ -631,7 +665,6 @@ def build_delivery(
         except FileNotFoundError:
             pass
         raise
-    verify_delivery(output_path, **bindings)
     return output_path
 
 
@@ -642,6 +675,8 @@ def verify_delivery(
     embedded_runtime_sha256: str,
     campaign_config_sha256: str,
     code_sha256: str,
+    check_deadline: Callable[[], None] | None = None,
+    temporary_dir: str | Path | None = None,
 ) -> VerifiedDelivery:
     """Verify the outer manifest and recursively verify both nested bundles."""
 
@@ -657,10 +692,18 @@ def verify_delivery(
         ),
         "code_sha256": _require_sha(code_sha256, "code SHA-256"),
     }
+    _check_deadline(check_deadline)
     source = _regular_file(Path(source), "delivery")
+    temporary_parent = source.parent if temporary_dir is None else Path(temporary_dir)
+    if temporary_parent.is_symlink():
+        raise RowFeatureColabError("delivery verification directory is unsafe")
+    temporary_parent.mkdir(parents=True, exist_ok=True)
+    if not temporary_parent.is_dir():
+        raise RowFeatureColabError("delivery verification directory is not a directory")
     temporary_root: Path | None = None
     try:
         with ZipFile(source, "r") as archive:
+            _check_deadline(check_deadline)
             infos = archive.infolist()
             names = [info.filename for info in infos]
             if len(names) != len(set(names)) or set(names) != _DELIVERY_MEMBERS:
@@ -693,7 +736,11 @@ def verify_delivery(
             ):
                 raise RowFeatureColabError("delivery manifest schema or bindings differ")
 
-            temporary_root = Path(tempfile.mkdtemp(prefix="row-feature-delivery-"))
+            temporary_root = Path(
+                tempfile.mkdtemp(
+                    prefix="row-feature-delivery-", dir=temporary_parent
+                )
+            )
             observed: dict[str, str] = {}
             for name in sorted(_DELIVERY_PAYLOAD_MEMBERS):
                 raw = manifest["members"][name]
@@ -712,6 +759,7 @@ def verify_delivery(
                 written = 0
                 with archive.open(info, "r") as input_stream, target.open("xb") as output:
                     while chunk := input_stream.read(1024 * 1024):
+                        _check_deadline(check_deadline)
                         written += len(chunk)
                         if written > raw["size"]:
                             raise RowFeatureColabError(f"delivery member expanded beyond its manifest: {name}")
@@ -721,10 +769,12 @@ def verify_delivery(
                     raise RowFeatureColabError(f"delivery member SHA-256 differs: {name}")
                 observed[name] = digest.hexdigest()
             review = verify_review_bundle(
-                temporary_root / "tabm_row_feature_stage_P_review_bundle.zip"
+                temporary_root / "tabm_row_feature_stage_P_review_bundle.zip",
+                check_deadline=check_deadline,
             )
             resume = verify_resume_bundle(
-                temporary_root / "tabm_row_feature_stage_P_resume_bundle.zip"
+                temporary_root / "tabm_row_feature_stage_P_resume_bundle.zip",
+                check_deadline=check_deadline,
             )
             if (
                 review.version != "P"
@@ -744,7 +794,7 @@ def verify_delivery(
     finally:
         if temporary_root is not None:
             shutil.rmtree(temporary_root, ignore_errors=True)
-    return VerifiedDelivery(source, file_sha256(source), observed)
+    return VerifiedDelivery(source, file_sha256(source, check_deadline), observed)
 
 
 def _read_json_object(value: bytes, label: str) -> dict[str, object]:
@@ -757,11 +807,28 @@ def _read_json_object(value: bytes, label: str) -> dict[str, object]:
     return parsed
 
 
-def _copy_active_candidate(source: Path, destination: Path, job) -> dict[str, object]:
+def _copy_file_with_deadline(
+    source: Path,
+    destination: Path,
+    check_deadline: Callable[[], None] | None,
+) -> None:
+    with source.open("rb") as input_stream, destination.open("xb") as output:
+        while chunk := input_stream.read(1024 * 1024):
+            _check_deadline(check_deadline)
+            output.write(chunk)
+
+
+def _copy_active_candidate(
+    source: Path,
+    destination: Path,
+    job,
+    check_deadline: Callable[[], None] | None = None,
+) -> dict[str, object]:
     """Copy one atomic epoch publication without racing the next epoch."""
 
     from .worker import _job_payload, _job_sha, _training_source_sha256
 
+    _check_deadline(check_deadline)
     if source.is_symlink() or not source.is_dir():
         raise RowFeatureColabError("active candidate directory is unsafe")
     paths = sorted(source.iterdir(), key=lambda path: path.name)
@@ -771,6 +838,10 @@ def _copy_active_candidate(source: Path, destination: Path, job) -> dict[str, ob
     required = {"job.json", "checkpoint.pt", "checkpoint_meta.json", "best_checkpoint.pt"}
     if not required.issubset(path.name for path in paths):
         raise RowFeatureColabError("active candidate has no complete epoch checkpoint")
+    for name in ("checkpoint.pt", "best_checkpoint.pt"):
+        size = (source / name).stat().st_size
+        if size <= 0 or size > _MAX_ACTIVE_CHECKPOINT_BYTES:
+            raise RowFeatureColabError("active checkpoint exceeds the size limit")
 
     metadata_before = (source / "checkpoint_meta.json").read_bytes()
     metadata = _read_json_object(metadata_before, "active checkpoint metadata")
@@ -806,7 +877,7 @@ def _copy_active_candidate(source: Path, destination: Path, job) -> dict[str, ob
 
     destination.mkdir(parents=True, exist_ok=False)
     for path in paths:
-        shutil.copyfile(path, destination / path.name)
+        _copy_file_with_deadline(path, destination / path.name, check_deadline)
     metadata_after = (source / "checkpoint_meta.json").read_bytes()
     if metadata_after != metadata_before:
         raise RowFeatureColabError("active checkpoint metadata changed during snapshot")
@@ -837,7 +908,90 @@ def _checkpoint_progress(path: Path, *, candidate_id: str, epoch: int) -> dict[s
     return latest
 
 
-def _validated_active_row(snapshot_job_dir: Path, job) -> dict[str, object]:
+def _active_checkpoint_payload_worker(
+    connection,
+    snapshot_job_dir: str,
+    job,
+    result,
+    best_epoch: int,
+) -> None:
+    """Validate Torch payloads in a process the deadline supervisor can kill."""
+
+    try:
+        from . import row_feature_proxy as proxy
+
+        proxy._validate_checkpoint_meta(
+            job,
+            result,
+            Path(snapshot_job_dir),
+            validate_payload=True,
+        )
+        import torch
+
+        with torch.serialization.safe_globals([]):
+            best_payload = torch.load(
+                Path(snapshot_job_dir) / "best_checkpoint.pt",
+                map_location="cpu",
+                weights_only=True,
+            )
+        if (
+            type(best_payload) is not dict
+            or set(best_payload) != {"model", "epoch"}
+            or best_payload["epoch"] != best_epoch
+            or not isinstance(best_payload["model"], Mapping)
+        ):
+            raise RowFeatureColabError("active best checkpoint epoch binding differs")
+        connection.send((True, ""))
+    except BaseException as error:
+        connection.send((False, f"{type(error).__name__}: {error}"))
+    finally:
+        connection.close()
+
+
+def _validate_active_checkpoint_payload_isolated(
+    snapshot_job_dir: Path,
+    job,
+    result,
+    *,
+    best_epoch: int,
+    check_deadline: Callable[[], None] | None,
+) -> None:
+    """Bound untrusted Torch loading by the absolute session deadline."""
+
+    context = multiprocessing.get_context("spawn")
+    parent, child = context.Pipe(duplex=False)
+    process = context.Process(
+        target=_active_checkpoint_payload_worker,
+        args=(child, str(snapshot_job_dir), job, result, best_epoch),
+    )
+    process.start()
+    child.close()
+    try:
+        while process.is_alive():
+            _check_deadline(check_deadline)
+            process.join(0.1)
+        _check_deadline(check_deadline)
+        if process.exitcode != 0 or not parent.poll():
+            raise RowFeatureColabError("isolated active checkpoint validator failed")
+        accepted, detail = parent.recv()
+        if accepted is not True:
+            raise RowFeatureColabError(
+                f"active checkpoint payload is invalid: {detail}"
+            )
+    except BaseException:
+        if process.is_alive():
+            process.terminate()
+        process.join()
+        raise
+    finally:
+        parent.close()
+
+
+def _validated_active_row(
+    snapshot_job_dir: Path,
+    job,
+    check_deadline: Callable[[], None] | None = None,
+) -> dict[str, object]:
     """Convert a copied epoch checkpoint into a resume row via Stage P validators."""
 
     from .row_feature_runtime import CampaignJobResult
@@ -869,23 +1023,7 @@ def _validated_active_row(snapshot_job_dir: Path, job) -> dict[str, object]:
         or not 0.0 <= best_brier <= 1.0
     ):
         raise RowFeatureColabError("active checkpoint progress metric is invalid")
-    try:
-        import torch
-
-        best_payload = torch.load(
-            snapshot_job_dir / "best_checkpoint.pt",
-            map_location="cpu",
-            weights_only=True,
-        )
-    except Exception as error:
-        raise RowFeatureColabError("active best checkpoint cannot be loaded safely") from error
-    if (
-        type(best_payload) is not dict
-        or set(best_payload) != {"model", "epoch"}
-        or best_payload["epoch"] != best_epoch
-        or not isinstance(best_payload["model"], Mapping)
-    ):
-        raise RowFeatureColabError("active best checkpoint epoch binding differs")
+    _check_deadline(check_deadline)
     binding = metadata["checkpoint_binding"]
     training_sha = _training_source_sha256()
     evidence = {
@@ -903,11 +1041,24 @@ def _validated_active_row(snapshot_job_dir: Path, job) -> dict[str, object]:
         resource_evidence=evidence,
         failure="active_checkpoint_snapshot",
     )
+    _validate_active_checkpoint_payload_isolated(
+        snapshot_job_dir,
+        job,
+        result,
+        best_epoch=best_epoch,
+        check_deadline=check_deadline,
+    )
     _atomic_json(
         snapshot_job_dir / "worker_result.json",
         _serialize_result(result, _job_sha(job)),
     )
-    return proxy._validate_runtime_result(job, result, snapshot_job_dir)
+    return proxy._validate_runtime_result(
+        job,
+        result,
+        snapshot_job_dir,
+        validate_checkpoint_payload=False,
+        check_deadline=check_deadline,
+    )
 
 
 def _copy_bound_artifacts(
@@ -916,6 +1067,7 @@ def _copy_bound_artifacts(
     rows: Mapping[str, dict[str, object]],
     *,
     excluded_candidate_id: str,
+    check_deadline: Callable[[], None] | None = None,
 ) -> None:
     for candidate_id, row in rows.items():
         if candidate_id == excluded_candidate_id:
@@ -927,8 +1079,8 @@ def _copy_bound_artifacts(
                 raise RowFeatureColabError(f"prior snapshot artifact is unsafe: {binding['path']}")
             target = snapshot_root / str(binding["path"])
             target.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copyfile(source, target)
-            if file_sha256(target) != binding["sha256"]:
+            _copy_file_with_deadline(source, target, check_deadline)
+            if file_sha256(target, check_deadline) != binding["sha256"]:
                 raise RowFeatureColabError(f"prior snapshot artifact hash differs: {binding['path']}")
 
 
@@ -945,11 +1097,13 @@ def publish_active_checkpoint_snapshot(
     input_manifest_sha256: str,
     code_sha256: str,
     sequence: int,
+    check_deadline: Callable[[], None] | None = None,
 ) -> EmergencySnapshot:
     """Promote one complete active epoch, replacing no prior verified snapshot."""
 
     from . import row_feature_proxy as proxy
 
+    _check_deadline(check_deadline)
     contract_sha256 = _require_sha(contract_sha256, "contract SHA-256")
     train_sha256 = _require_sha(train_sha256, "train SHA-256")
     history_sha256 = _require_sha(history_sha256, "history SHA-256")
@@ -980,6 +1134,7 @@ def publish_active_checkpoint_snapshot(
                 for key, value in rows.items()
                 if key != active_job.candidate_id
             },
+            check_deadline,
         )
     except Exception as error:
         raise RowFeatureColabError(f"cannot trust live Stage P state: {error}") from error
@@ -994,11 +1149,17 @@ def publish_active_checkpoint_snapshot(
             snapshot_root,
             rows,
             excluded_candidate_id=active_job.candidate_id,
+            check_deadline=check_deadline,
         )
         source_job_dir = live_root / "jobs" / active_job.candidate_id
         target_job_dir = snapshot_root / "jobs" / active_job.candidate_id
-        metadata = _copy_active_candidate(source_job_dir, target_job_dir, active_job)
-        active_row = _validated_active_row(target_job_dir, active_job)
+        metadata = _copy_active_candidate(
+            source_job_dir, target_job_dir, active_job, check_deadline
+        )
+        active_row = _validated_active_row(
+            target_job_dir, active_job, check_deadline
+        )
+        _check_deadline(check_deadline)
         rows[active_job.candidate_id] = active_row
         decision = proxy._decision(jobs, rows, contract)
         snapshot_state = proxy._state_payload(
@@ -1032,20 +1193,21 @@ def publish_active_checkpoint_snapshot(
                 resume,
             ),
             bundle_prefix="tabm_row_feature_stage",
+            check_deadline=check_deadline,
         )
         if bundles.resume is None:
             raise RowFeatureColabError("active snapshot did not produce resume evidence")
-        verified = verify_resume_bundle(bundles.resume)
-        digest = file_sha256(bundles.resume)
+        verified = verify_resume_bundle(
+            bundles.resume, check_deadline=check_deadline
+        )
+        digest = file_sha256(bundles.resume, check_deadline)
         destination = snapshot_dir / (
             f"tabm_row_feature_stage_P_emergency_resume_{sequence:04d}_{digest[:12]}.zip"
         )
         if destination.exists() or destination.is_symlink():
             raise RowFeatureColabError("emergency snapshot destination already exists")
+        _check_deadline(check_deadline)
         os.replace(bundles.resume, destination)
-        final = verify_resume_bundle(destination)
-        if final.manifest_sha256 != verified.manifest_sha256:
-            raise RowFeatureColabError("emergency snapshot changed during publication")
     return EmergencySnapshot(
         destination,
         digest,
@@ -1117,11 +1279,13 @@ def publish_stable_state_snapshot(
     sequence: int,
     candidate_id: str,
     allow_not_started: bool = False,
+    check_deadline: Callable[[], None] | None = None,
 ) -> EmergencySnapshot:
     """Publish the stable state written immediately after a candidate returns."""
 
     from . import row_feature_proxy as proxy
 
+    _check_deadline(check_deadline)
     live_root = Path(live_output_dir)
     jobs = proxy.build_proxy_jobs(contract)
     try:
@@ -1134,6 +1298,7 @@ def publish_stable_state_snapshot(
             code_sha=code_sha256,
             jobs=jobs,
             output_dir=live_root,
+            check_deadline=check_deadline,
         )
     except Exception as error:
         raise RowFeatureColabError(f"cannot trust stable Stage P state: {error}") from error
@@ -1152,6 +1317,7 @@ def publish_stable_state_snapshot(
             snapshot_root,
             rows,
             excluded_candidate_id="",
+            check_deadline=check_deadline,
         )
         decision = proxy._decision(jobs, rows, contract)
         config_bytes = Path(contract_path).read_bytes()
@@ -1174,19 +1340,21 @@ def publish_stable_state_snapshot(
                 resume,
             ),
             bundle_prefix="tabm_row_feature_stage",
+            check_deadline=check_deadline,
         )
         if bundles.resume is None:
             raise RowFeatureColabError("stable snapshot did not produce resume evidence")
-        verified = verify_resume_bundle(bundles.resume)
-        digest = file_sha256(bundles.resume)
+        verified = verify_resume_bundle(
+            bundles.resume, check_deadline=check_deadline
+        )
+        digest = file_sha256(bundles.resume, check_deadline)
         destination = snapshot_dir / (
             f"tabm_row_feature_stage_P_emergency_resume_{sequence:04d}_{digest[:12]}.zip"
         )
         if destination.exists() or destination.is_symlink():
             raise RowFeatureColabError("emergency snapshot destination already exists")
+        _check_deadline(check_deadline)
         os.replace(bundles.resume, destination)
-        if verify_resume_bundle(destination).manifest_sha256 != verified.manifest_sha256:
-            raise RowFeatureColabError("stable snapshot changed during publication")
     return EmergencySnapshot(
         destination,
         digest,
@@ -1202,12 +1370,24 @@ class _VerifiedSnapshotStore:
         *,
         snapshot_dir: Path,
         on_verified_snapshot: Callable[[EmergencySnapshot], None] | None,
+        check_deadline: Callable[[], None] | None = None,
     ) -> None:
         self.snapshot_dir = snapshot_dir
         self.on_verified_snapshot = on_verified_snapshot
+        self.check_deadline = check_deadline
         self.latest: EmergencySnapshot | None = None
         self._sequence = 0
         self._lock = threading.Lock()
+
+    def _owns(self, path: Path) -> bool:
+        try:
+            return (
+                not path.is_symlink()
+                and path.is_file()
+                and path.parent.resolve() == self.snapshot_dir.resolve()
+            )
+        except OSError:
+            return False
 
     def next_sequence(self) -> int:
         with self._lock:
@@ -1216,11 +1396,28 @@ class _VerifiedSnapshotStore:
             return value
 
     def accept(self, snapshot: EmergencySnapshot) -> EmergencySnapshot:
-        verify_resume_bundle(snapshot.path)
+        try:
+            verify_resume_bundle(snapshot.path, check_deadline=self.check_deadline)
+            if file_sha256(snapshot.path, self.check_deadline) != snapshot.sha256:
+                raise RowFeatureColabError("verified snapshot SHA-256 differs")
+            if self.on_verified_snapshot is not None:
+                _check_deadline(self.check_deadline)
+                self.on_verified_snapshot(snapshot)
+        except Exception:
+            with self._lock:
+                current_path = None if self.latest is None else self.latest.path
+            if snapshot.path != current_path and self._owns(snapshot.path):
+                snapshot.path.unlink()
+            raise
         with self._lock:
+            previous = self.latest
             self.latest = snapshot
-        if self.on_verified_snapshot is not None:
-            self.on_verified_snapshot(snapshot)
+        if (
+            previous is not None
+            and previous.path != snapshot.path
+            and self._owns(previous.path)
+        ):
+            previous.path.unlink()
         return snapshot
 
     def republish_latest(self) -> EmergencySnapshot | None:
@@ -1228,16 +1425,18 @@ class _VerifiedSnapshotStore:
             current = self.latest
         if current is None:
             return None
-        verify_resume_bundle(current.path)
+        verify_resume_bundle(current.path, check_deadline=self.check_deadline)
         sequence = self.next_sequence()
         destination = self.snapshot_dir / (
             f"tabm_row_feature_stage_P_emergency_resume_{sequence:04d}_{current.sha256[:12]}.zip"
         )
         if destination.exists() or destination.is_symlink():
             raise RowFeatureColabError("republished snapshot destination already exists")
-        shutil.copyfile(current.path, destination)
-        verified = verify_resume_bundle(destination)
-        if file_sha256(destination) != current.sha256:
+        _copy_file_with_deadline(current.path, destination, self.check_deadline)
+        verified = verify_resume_bundle(
+            destination, check_deadline=self.check_deadline
+        )
+        if file_sha256(destination, self.check_deadline) != current.sha256:
             destination.unlink()
             raise RowFeatureColabError("republished snapshot SHA-256 differs")
         return self.accept(
@@ -1268,13 +1467,18 @@ class SnapshottingCampaignRuntime:
         input_manifest_sha256: str,
         code_sha256: str,
         snapshot_interval_seconds: float,
+        session_deadline: float,
         poll_seconds: float = 1.0,
         delegate=None,
+        wall_time: Callable[[], float] = time.time,
+        monotonic: Callable[[], float] = time.monotonic,
     ) -> None:
         from .worker import SubprocessCampaignRuntime
 
         if snapshot_interval_seconds <= 0 or poll_seconds <= 0:
             raise RowFeatureColabError("snapshot cadence must be positive")
+        if not math.isfinite(session_deadline):
+            raise RowFeatureColabError("snapshot session deadline must be finite")
         self.delegate = delegate or SubprocessCampaignRuntime(data_dir)
         self.live_output_dir = live_output_dir
         self.store = store
@@ -1287,6 +1491,13 @@ class SnapshottingCampaignRuntime:
         self.code_sha256 = code_sha256
         self.snapshot_interval_seconds = float(snapshot_interval_seconds)
         self.poll_seconds = float(poll_seconds)
+        self.session_deadline = float(session_deadline)
+        self.wall_time = wall_time
+        self.monotonic = monotonic
+
+    def _check_session_deadline(self) -> None:
+        if self.wall_time() >= self.session_deadline:
+            raise TimeoutError("Stage P absolute session deadline expired")
 
     def _active_snapshot(self, job) -> EmergencySnapshot:
         return publish_active_checkpoint_snapshot(
@@ -1301,6 +1512,7 @@ class SnapshottingCampaignRuntime:
             input_manifest_sha256=self.input_manifest_sha256,
             code_sha256=self.code_sha256,
             sequence=self.store.next_sequence(),
+            check_deadline=self._check_session_deadline,
         )
 
     def run_jobs(self, version, jobs, output_dir, *, gpu_count, job_deadline):
@@ -1322,16 +1534,24 @@ class SnapshottingCampaignRuntime:
                 sequence=self.store.next_sequence(),
                 candidate_id=job.candidate_id,
                 allow_not_started=True,
+                check_deadline=self._check_session_deadline,
             )
             self.store.accept(initial)
 
-        def monitor() -> None:
+        monitor_errors: list[BaseException] = []
+
+        def monitor_loop() -> None:
             last_epoch = -1
-            next_periodic = time.monotonic() + self.snapshot_interval_seconds
+            next_periodic: float | None = None
             while True:
+                until_periodic = (
+                    self.poll_seconds
+                    if next_periodic is None
+                    else next_periodic - self.monotonic()
+                )
                 wait_seconds = min(
                     self.poll_seconds,
-                    max(0.0, next_periodic - time.monotonic()),
+                    until_periodic if until_periodic > 0 else self.poll_seconds,
                 )
                 if stopped.wait(wait_seconds):
                     break
@@ -1343,53 +1563,67 @@ class SnapshottingCampaignRuntime:
                         observed_epoch = int(raw["epoch"])
                 except (OSError, RowFeatureColabError):
                     pass
-                now = time.monotonic()
-                if observed_epoch > last_epoch:
+                now = self.monotonic()
+                first_checkpoint = last_epoch < 0 and observed_epoch >= 0
+                periodic_checkpoint = (
+                    next_periodic is not None
+                    and now >= next_periodic
+                    and observed_epoch > last_epoch
+                )
+                if first_checkpoint or periodic_checkpoint:
                     try:
                         snapshot = self._active_snapshot(job)
+                        self.store.accept(snapshot)
                     except Exception as error:
                         print(
                             f"ROW_FEATURE_SNAPSHOT_DEFERRED type={type(error).__name__} message={str(error).replace(' ', '_')}",
                             flush=True,
                         )
                     else:
-                        self.store.accept(snapshot)
                         last_epoch = snapshot.epoch
                         next_periodic = now + self.snapshot_interval_seconds
-                elif now >= next_periodic:
-                    try:
-                        snapshot = self._active_snapshot(job)
-                    except Exception as active_error:
-                        try:
-                            snapshot = self.store.republish_latest()
-                        except Exception as fallback_error:
-                            print(
-                                "ROW_FEATURE_SNAPSHOT_DEFERRED "
-                                f"type={type(fallback_error).__name__} "
-                                f"message={str(fallback_error).replace(' ', '_')} "
-                                f"active_type={type(active_error).__name__}",
-                                flush=True,
-                            )
-                            snapshot = None
-                    else:
-                        self.store.accept(snapshot)
-                    next_periodic = now + self.snapshot_interval_seconds
+
+        def monitor() -> None:
+            try:
+                monitor_loop()
+            except BaseException as error:
+                monitor_errors.append(error)
 
         thread = threading.Thread(target=monitor, name="row-feature-snapshot", daemon=True)
         thread.start()
+        result = None
+        delegate_error: BaseException | None = None
         try:
-            return self.delegate.run_jobs(
+            result = self.delegate.run_jobs(
                 version,
                 jobs,
                 output_dir,
                 gpu_count=gpu_count,
                 job_deadline=job_deadline,
             )
+        except BaseException as error:
+            delegate_error = error
         finally:
             stopped.set()
-            thread.join(timeout=max(5.0, self.poll_seconds * 2.0))
-            if thread.is_alive():
-                raise RowFeatureColabError("snapshot monitor did not stop")
+            thread.join(timeout=max(0.0, self.session_deadline - self.wall_time()))
+        if thread.is_alive():
+            monitor_timeout = RowFeatureColabError(
+                "snapshot monitor exceeded the session deadline"
+            )
+            if delegate_error is not None:
+                raise monitor_timeout from delegate_error
+            raise monitor_timeout
+        if monitor_errors:
+            monitor_failure = RowFeatureColabError(
+                f"snapshot monitor failed: {type(monitor_errors[0]).__name__}: "
+                f"{monitor_errors[0]}"
+            )
+            if delegate_error is not None:
+                raise monitor_failure from delegate_error
+            raise monitor_failure from monitor_errors[0]
+        if delegate_error is not None:
+            raise delegate_error
+        return result
 
 
 class _Tee:
@@ -1441,9 +1675,15 @@ def run_supervised_stage(
         _regular_file(data_dir / "input_manifest.json", "input manifest")
     )
     output_dir = Path(output_dir)
+
+    def check_deadline() -> None:
+        if time.time() >= wall_deadline:
+            raise TimeoutError("Stage P absolute session deadline expired")
+
     store = _VerifiedSnapshotStore(
         snapshot_dir=Path(snapshot_dir),
         on_verified_snapshot=on_verified_snapshot,
+        check_deadline=check_deadline,
     )
     runtime = SnapshottingCampaignRuntime(
         Path(data_dir),
@@ -1457,6 +1697,7 @@ def run_supervised_stage(
         input_manifest_sha256=input_manifest_sha,
         code_sha256=code_sha,
         snapshot_interval_seconds=snapshot_interval_seconds,
+        session_deadline=wall_deadline,
     )
 
     def completed(job, _state_path: Path) -> None:
@@ -1472,6 +1713,7 @@ def run_supervised_stage(
             code_sha256=code_sha,
             sequence=store.next_sequence(),
             candidate_id=job.candidate_id,
+            check_deadline=check_deadline,
         )
         store.accept(snapshot)
 

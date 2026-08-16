@@ -108,10 +108,14 @@ def _canonical_json(value: object) -> bytes:
     ).encode("utf-8")
 
 
-def _file_sha256(path: Path) -> str:
+def _file_sha256(
+    path: Path, check_deadline: Callable[[], None] | None = None
+) -> str:
     digest = sha256()
     with path.open("rb") as handle:
         while chunk := handle.read(1024 * 1024):
+            if check_deadline is not None:
+                check_deadline()
             digest.update(chunk)
     return digest.hexdigest()
 
@@ -301,18 +305,25 @@ def _json_resource(value: object, label: str = "resource_evidence") -> object:
     raise RowFeatureProxyError(f"{label} contains a non-JSON value")
 
 
-def _artifact_entry(job_dir: Path, path: Path) -> dict[str, str]:
+def _artifact_entry(
+    job_dir: Path,
+    path: Path,
+    check_deadline: Callable[[], None] | None = None,
+) -> dict[str, str]:
     if path.parent.resolve() != job_dir.resolve():
         raise RowFeatureProxyError("result artifact must be inside its current job directory")
     if path.name not in _ALLOWED_JOB_ARTIFACTS or not _regular_file(path):
         raise RowFeatureProxyError(f"result artifact is not an allowlisted regular file: {path.name}")
     return {
         "path": f"jobs/{job_dir.name}/{path.name}",
-        "sha256": _file_sha256(path),
+        "sha256": _file_sha256(path, check_deadline),
     }
 
 
-def _collect_job_artifacts(job_dir: Path) -> dict[str, dict[str, str]]:
+def _collect_job_artifacts(
+    job_dir: Path,
+    check_deadline: Callable[[], None] | None = None,
+) -> dict[str, dict[str, str]]:
     if not job_dir.exists():
         return {}
     if job_dir.is_symlink() or not job_dir.is_dir():
@@ -327,7 +338,7 @@ def _collect_job_artifacts(job_dir: Path) -> dict[str, dict[str, str]]:
             raise RowFeatureProxyError(f"unexpected job artifact name: {path.name}")
         if not _regular_file(path):
             raise RowFeatureProxyError(f"job artifact must be a regular file: {path.name}")
-        artifacts[path.name] = _artifact_entry(job_dir, path)
+        artifacts[path.name] = _artifact_entry(job_dir, path, check_deadline)
     return artifacts
 
 
@@ -374,6 +385,8 @@ def _validate_checkpoint_meta(
     job: CampaignJob,
     result: CampaignJobResult,
     job_dir: Path,
+    *,
+    validate_payload: bool = True,
 ) -> None:
     meta = _read_json_file(job_dir / "checkpoint_meta.json", "checkpoint metadata")
     expected_keys = {
@@ -423,15 +436,20 @@ def _validate_checkpoint_meta(
         raise RowFeatureProxyError(
             "checkpoint metadata config, cache, optimizer, scheduler, or code binding is invalid"
         )
-    if not _regular_file(job_dir / "checkpoint.pt"):
+    checkpoint_path = job_dir / "checkpoint.pt"
+    if not _regular_file(checkpoint_path):
         raise RowFeatureProxyError("checkpoint metadata references a missing checkpoint")
-    _validate_checkpoint_payload(
-        job,
-        result,
-        job_dir / "checkpoint.pt",
-        meta_epoch=epoch,
-        meta_adapter_state=meta["adapter_state"],
-    )
+    checkpoint_size = checkpoint_path.stat().st_size
+    if checkpoint_size <= 0 or checkpoint_size > _MAX_CHECKPOINT_BYTES:
+        raise RowFeatureProxyError("checkpoint payload exceeds the Stage P size limit")
+    if validate_payload:
+        _validate_checkpoint_payload(
+            job,
+            result,
+            checkpoint_path,
+            meta_epoch=epoch,
+            meta_adapter_state=meta["adapter_state"],
+        )
 
 
 def _validate_checkpoint_payload(
@@ -953,6 +971,8 @@ def _validate_semantic_evidence(
     job: CampaignJob,
     result: CampaignJobResult,
     job_dir: Path,
+    *,
+    validate_checkpoint_payload: bool = True,
 ) -> None:
     try:
         job_payload = _read_json_file(job_dir / "job.json", "job evidence")
@@ -971,7 +991,12 @@ def _validate_semantic_evidence(
             )
 
         if result.checkpoint is not None or result.completed_epochs > 0:
-            _validate_checkpoint_meta(job, result, job_dir)
+            _validate_checkpoint_meta(
+                job,
+                result,
+                job_dir,
+                validate_payload=validate_checkpoint_payload,
+            )
 
         has_prediction_evidence = (
             result.brier is not None
@@ -1024,6 +1049,9 @@ def _validate_runtime_result(
     job: CampaignJob,
     result: CampaignJobResult,
     job_dir: Path,
+    *,
+    validate_checkpoint_payload: bool = True,
+    check_deadline: Callable[[], None] | None = None,
 ) -> dict[str, object]:
     if not isinstance(result, CampaignJobResult):
         raise RowFeatureProxyError("runtime returned a foreign result type")
@@ -1054,16 +1082,21 @@ def _validate_runtime_result(
     if result.checkpoint is not None:
         if result.checkpoint.name not in _CHECKPOINT_NAMES:
             raise RowFeatureProxyError("result checkpoint name is not allowlisted")
-        _artifact_entry(job_dir, result.checkpoint)
+        _artifact_entry(job_dir, result.checkpoint, check_deadline)
     if result.status == "completed":
         if result.brier is None or result.checkpoint is None or result.predictions_path is None:
             raise RowFeatureProxyError("completed result requires brier, checkpoint, and predictions")
         if result.predictions_path.name != "predictions.csv":
             raise RowFeatureProxyError("completed predictions name must be predictions.csv")
-        _artifact_entry(job_dir, result.predictions_path)
-    _validate_semantic_evidence(job, result, job_dir)
+        _artifact_entry(job_dir, result.predictions_path, check_deadline)
+    _validate_semantic_evidence(
+        job,
+        result,
+        job_dir,
+        validate_checkpoint_payload=validate_checkpoint_payload,
+    )
     _normalize_worker_result(job, result, job_dir)
-    artifacts = _collect_job_artifacts(job_dir)
+    artifacts = _collect_job_artifacts(job_dir, check_deadline)
     if result.status != "completed":
         artifacts.pop("predictions.csv", None)
     if result.status == "completed":
@@ -1343,11 +1376,15 @@ def _validated_rows(
 def _verify_local_artifacts(
     output_dir: Path,
     rows: Mapping[str, dict[str, object]],
+    check_deadline: Callable[[], None] | None = None,
 ) -> None:
     for row in rows.values():
         for binding in row["artifacts"].values():  # type: ignore[union-attr]
             path = output_dir / str(binding["path"])
-            if not _regular_file(path) or _file_sha256(path) != binding["sha256"]:
+            if (
+                not _regular_file(path)
+                or _file_sha256(path, check_deadline) != binding["sha256"]
+            ):
                 raise RowFeatureProxyError(f"local artifact hash differs: {binding['path']}")
 
 
@@ -1431,6 +1468,7 @@ def _load_local_state(
     code_sha: str,
     jobs: tuple[CampaignJob, ...],
     output_dir: Path,
+    check_deadline: Callable[[], None] | None = None,
 ) -> tuple[dict[str, object], dict[str, dict[str, object]]]:
     if state_path.is_symlink() or not _regular_file(state_path):
         raise RowFeatureProxyError("local stage state must be a regular non-symlink file")
@@ -1444,7 +1482,7 @@ def _load_local_state(
         jobs=jobs,
     )
     rows = _validated_rows(state, jobs)
-    _verify_local_artifacts(output_dir, rows)
+    _verify_local_artifacts(output_dir, rows, check_deadline)
     return state, rows
 
 
@@ -1747,6 +1785,21 @@ def run_row_feature_proxy(
     if wall_deadline <= current:
         raise RowFeatureProxyError("wall_deadline is expired")
 
+    raw_now = now
+    last_now = [current]
+
+    def tracked_now() -> float:
+        try:
+            value = raw_now()
+        except StopIteration:
+            return last_now[0]
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return value  # type: ignore[return-value]
+        last_now[0] = float(value)
+        return float(value)
+
+    now = tracked_now
+
     try:
         contract = load_row_feature_proxy_contract(contract_path)
         contract_sha = row_feature_contract_sha256(contract_path)
@@ -1899,10 +1952,16 @@ def run_row_feature_proxy(
         review_members=review,
         resume_members=resume,
     )
+
+    def check_deadline() -> None:
+        if _now_value(now) >= wall_deadline:
+            raise TimeoutError("Stage P absolute wall deadline expired")
+
     bundles = write_stage_bundles(
         root,
         evidence,
         bundle_prefix="tabm_row_feature_stage",
+        check_deadline=check_deadline,
     )
     ordered_rows = [rows.get(job.candidate_id, _pending_row(job)) for job in jobs]
     completed = tuple(row["candidate_id"] for row in ordered_rows if row["status"] == "completed")

@@ -104,6 +104,40 @@ def test_stage_p_uses_independent_prefix_and_optional_prior_chain(tmp_path: Path
     assert verify_resume_bundle(resumed.resume).prior_manifest_sha256 == first.manifest_sha256
 
 
+def test_stage_p_streaming_publication_honors_deadline_and_removes_partial_zip(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "checkpoint.pt"
+    source.write_bytes(b"checkpoint" * 200_000)
+    digest = sha256(source.read_bytes()).hexdigest()
+    evidence = StageEvidence(
+        "P",
+        "2" * 64,
+        None,
+        {
+            "jobs/candidate/checkpoint.pt": artifact_module._StagePFile(source, digest)
+        },
+        {"state/stage_state.json": b"{}"},
+    )
+    ticks = [0]
+
+    def deadline() -> None:
+        ticks[0] += 1
+        if ticks[0] >= 8:
+            raise TimeoutError("fixture deadline expired")
+
+    output = tmp_path / "out"
+    with pytest.raises(TimeoutError, match="deadline"):
+        write_stage_bundles(
+            output,
+            evidence,
+            bundle_prefix="tabm_row_feature_stage",
+            check_deadline=deadline,
+        )
+    assert not list(output.glob("*.zip"))
+    assert not list(output.glob(".*"))
+
+
 @pytest.mark.parametrize(
     "prefix",
     ["", ".", "..", "../stage", "stage/name", r"stage\name"],

@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import stat
+import threading
+import time
 from hashlib import sha256
 from pathlib import Path
 from zipfile import ZIP_DEFLATED, ZipFile, ZipInfo
@@ -18,6 +21,7 @@ from experiments.tabm_campaign.row_feature_contracts import (
     load_row_feature_proxy_contract,
     row_feature_contract_sha256,
 )
+from experiments.tabm_campaign.row_feature_runtime import CampaignJobResult
 
 
 TRAIN = b"row_id,year,control_success\nr1,2023,1\n"
@@ -496,6 +500,159 @@ def test_delivery_rejects_tampered_nested_bundle(tmp_path: Path) -> None:
         )
 
 
+def test_delivery_streaming_and_recursive_verification_honor_deadline(
+    tmp_path: Path,
+) -> None:
+    bundles = _stage_bundle(tmp_path / "bundles")
+    assert bundles.resume is not None
+    log = tmp_path / "row_feature_proxy.log"
+    log.write_bytes(b"TRAINING_PROGRESS\n" * 100_000)
+    output = tmp_path / "delivery.zip"
+    calls = [0]
+
+    def expiring_deadline() -> None:
+        calls[0] += 1
+        if calls[0] >= 8:
+            raise TimeoutError("fixture deadline expired")
+
+    with pytest.raises(TimeoutError, match="deadline"):
+        colab.build_delivery(
+            review_bundle=bundles.review,
+            resume_bundle=bundles.resume,
+            log_path=log,
+            output_path=output,
+            input_manifest_sha256="e" * 64,
+            embedded_runtime_sha256="f" * 64,
+            campaign_config_sha256=REAL_CONTRACT_SHA,
+            code_sha256="d" * 64,
+            check_deadline=expiring_deadline,
+        )
+    assert not output.exists()
+    assert not list(tmp_path.glob(".delivery.zip-*"))
+
+    delivery = colab.build_delivery(
+        review_bundle=bundles.review,
+        resume_bundle=bundles.resume,
+        log_path=log,
+        output_path=output,
+        input_manifest_sha256="e" * 64,
+        embedded_runtime_sha256="f" * 64,
+        campaign_config_sha256=REAL_CONTRACT_SHA,
+        code_sha256="d" * 64,
+    )
+    with pytest.raises(TimeoutError, match="deadline"):
+        colab.verify_delivery(
+            delivery,
+            input_manifest_sha256="e" * 64,
+            embedded_runtime_sha256="f" * 64,
+            campaign_config_sha256=REAL_CONTRACT_SHA,
+            code_sha256="d" * 64,
+            check_deadline=lambda: (_ for _ in ()).throw(
+                TimeoutError("fixture deadline expired")
+            ),
+            temporary_dir=tmp_path / "run-root",
+        )
+    assert not list((tmp_path / "run-root").glob("row-feature-delivery-*"))
+
+
+def test_active_row_validation_is_deadline_aware_and_isolates_checkpoint_loading(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    contract = load_row_feature_proxy_contract()
+    job = proxy.build_proxy_jobs(contract)[0]
+    snapshot_job_dir = tmp_path / job.candidate_id
+    snapshot_job_dir.mkdir()
+    (snapshot_job_dir / "checkpoint_meta.json").write_bytes(
+        colab.canonical_json(
+            {
+                "candidate_id": job.candidate_id,
+                "epoch": 3,
+                "checkpoint": "checkpoint.pt",
+                "adapter_state": None,
+                "checkpoint_binding": {
+                    "config_sha256": worker._job_sha(job),
+                    "cache_sha256": "a" * 64,
+                    "training_source_sha256": worker._training_source_sha256(),
+                },
+            }
+        )
+    )
+    (snapshot_job_dir / "progress.jsonl").write_text(
+        json.dumps(
+            {
+                "event": "EPOCH_CHECKPOINTED",
+                "candidate_id": job.candidate_id,
+                "epoch": 3,
+                "best_epoch": 2,
+                "best_brier": 0.04,
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (snapshot_job_dir / "checkpoint.pt").write_bytes(b"not-a-torch-payload")
+    (snapshot_job_dir / "best_checkpoint.pt").write_bytes(b"not-a-torch-payload")
+    observed: dict[str, object] = {}
+
+    def isolated(snapshot_dir, isolated_job, result, *, best_epoch, check_deadline):
+        observed["isolated_path"] = snapshot_dir
+        observed["isolated_job"] = isolated_job
+        observed["isolated_best_epoch"] = best_epoch
+        check_deadline()
+
+    def validate(*args, **kwargs):
+        observed.update(kwargs)
+        return {"accepted": True}
+
+    monkeypatch.setattr(proxy, "_validate_runtime_result", validate)
+    monkeypatch.setattr(
+        colab, "_validate_active_checkpoint_payload_isolated", isolated
+    )
+    checks = [0]
+
+    result = colab._validated_active_row(
+        snapshot_job_dir,
+        job,
+        check_deadline=lambda: checks.__setitem__(0, checks[0] + 1),
+    )
+
+    assert result == {"accepted": True}
+    assert observed["validate_checkpoint_payload"] is False
+    assert callable(observed["check_deadline"])
+    assert observed["isolated_job"] == job
+    assert observed["isolated_best_epoch"] == 2
+    assert checks[0] > 0
+
+
+def test_isolated_checkpoint_validator_is_killed_at_deadline(tmp_path: Path) -> None:
+    job = proxy.build_proxy_jobs(load_row_feature_proxy_contract())[0]
+    result = CampaignJobResult(
+        candidate_id=job.candidate_id,
+        status="inconclusive",
+        brier=0.04,
+        best_epoch=0,
+        completed_epochs=1,
+        checkpoint=tmp_path / "checkpoint.pt",
+        predictions_path=None,
+        resource_evidence={"cache_digest": "a" * 64},
+        failure="active_checkpoint_snapshot",
+    )
+    started = time.monotonic()
+
+    with pytest.raises(TimeoutError, match="deadline"):
+        colab._validate_active_checkpoint_payload_isolated(
+            tmp_path,
+            job,
+            result,
+            best_epoch=0,
+            check_deadline=lambda: (_ for _ in ()).throw(
+                TimeoutError("fixture deadline expired")
+            ),
+        )
+
+    assert time.monotonic() - started < 2.0
+
+
 def test_active_checkpoint_snapshot_restores_the_same_completed_epoch(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -544,7 +701,9 @@ def test_active_checkpoint_snapshot_restores_the_same_completed_epoch(
     )
     proxy._write_local_state(live / "stage_state.json", state)
 
-    def accept_fixture(snapshot_job_dir: Path, job) -> dict[str, object]:
+    def accept_fixture(
+        snapshot_job_dir: Path, job, check_deadline=None
+    ) -> dict[str, object]:
         artifacts = {
             path.name: {
                 "path": f"jobs/{job.candidate_id}/{path.name}",
@@ -604,6 +763,32 @@ def test_active_checkpoint_snapshot_restores_the_same_completed_epoch(
         restored / "jobs" / active_job.candidate_id / "checkpoint.pt"
     ).read_bytes() == b"atomic-checkpoint-epoch-3"
 
+    expired_dir = tmp_path / "expired-snapshots"
+    deadline_ticks = [0]
+
+    def advancing_deadline() -> None:
+        deadline_ticks[0] += 1
+        if deadline_ticks[0] >= 4:
+            raise TimeoutError("fixture deadline expired")
+
+    with pytest.raises(TimeoutError, match="deadline"):
+        colab.publish_active_checkpoint_snapshot(
+            live_output_dir=live,
+            snapshot_dir=expired_dir,
+            active_job=active_job,
+            contract=contract,
+            contract_path=DEFAULT_ROW_FEATURE_PROXY_CONTRACT,
+            contract_sha256=contract_sha,
+            train_sha256=contract.official_train_sha256,
+            history_sha256="b" * 64,
+            input_manifest_sha256="e" * 64,
+            code_sha256=code_sha,
+            sequence=8,
+            check_deadline=advancing_deadline,
+        )
+    assert not list(expired_dir.glob("*.zip"))
+    assert not list(expired_dir.glob(".*"))
+
 
 def test_active_snapshot_rejects_checkpoint_binding_before_publication(
     tmp_path: Path,
@@ -632,3 +817,176 @@ def test_active_snapshot_rejects_checkpoint_binding_before_publication(
     )
     with pytest.raises(colab.RowFeatureColabError, match="binding"):
         colab._copy_active_candidate(source, tmp_path / "copy", job)
+
+
+def test_slow_snapshot_shutdown_preserves_a_successful_delegate_result(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    job = proxy.build_proxy_jobs(load_row_feature_proxy_contract())[0]
+    active_started = threading.Event()
+
+    class Store:
+        latest = object()
+        snapshot_dir = tmp_path / "snapshots"
+
+        def accept(self, snapshot):
+            self.latest = snapshot
+            return snapshot
+
+    class Delegate:
+        def run_jobs(self, version, jobs, output_dir, **kwargs):
+            job_dir = output_dir / job.candidate_id
+            job_dir.mkdir(parents=True)
+            (job_dir / "checkpoint_meta.json").write_text(
+                json.dumps({"epoch": 0}), encoding="utf-8"
+            )
+            assert active_started.wait(2)
+            return ("delegate-success",)
+
+    runtime = colab.SnapshottingCampaignRuntime(
+        tmp_path / "data",
+        live_output_dir=tmp_path / "live",
+        store=Store(),
+        contract=load_row_feature_proxy_contract(),
+        contract_path=DEFAULT_ROW_FEATURE_PROXY_CONTRACT,
+        contract_sha256=REAL_CONTRACT_SHA,
+        train_sha256="a" * 64,
+        history_sha256="b" * 64,
+        input_manifest_sha256="c" * 64,
+        code_sha256="d" * 64,
+        snapshot_interval_seconds=600,
+        poll_seconds=0.01,
+        session_deadline=time.time() + 15,
+        delegate=Delegate(),
+    )
+
+    def slow_snapshot(_job):
+        active_started.set()
+        time.sleep(6)
+        return colab.EmergencySnapshot(
+            tmp_path / "slow.zip", "e" * 64, "f" * 64, job.candidate_id, 0
+        )
+
+    monkeypatch.setattr(runtime, "_active_snapshot", slow_snapshot)
+    started = time.monotonic()
+    result = runtime.run_jobs(
+        "P", (job,), tmp_path / "jobs", gpu_count=1, job_deadline=time.time() + 5
+    )
+    assert result == ("delegate-success",)
+    assert time.monotonic() - started >= 6
+
+
+def test_active_snapshot_is_first_checkpoint_then_bounded_cadence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    job = proxy.build_proxy_jobs(load_row_feature_proxy_contract())[0]
+    accepted: list[int] = []
+    first = threading.Event()
+    second = threading.Event()
+
+    class Store:
+        latest = object()
+        snapshot_dir = tmp_path / "snapshots"
+
+        def accept(self, snapshot):
+            accepted.append(snapshot.epoch)
+            self.latest = snapshot
+            (first if len(accepted) == 1 else second).set()
+            return snapshot
+
+    class Delegate:
+        def run_jobs(self, version, jobs, output_dir, **kwargs):
+            job_dir = output_dir / job.candidate_id
+            job_dir.mkdir(parents=True)
+            meta = job_dir / "checkpoint_meta.json"
+            meta.write_text(json.dumps({"epoch": 0}), encoding="utf-8")
+            assert first.wait(1)
+            time.sleep(0.31)
+            meta.write_text(json.dumps({"epoch": 1}), encoding="utf-8")
+            assert second.wait(0.06)
+            return ("done",)
+
+    runtime = colab.SnapshottingCampaignRuntime(
+        tmp_path / "data",
+        live_output_dir=tmp_path / "live",
+        store=Store(),
+        contract=load_row_feature_proxy_contract(),
+        contract_path=DEFAULT_ROW_FEATURE_PROXY_CONTRACT,
+        contract_sha256=REAL_CONTRACT_SHA,
+        train_sha256="a" * 64,
+        history_sha256="b" * 64,
+        input_manifest_sha256="c" * 64,
+        code_sha256="d" * 64,
+        snapshot_interval_seconds=0.2,
+        poll_seconds=0.01,
+        session_deadline=time.time() + 5,
+        delegate=Delegate(),
+    )
+
+    def snapshot(_job):
+        epoch = json.loads(
+            (tmp_path / "jobs" / job.candidate_id / "checkpoint_meta.json").read_text()
+        )["epoch"]
+        return colab.EmergencySnapshot(
+            tmp_path / f"{epoch}.zip", "e" * 64, "f" * 64, job.candidate_id, epoch
+        )
+
+    monkeypatch.setattr(runtime, "_active_snapshot", snapshot)
+    assert runtime.run_jobs(
+        "P", (job,), tmp_path / "jobs", gpu_count=1, job_deadline=time.time() + 4
+    ) == ("done",)
+    assert accepted == [0, 1]
+
+
+def test_snapshot_store_swaps_after_callback_and_removes_only_owned_old_zip(
+    tmp_path: Path,
+) -> None:
+    snapshot_dir = tmp_path / "snapshots"
+    snapshot_dir.mkdir()
+    uploaded = _stage_bundle(tmp_path / "uploaded").resume
+    assert uploaded is not None
+    current = colab.EmergencySnapshot(
+        uploaded,
+        colab.file_sha256(uploaded),
+        colab.verify_resume_bundle(uploaded).manifest_sha256,
+        "uploaded",
+        0,
+    )
+    callbacks: list[Path] = []
+    fail = [True]
+
+    def callback(snapshot) -> None:
+        callbacks.append(snapshot.path)
+        if fail[0]:
+            raise RuntimeError("download failed")
+
+    store = colab._VerifiedSnapshotStore(
+        snapshot_dir=snapshot_dir, on_verified_snapshot=callback
+    )
+    store.latest = current
+
+    def copied_snapshot(name: str) -> colab.EmergencySnapshot:
+        path = snapshot_dir / name
+        shutil.copyfile(uploaded, path)
+        verified = colab.verify_resume_bundle(path)
+        return colab.EmergencySnapshot(
+            path, colab.file_sha256(path), verified.manifest_sha256, name, 1
+        )
+
+    rejected = copied_snapshot("rejected.zip")
+    with pytest.raises(RuntimeError, match="download failed"):
+        store.accept(rejected)
+    assert store.latest is current
+    assert uploaded.exists()
+    assert not rejected.path.exists()
+
+    fail[0] = False
+    first_snapshot = copied_snapshot("first.zip")
+    store.accept(first_snapshot)
+    assert uploaded.exists()
+    second_snapshot = copied_snapshot("second.zip")
+    store.accept(second_snapshot)
+    assert store.latest is second_snapshot
+    assert not first_snapshot.path.exists()
+    assert list(snapshot_dir.glob("*.zip")) == [second_snapshot.path]
+    assert callbacks == [rejected.path, first_snapshot.path, second_snapshot.path]

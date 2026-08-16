@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import io
 import os
 import subprocess
@@ -142,6 +143,42 @@ def test_generated_cell_has_direct_upload_deadline_and_recovery_contract() -> No
     assert registration < text.index('stage = "gpu"')
     assert "latest_verified[0] = path" in text
     assert text.index("publish_latest_verified_resume()", registration) > registration
+    assert "def request_download(path: Path, *, enforce_deadline: bool = True)" in text
+    assert "request_download(Path(path), enforce_deadline=False)" in text
+    assert text.count("check_deadline=remaining_seconds") >= 2
+
+
+def test_generated_cell_uses_an_exclusive_run_root_and_reuses_only_verified_code(
+    tmp_path: Path,
+) -> None:
+    text = builder.render().decode("utf-8")
+    tree = ast.parse(text)
+    create_run_root = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == "create_run_root"
+    )
+    namespace = {"Path": Path}
+    exec(compile(ast.Module([create_run_root], []), "<run-root>", "exec"), namespace)
+    first = namespace["create_run_root"](tmp_path, "run-one")
+    (first / "verified-resume.zip").write_bytes(b"preserve")
+    second = namespace["create_run_root"](tmp_path, "run-two")
+
+    assert first != second
+    assert (first / "verified-resume.zip").read_bytes() == b"preserve"
+    assert "RUN_ROOT = create_run_root(" in text
+    for name in (
+        "INPUT_ROOT",
+        "DATA_ROOT",
+        "OUTPUT_ROOT",
+        "SNAPSHOT_ROOT",
+        "LOG_PATH",
+        "DELIVERY_PATH",
+    ):
+        assert f"{name} = RUN_ROOT /" in text
+    assert "shutil.rmtree(CODE_ROOT)" not in text
+    assert "verify_extracted_runtime(archive_bytes)" in text
+    assert "temporary_dir=RUN_ROOT" in text
 
 
 def test_generated_cell_has_no_remote_or_disallowed_data_paths() -> None:

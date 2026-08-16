@@ -7,7 +7,7 @@ import tempfile
 from dataclasses import dataclass
 from hashlib import sha256
 from pathlib import Path, PurePosixPath
-from typing import Mapping
+from typing import Callable, Mapping
 from zipfile import ZIP_DEFLATED, ZipFile, ZipInfo
 
 
@@ -115,11 +115,19 @@ def _open_regular_descriptor(path: Path) -> tuple[int, os.stat_result]:
         raise
 
 
-def _file_digest(path: Path) -> str:
+def _check_deadline(check_deadline: Callable[[], None] | None) -> None:
+    if check_deadline is not None:
+        check_deadline()
+
+
+def _file_digest(
+    path: Path, check_deadline: Callable[[], None] | None = None
+) -> str:
     digest = sha256()
     descriptor, _ = _open_regular_descriptor(path)
     with os.fdopen(descriptor, "rb") as handle:
         while chunk := handle.read(1024 * 1024):
+            _check_deadline(check_deadline)
             digest.update(chunk)
     return digest.hexdigest()
 
@@ -257,6 +265,7 @@ def _atomic_zip_publish(
     evidence: StageEvidence,
     kind: str,
     members: Mapping[str, bytes | _StagePFile],
+    check_deadline: Callable[[], None] | None = None,
 ) -> tuple[str, str]:
     """Publish Stage P without materializing file members or the ZIP in memory."""
 
@@ -269,10 +278,12 @@ def _atomic_zip_publish(
     )
     os.close(descriptor)
     try:
+        _check_deadline(check_deadline)
         with ZipFile(
             temporary_name, "w", compression=ZIP_DEFLATED, compresslevel=9
         ) as archive:
             for name in sorted(all_members):
+                _check_deadline(check_deadline)
                 value = all_members[name]
                 info = ZipInfo(name, date_time=_ZIP_TIMESTAMP)
                 info.compress_type = ZIP_DEFLATED
@@ -290,12 +301,15 @@ def _atomic_zip_publish(
                     with os.fdopen(descriptor, "rb") as source:
                         with archive.open(info, "w") as destination:
                             while chunk := source.read(1024 * 1024):
+                                _check_deadline(check_deadline)
                                 destination.write(chunk)
                                 observed.update(chunk)
                 if name != "manifest.json" and observed.hexdigest() != expected[name]:
                     raise ArtifactError(f"bundle member changed during publication: {name}")
         with open(temporary_name, "rb") as handle:
             os.fsync(handle.fileno())
+        archive_sha256 = _file_digest(Path(temporary_name), check_deadline)
+        _check_deadline(check_deadline)
         os.replace(temporary_name, path)
     except Exception:
         try:
@@ -303,7 +317,7 @@ def _atomic_zip_publish(
         except FileNotFoundError:
             pass
         raise
-    return _file_digest(path), _digest(manifest)
+    return archive_sha256, _digest(manifest)
 
 
 def _atomic_publish(path: Path, value: bytes) -> None:
@@ -335,52 +349,87 @@ def _validate_bundle_prefix(bundle_prefix: str) -> None:
         raise ArtifactError("bundle prefix must be one safe filename component")
 
 
+def _write_stage_p_bundles(
+    root: Path,
+    evidence: StageEvidence,
+    bundle_prefix: str,
+    check_deadline: Callable[[], None] | None,
+) -> BundlePaths:
+    root.mkdir(parents=True, exist_ok=True)
+    review = root / f"{bundle_prefix}_P_review_bundle.zip"
+    resume = root / f"{bundle_prefix}_P_resume_bundle.zip"
+    with tempfile.TemporaryDirectory(prefix=f".{bundle_prefix}-", dir=root) as temporary:
+        staging = Path(temporary)
+        staged_review = staging / review.name
+        staged_resume = staging / resume.name
+        review_sha, review_manifest_sha = _atomic_zip_publish(
+            staged_review,
+            evidence,
+            "review",
+            evidence.review_members,
+            check_deadline,
+        )
+        resume_sha, manifest_sha = _atomic_zip_publish(
+            staged_resume,
+            evidence,
+            "resume",
+            evidence.resume_members,
+            check_deadline,
+        )
+        verify_review_bundle(staged_review, check_deadline=check_deadline)
+        verify_resume_bundle(staged_resume, check_deadline=check_deadline)
+        _check_deadline(check_deadline)
+        os.replace(staged_review, review)
+        os.replace(staged_resume, resume)
+    return BundlePaths(review, resume, review_sha, resume_sha, manifest_sha)
+
+
 def write_stage_bundles(
     output_dir: str | Path,
     evidence: StageEvidence,
     *,
     bundle_prefix: str = "tabm_search_stage",
+    check_deadline: Callable[[], None] | None = None,
 ) -> BundlePaths:
     _validate_evidence(evidence)
     _validate_bundle_prefix(bundle_prefix)
     root = Path(output_dir)
-    review = root / f"{bundle_prefix}_{evidence.version}_review_bundle.zip"
     if evidence.version == "P":
-        review_sha, review_manifest_sha = _atomic_zip_publish(
-            review, evidence, "review", evidence.review_members
+        return _write_stage_p_bundles(
+            root, evidence, bundle_prefix, check_deadline
         )
-    else:
-        review_bytes, review_manifest_sha = _zip_bytes(
-            evidence, "review", evidence.review_members  # type: ignore[arg-type]
-        )
-        _atomic_publish(review, review_bytes)
-        review_sha = _digest(review_bytes)
+    review = root / f"{bundle_prefix}_{evidence.version}_review_bundle.zip"
+    review_bytes, review_manifest_sha = _zip_bytes(
+        evidence, "review", evidence.review_members  # type: ignore[arg-type]
+    )
+    _atomic_publish(review, review_bytes)
+    review_sha = _digest(review_bytes)
 
     resume: Path | None = None
     resume_sha: str | None = None
     manifest_sha = review_manifest_sha
     if evidence.version != "D":
         resume = root / f"{bundle_prefix}_{evidence.version}_resume_bundle.zip"
-        if evidence.version == "P":
-            resume_sha, manifest_sha = _atomic_zip_publish(
-                resume, evidence, "resume", evidence.resume_members
-            )
-        else:
-            resume_bytes, manifest_sha = _zip_bytes(
-                evidence, "resume", evidence.resume_members  # type: ignore[arg-type]
-            )
-            _atomic_publish(resume, resume_bytes)
-            resume_sha = _digest(resume_bytes)
+        resume_bytes, manifest_sha = _zip_bytes(
+            evidence, "resume", evidence.resume_members  # type: ignore[arg-type]
+        )
+        _atomic_publish(resume, resume_bytes)
+        resume_sha = _digest(resume_bytes)
         verify_resume_bundle(resume)
     return BundlePaths(review, resume, review_sha, resume_sha, manifest_sha)
 
 
-def verify_review_bundle(path: str | Path) -> VerifiedReview:
+def verify_review_bundle(
+    path: str | Path,
+    *,
+    check_deadline: Callable[[], None] | None = None,
+) -> VerifiedReview:
     """Verify every declared member of a review-only evidence bundle."""
 
     bundle = Path(path)
     try:
         with ZipFile(bundle, "r") as archive:
+            _check_deadline(check_deadline)
             names = _validate_archive_entries(archive, label="review")
             manifest_bytes = archive.read("manifest.json")
             manifest = json.loads(manifest_bytes)
@@ -397,6 +446,7 @@ def verify_review_bundle(path: str | Path) -> VerifiedReview:
                 digest = sha256()
                 with archive.open(name, "r") as member:
                     while chunk := member.read(1024 * 1024):
+                        _check_deadline(check_deadline)
                         digest.update(chunk)
                 if digest.hexdigest() != expected_hash:
                     raise ArtifactError(f"review member SHA-256 differs: {name}")
@@ -409,7 +459,7 @@ def verify_review_bundle(path: str | Path) -> VerifiedReview:
                 version not in {"A", "P"} and not _valid_sha(prior_sha)
             ) or (prior_sha is not None and not _valid_sha(prior_sha)):
                 raise ArtifactError("review manifest hash binding is invalid")
-    except ArtifactError:
+    except (ArtifactError, TimeoutError):
         raise
     except Exception as exc:
         raise ArtifactError(f"cannot verify review bundle: {exc}") from exc
@@ -423,10 +473,15 @@ def verify_review_bundle(path: str | Path) -> VerifiedReview:
     )
 
 
-def verify_resume_bundle(path: str | Path) -> VerifiedResume:
+def verify_resume_bundle(
+    path: str | Path,
+    *,
+    check_deadline: Callable[[], None] | None = None,
+) -> VerifiedResume:
     bundle = Path(path)
     try:
         with ZipFile(bundle, "r") as archive:
+            _check_deadline(check_deadline)
             names = _validate_archive_entries(archive, label="resume")
             manifest_bytes = archive.read("manifest.json")
             manifest = json.loads(manifest_bytes)
@@ -443,6 +498,7 @@ def verify_resume_bundle(path: str | Path) -> VerifiedResume:
                 digest = sha256()
                 with archive.open(name, "r") as member:
                     while chunk := member.read(1024 * 1024):
+                        _check_deadline(check_deadline)
                         digest.update(chunk)
                 if digest.hexdigest() != expected_hash:
                     raise ArtifactError(f"resume member SHA-256 differs: {name}")
@@ -455,7 +511,7 @@ def verify_resume_bundle(path: str | Path) -> VerifiedResume:
                 version not in {"A", "P"} and not _valid_sha(prior_sha)
             ) or (prior_sha is not None and not _valid_sha(prior_sha)):
                 raise ArtifactError("resume manifest hash binding is invalid")
-    except ArtifactError:
+    except (ArtifactError, TimeoutError):
         raise
     except Exception as exc:
         raise ArtifactError(f"cannot verify resume bundle: {exc}") from exc
