@@ -55,6 +55,7 @@
 - [로드맵](docs/ROADMAP.md): 다음 후보와 코드 이전 순서
 - [저장소 이전 설계](docs/superpowers/specs/2026-08-11-competition-repository-migration-design.md)
 - [TabM Kaggle 실행 안내](docs/TABM_CHAMPION_KAGGLE.md): A–D 입력, 시간, 로그와 전달 파일
+- [TabM 행 단위 파생변수 실행 안내](docs/TABM_ROW_FEATURE_PROXY_RUNBOOK.md): Stage P 입력, Colab 재개와 검토 파일
 - [TabM 첫 공식 제출](docs/rounds/07-tabm-first-submission.md): 모델, 점수와 해석
 - [TabM 점수 개선 설계](docs/superpowers/specs/2026-08-15-tabm-score-improvement-design.md): 다음 실험 순서와 gate
 
