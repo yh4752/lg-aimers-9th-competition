@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import stat
 import tempfile
 from dataclasses import dataclass
 from hashlib import sha256
@@ -14,7 +15,7 @@ class ArtifactError(ValueError):
     """Raised when a campaign evidence bundle cannot be trusted."""
 
 
-_VERSIONS = ("A", "B", "C", "D")
+_VERSIONS = ("A", "B", "C", "D", "P")
 _ZIP_TIMESTAMP = (2026, 1, 1, 0, 0, 0)
 
 
@@ -86,15 +87,15 @@ def _validate_evidence(evidence: StageEvidence) -> None:
         raise ArtifactError(f"unknown campaign version: {evidence.version}")
     if not _valid_sha(evidence.campaign_config_sha256):
         raise ArtifactError("campaign config SHA-256 is invalid")
-    if evidence.version == "A":
+    if evidence.version in {"A", "P"}:
         if evidence.prior_manifest_sha256 is not None and not _valid_sha(evidence.prior_manifest_sha256):
-            raise ArtifactError("Version A restart prior manifest SHA-256 is invalid")
+            raise ArtifactError(f"Version {evidence.version} restart prior manifest SHA-256 is invalid")
     elif not _valid_sha(evidence.prior_manifest_sha256):
         raise ArtifactError(f"Version {evidence.version} requires the prior manifest SHA-256")
     if not evidence.review_members:
         raise ArtifactError("review bundle must not be empty")
     if evidence.version != "D" and not evidence.resume_members:
-        raise ArtifactError("Versions A-C require resume evidence")
+        raise ArtifactError("Versions A-C and P require resume evidence")
     for name, value in [*evidence.review_members.items(), *evidence.resume_members.items()]:
         _validate_member_name(name)
         if not isinstance(value, bytes):
@@ -148,11 +149,29 @@ def _atomic_publish(path: Path, value: bytes) -> None:
         raise
 
 
-def write_stage_bundles(output_dir: str | Path, evidence: StageEvidence) -> BundlePaths:
+def _validate_bundle_prefix(bundle_prefix: str) -> None:
+    if (
+        not isinstance(bundle_prefix, str)
+        or not bundle_prefix
+        or bundle_prefix in {".", ".."}
+        or "/" in bundle_prefix
+        or "\\" in bundle_prefix
+        or "\0" in bundle_prefix
+    ):
+        raise ArtifactError("bundle prefix must be one safe filename component")
+
+
+def write_stage_bundles(
+    output_dir: str | Path,
+    evidence: StageEvidence,
+    *,
+    bundle_prefix: str = "tabm_search_stage",
+) -> BundlePaths:
     _validate_evidence(evidence)
+    _validate_bundle_prefix(bundle_prefix)
     root = Path(output_dir)
     review_bytes, review_manifest_sha = _zip_bytes(evidence, "review", evidence.review_members)
-    review = root / f"tabm_search_stage_{evidence.version}_review_bundle.zip"
+    review = root / f"{bundle_prefix}_{evidence.version}_review_bundle.zip"
     _atomic_publish(review, review_bytes)
 
     resume: Path | None = None
@@ -160,7 +179,7 @@ def write_stage_bundles(output_dir: str | Path, evidence: StageEvidence) -> Bund
     manifest_sha = review_manifest_sha
     if evidence.version != "D":
         resume_bytes, manifest_sha = _zip_bytes(evidence, "resume", evidence.resume_members)
-        resume = root / f"tabm_search_stage_{evidence.version}_resume_bundle.zip"
+        resume = root / f"{bundle_prefix}_{evidence.version}_resume_bundle.zip"
         _atomic_publish(resume, resume_bytes)
         resume_sha = _digest(resume_bytes)
         verify_resume_bundle(resume)
@@ -179,8 +198,13 @@ def verify_review_bundle(path: str | Path) -> VerifiedReview:
             for name in names:
                 if name != "manifest.json":
                     _validate_member_name(name)
+                info = archive.getinfo(name)
+                if info.is_dir() or stat.S_ISLNK(info.external_attr >> 16):
+                    raise ArtifactError(f"review bundle member is not a regular file: {name}")
             manifest_bytes = archive.read("manifest.json")
             manifest = json.loads(manifest_bytes)
+            if manifest.get("schema_version") != 1:
+                raise ArtifactError("review manifest schema version is invalid")
             if manifest.get("artifact_kind") != "review" or manifest.get("review_only") is not True:
                 raise ArtifactError("bundle is not review-only review evidence")
             expected = manifest.get("members")
@@ -197,8 +221,10 @@ def verify_review_bundle(path: str | Path) -> VerifiedReview:
     config_sha = str(manifest.get("campaign_config_sha256"))
     prior_sha = manifest.get("prior_manifest_sha256")
     if version not in set(_VERSIONS):
-        raise ArtifactError("review version must be A, B, C, or D")
-    if not _valid_sha(config_sha) or (version != "A" and not _valid_sha(prior_sha)):
+        raise ArtifactError("review version must be A, B, C, D, or P")
+    if not _valid_sha(config_sha) or (
+        version not in {"A", "P"} and not _valid_sha(prior_sha)
+    ) or (prior_sha is not None and not _valid_sha(prior_sha)):
         raise ArtifactError("review manifest hash binding is invalid")
     return VerifiedReview(
         bundle,
@@ -220,8 +246,13 @@ def verify_resume_bundle(path: str | Path) -> VerifiedResume:
             for name in names:
                 if name != "manifest.json":
                     _validate_member_name(name)
+                info = archive.getinfo(name)
+                if info.is_dir() or stat.S_ISLNK(info.external_attr >> 16):
+                    raise ArtifactError(f"resume bundle member is not a regular file: {name}")
             manifest_bytes = archive.read("manifest.json")
             manifest = json.loads(manifest_bytes)
+            if manifest.get("schema_version") != 1:
+                raise ArtifactError("resume manifest schema version is invalid")
             if manifest.get("artifact_kind") != "resume" or manifest.get("review_only") is not True:
                 raise ArtifactError("bundle is not review-only resume evidence")
             expected = manifest.get("members")
@@ -235,11 +266,13 @@ def verify_resume_bundle(path: str | Path) -> VerifiedResume:
     except Exception as exc:
         raise ArtifactError(f"cannot verify resume bundle: {exc}") from exc
     version = str(manifest.get("version"))
-    if version not in {"A", "B", "C"}:
-        raise ArtifactError("resume version must be A, B, or C")
+    if version not in {"A", "B", "C", "P"}:
+        raise ArtifactError("resume version must be A, B, C, or P")
     config_sha = str(manifest.get("campaign_config_sha256"))
     prior_sha = manifest.get("prior_manifest_sha256")
-    if not _valid_sha(config_sha) or (version != "A" and not _valid_sha(prior_sha)):
+    if not _valid_sha(config_sha) or (
+        version not in {"A", "P"} and not _valid_sha(prior_sha)
+    ) or (prior_sha is not None and not _valid_sha(prior_sha)):
         raise ArtifactError("resume manifest hash binding is invalid")
     return VerifiedResume(
         bundle,
