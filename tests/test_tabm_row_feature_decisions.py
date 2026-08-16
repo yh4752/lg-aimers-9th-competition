@@ -4,7 +4,7 @@ import json
 import math
 import random
 from dataclasses import FrozenInstanceError, replace
-from decimal import Decimal
+from decimal import Decimal, ROUND_HALF_EVEN, ROUND_UP, getcontext, setcontext
 from typing import Any
 
 import numpy as np
@@ -559,6 +559,35 @@ def test_shuffled_input_produces_identical_decision_and_json() -> None:
     shuffled_decision = decide_proxy_survivors(shuffled, CONTRACT)
     assert shuffled_decision == ordered_decision
     assert proxy_decision_json(shuffled_decision) == proxy_decision_json(ordered_decision)
+
+
+def test_decimal_arithmetic_is_independent_of_global_context() -> None:
+    baseline = 0.123456789
+    candidate = 0.12342679
+    metrics = _evidence(
+        baseline={seed: baseline for seed in SEEDS},
+        briers={(BUNDLES[0], seed): candidate for seed in SEEDS},
+    )
+    original_context = getcontext().copy()
+    results: list[tuple[ProxyDecision, bytes]] = []
+    try:
+        for precision, rounding in (
+            (28, ROUND_HALF_EVEN),
+            (4, ROUND_HALF_EVEN),
+            (4, ROUND_UP),
+        ):
+            getcontext().prec = precision
+            getcontext().rounding = rounding
+            decision = decide_proxy_survivors(metrics, CONTRACT)
+            results.append((decision, proxy_decision_json(decision)))
+            assert getcontext().prec == precision
+            assert getcontext().rounding == rounding
+    finally:
+        setcontext(original_context)
+
+    assert results[0] == results[1] == results[2]
+    assert results[0][0].safety_survivors == (BUNDLES[0],)
+    assert _row(results[0][0], BUNDLES[0]).classification == "safety"
 
 
 def test_dataclasses_and_seed_mapping_are_immutable() -> None:

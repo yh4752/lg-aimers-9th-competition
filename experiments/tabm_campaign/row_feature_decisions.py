@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import math
 from dataclasses import dataclass
-from decimal import Decimal
+from decimal import Context, Decimal, ROUND_HALF_EVEN, localcontext
 from numbers import Real
 from types import MappingProxyType
 from typing import Any, Iterable, Mapping
@@ -59,6 +59,7 @@ _DECISION_STATUSES = {"complete", "incomplete", "blocked"}
 _CLASSIFICATIONS = {"strong", "safety", "rejected"}
 _DECIMAL_ZERO = Decimal("0")
 _DECIMAL_ONE = Decimal("1")
+_DECIMAL_CONTEXT = Context(prec=50, rounding=ROUND_HALF_EVEN)
 _MISSING_LABELS = (
     *(f"baseline@{seed}" for seed in _EXPECTED_SEEDS),
     *(
@@ -204,56 +205,57 @@ def decide_proxy_survivors(
         for bundle in contract.feature_bundles
         if any(evidence[(bundle, seed)][0] == "failed" for seed in contract.seeds)
     )
-    mean_limit = Decimal(str(contract.proxy_gate.mean_delta_max))
-    worst_limit = Decimal(str(contract.proxy_gate.worst_seed_delta_max))
-    computed: list[
-        tuple[str, Mapping[int, Decimal], Decimal, Decimal, bool]
-    ] = []
-    for bundle in contract.feature_bundles:
-        if bundle in failed_bundles:
-            continue
-        seed_delta = {
-            seed: evidence[(bundle, seed)][1] - evidence[(None, seed)][1]  # type: ignore[operator]
-            for seed in contract.seeds
-        }
-        mean_delta = sum(seed_delta.values(), _DECIMAL_ZERO) / Decimal(
-            len(seed_delta)
-        )
-        worst_seed_delta = max(seed_delta.values())
-        strong = (
-            mean_delta <= mean_limit
-            and worst_seed_delta <= worst_limit
-        )
-        computed.append(
-            (bundle, seed_delta, mean_delta, worst_seed_delta, strong)
-        )
+    with localcontext(_DECIMAL_CONTEXT):
+        mean_limit = Decimal(str(contract.proxy_gate.mean_delta_max))
+        worst_limit = Decimal(str(contract.proxy_gate.worst_seed_delta_max))
+        computed: list[
+            tuple[str, Mapping[int, Decimal], Decimal, Decimal, bool]
+        ] = []
+        for bundle in contract.feature_bundles:
+            if bundle in failed_bundles:
+                continue
+            seed_delta = {
+                seed: evidence[(bundle, seed)][1] - evidence[(None, seed)][1]  # type: ignore[operator]
+                for seed in contract.seeds
+            }
+            mean_delta = sum(seed_delta.values(), _DECIMAL_ZERO) / Decimal(
+                len(seed_delta)
+            )
+            worst_seed_delta = max(seed_delta.values())
+            strong = (
+                mean_delta <= mean_limit
+                and worst_seed_delta <= worst_limit
+            )
+            computed.append(
+                (bundle, seed_delta, mean_delta, worst_seed_delta, strong)
+            )
 
-    strong_survivors = tuple(row[0] for row in computed if row[4])
-    safety_candidates = [
-        row for row in computed if not row[4] and row[2] < _DECIMAL_ZERO
-    ]
-    safety_bundle = (
-        min(safety_candidates, key=lambda row: row[2])[0]
-        if safety_candidates
-        else None
-    )
-    safety_survivors = (safety_bundle,) if safety_bundle is not None else ()
-    rows = tuple(
-        _bundle_decision(
-            bundle,
-            seed_delta,
-            mean_delta,
-            worst_seed_delta,
-            (
-                "strong"
-                if strong
-                else "safety"
-                if bundle == safety_bundle
-                else "rejected"
-            ),
+        strong_survivors = tuple(row[0] for row in computed if row[4])
+        safety_candidates = [
+            row for row in computed if not row[4] and row[2] < _DECIMAL_ZERO
+        ]
+        safety_bundle = (
+            min(safety_candidates, key=lambda row: row[2])[0]
+            if safety_candidates
+            else None
         )
-        for bundle, seed_delta, mean_delta, worst_seed_delta, strong in computed
-    )
+        safety_survivors = (safety_bundle,) if safety_bundle is not None else ()
+        rows = tuple(
+            _bundle_decision(
+                bundle,
+                seed_delta,
+                mean_delta,
+                worst_seed_delta,
+                (
+                    "strong"
+                    if strong
+                    else "safety"
+                    if bundle == safety_bundle
+                    else "rejected"
+                ),
+            )
+            for bundle, seed_delta, mean_delta, worst_seed_delta, strong in computed
+        )
     return ProxyDecision(
         status="complete",
         reason=None,
@@ -363,13 +365,14 @@ def _validate_proxy_decision(decision: ProxyDecision) -> None:
         )
         if any(type(value) is not float or not math.isfinite(value) for value in numbers):
             raise RowFeatureDecisionError("decision row numbers must be finite floats")
-        decimal_deltas = tuple(
-            Decimal(str(row.seed_delta[seed])) for seed in _EXPECTED_SEEDS
-        )
-        derived_mean = sum(decimal_deltas, _DECIMAL_ZERO) / Decimal(
-            len(decimal_deltas)
-        )
-        derived_worst = max(decimal_deltas)
+        with localcontext(_DECIMAL_CONTEXT):
+            decimal_deltas = tuple(
+                Decimal(str(row.seed_delta[seed])) for seed in _EXPECTED_SEEDS
+            )
+            derived_mean = sum(decimal_deltas, _DECIMAL_ZERO) / Decimal(
+                len(decimal_deltas)
+            )
+            derived_worst = max(decimal_deltas)
         if not math.isclose(
             row.mean_delta,
             float(derived_mean),
