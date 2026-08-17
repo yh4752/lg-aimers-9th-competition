@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "campaign_id": "catboost_deployment_v1",
+  "source_blend_delivery_sha256": "ab7ca41e98e2b94b997369d7c777f8293c64acf61114f314110d17bf743edcfa",
+  "source_stage_c_delivery_sha256": "f054e8e819d1053299fef4749a32e923db9136e20fc9c12cda79bbc7ef8c484a",
+  "tabm_weight": 0.7,
+  "tree_prefixes": [4, 32, 64, 128, 192, 296, 400],
+  "catboost_parameters": {
+    "iterations": 400,
+    "depth": 7,
+    "learning_rate": 0.05,
+    "loss_function": "RMSE",
+    "eval_metric": "RMSE",
+    "border_count": 128,
+    "bootstrap_type": "Bayesian",
+    "bagging_temperature": 1.0,
+    "l2_leaf_reg": 3.0,
+    "model_size_reg": 0.5,
+    "max_ctr_complexity": 1,
+    "random_seed": 42,
+    "task_type": "GPU"
+  },
+  "gates": {
+    "minimum_weighted_gain": 0.00003,
+    "maximum_fold_regression": 0.00003
+  },
+  "budget": {
+    "snapshot_interval_seconds": 300,
+    "emergency_interval_seconds": 1200,
+    "session_seconds": 10800,
+    "new_job_guard_seconds": 900
+  }
+}
