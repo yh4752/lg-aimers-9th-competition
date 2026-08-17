@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from hashlib import sha256
 import json
 import os
 from pathlib import Path, PurePosixPath
@@ -33,37 +32,14 @@ class BlendRun:
     active_job_id: str | None
 
 
-_CODE_MEMBERS = (
-    "experiments/catboost_preprocessing/features.py",
-    "experiments/independent_dl/preprocessing.py",
-    "experiments/independent_dl/row_features.py",
-    "experiments/catboost_tabm_blend/contract.json",
-    "experiments/catboost_tabm_blend/contracts.py",
-    "experiments/catboost_tabm_blend/metrics.py",
-    "experiments/catboost_tabm_blend/inputs.py",
-    "experiments/catboost_tabm_blend/training.py",
-    "experiments/catboost_tabm_blend/artifacts.py",
-    "experiments/catboost_tabm_blend/runner.py",
-    "experiments/catboost_tabm_blend/requirements-colab.txt",
-)
-
-
 def _root() -> Path:
     return Path(__file__).resolve().parents[2]
 
 
 def code_sha256() -> str:
-    digest = sha256()
-    root = _root()
-    for name in _CODE_MEMBERS:
-        path = root / name
-        if not path.is_file():
-            raise BlendRunnerError(f"code identity member is missing: {name}")
-        value = path.read_bytes()
-        digest.update(name.encode("utf-8") + b"\0")
-        digest.update(len(value).to_bytes(8, "big"))
-        digest.update(value)
-    return digest.hexdigest()
+    from .runtime_inventory import code_identity_sha256
+
+    return code_identity_sha256(_root())
 
 
 def _bindings(
