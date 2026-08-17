@@ -142,6 +142,49 @@ def test_incomplete_campaign_has_resume_only(tmp_path: Path) -> None:
     assert verified.completed_job_ids == (job_id,)
 
 
+def test_active_snapshot_is_resumable_without_completed_prediction(tmp_path: Path) -> None:
+    job_id = build_jobs(load_contract())[0].job_id
+    active = tmp_path / "jobs" / job_id
+    active.mkdir(parents=True)
+    (active / "job.json").write_text(json.dumps({"job_id": job_id}))
+    (active / "worker.log").write_text("CATBOOST_PROGRESS iteration=50\n")
+    (active / "experiment.cbsnapshot").write_bytes(b"active-snapshot")
+    state = tmp_path / "stage_state.json"
+    state.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "campaign_id": "catboost_tabm_blend_v1",
+                "stage_complete": False,
+                "completed_job_ids": [],
+                "active_job_id": job_id,
+                "bindings": _bindings(),
+            },
+            sort_keys=True,
+        )
+    )
+    log = tmp_path / "campaign.log"
+    log.write_text("CATBOOST_PROGRESS\n")
+
+    bundles = write_bundles(
+        output_dir=tmp_path / "bundles",
+        contract_path=DEFAULT_CONTRACT,
+        bindings=_bindings(),
+        stage_state_path=state,
+        campaign_log_path=log,
+        job_directories={job_id: active},
+        decision_path=None,
+    )
+    verified = verify_resume_bundle(bundles.resume, expected_bindings=_bindings())
+
+    assert verified.completed_job_ids == ()
+    assert verified.active_job_id == job_id
+    with ZipFile(bundles.resume) as archive:
+        names = set(archive.namelist())
+    assert f"jobs/{job_id}/experiment.cbsnapshot" in names
+    assert f"jobs/{job_id}/predictions.csv" not in names
+
+
 def test_tampered_resume_is_rejected(tmp_path: Path) -> None:
     job_id = build_jobs(load_contract())[0].job_id
     job = _job_dir(tmp_path / "jobs", job_id)

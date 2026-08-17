@@ -48,6 +48,7 @@ _JOB_REQUIRED = {
     "worker.log",
     "worker_result.json",
 }
+_ACTIVE_REQUIRED = {"job.json", "worker.log", "experiment.cbsnapshot"}
 
 
 def _canonical_json(value: object) -> bytes:
@@ -225,7 +226,15 @@ def write_bundles(
     ):
         raise BlendArtifactError("stage state differs")
     completed = tuple(state["completed_job_ids"])
-    if len(completed) != len(set(completed)) or set(completed) != set(job_directories):
+    active = state.get("active_job_id")
+    if active is not None and type(active) is not str:
+        raise BlendArtifactError("active job identity differs")
+    expected_directories = set(completed) | ({active} if active is not None else set())
+    if (
+        len(completed) != len(set(completed))
+        or active in completed
+        or expected_directories != set(job_directories)
+    ):
         raise BlendArtifactError("completed job set differs")
     results = [_validate_job(Path(job_directories[job_id]), job_id) for job_id in completed]
     output_dir = Path(output_dir)
@@ -240,6 +249,17 @@ def write_bundles(
         snapshot = directory / "experiment.cbsnapshot"
         if snapshot.is_file():
             resume_sources[f"jobs/{job_id}/experiment.cbsnapshot"] = snapshot
+    if active is not None:
+        directory = Path(job_directories[active])
+        if directory.is_symlink() or not directory.is_dir():
+            raise BlendArtifactError("active job directory is unsafe")
+        if not all((directory / name).is_file() for name in _ACTIVE_REQUIRED):
+            raise BlendArtifactError("active job snapshot artifacts are missing")
+        job_payload = _json_file(directory / "job.json", "active job")
+        if job_payload.get("job_id") != active:
+            raise BlendArtifactError("active job identity differs")
+        for name in sorted(_ACTIVE_REQUIRED):
+            resume_sources[f"jobs/{active}/{name}"] = directory / name
     resume_path = output_dir / "catboost_tabm_blend_resume.zip"
     manifest_sha = _write_archive(
         resume_path,
@@ -396,6 +416,9 @@ def verify_resume_bundle(
         snapshot = f"jobs/{job_id}/experiment.cbsnapshot"
         if snapshot in infos:
             expected.add(snapshot)
+    active = state.get("active_job_id")
+    if active is not None:
+        expected.update(f"jobs/{active}/{name}" for name in _ACTIVE_REQUIRED)
     if set(infos) != expected:
         raise BlendArtifactError("resume member set differs from state")
     return VerifiedBlendResume(
