@@ -42,32 +42,14 @@ class DeploymentRun:
     active_job_id: str | None
 
 
-_IDENTITY_MEMBERS = (
-    "experiments/catboost_deployment/contract.json",
-    "experiments/catboost_deployment/contracts.py",
-    "experiments/catboost_deployment/inputs.py",
-    "experiments/catboost_deployment/metrics.py",
-    "experiments/catboost_deployment/state.py",
-    "experiments/catboost_deployment/training.py",
-    "experiments/catboost_deployment/artifacts.py",
-    "experiments/catboost_deployment/runner.py",
-    "experiments/catboost_deployment/requirements-colab.txt",
-)
-
-
 def _root() -> Path:
     return Path(__file__).resolve().parents[2]
 
 
 def code_sha256() -> str:
-    digest = sha256()
-    for name in _IDENTITY_MEMBERS:
-        path = _root() / name
-        payload = path.read_bytes()
-        digest.update(name.encode("utf-8") + b"\0")
-        digest.update(str(len(payload)).encode("ascii") + b"\0")
-        digest.update(payload)
-    return digest.hexdigest()
+    from .runtime_inventory import code_identity_sha256
+
+    return code_identity_sha256(_root())
 
 
 def _canonical_json(value: object) -> bytes:
