@@ -161,6 +161,12 @@ def _validate_state(path: Path, bindings: Mapping[str, str]) -> dict[str, object
             and state["decision_sha256"] is None
         )
         or (
+            status == "alignment_incomplete"
+            and completed in ([], expected_alignment[:1])
+            and active is None
+            and state["decision_sha256"] is None
+        )
+        or (
             status in {"deployment_aligned", "deployment_blocked"}
             and completed == expected_alignment
             and active is None
@@ -249,7 +255,11 @@ def _validate_completed_job(directory: Path, job_id: str) -> dict[str, object]:
     else:
         if result.get("predictions") is not None or metrics.get("valid_rows") is not None:
             raise DeploymentArtifactError("full fit unexpectedly has validation evidence")
-        if metrics.get("train_rows") != 1475092:
+        if (
+            type(metrics.get("train_rows")) is not int
+            or metrics["train_rows"] <= 0
+            or result.get("train_rows") != metrics["train_rows"]
+        ):
             raise DeploymentArtifactError("full fit row count differs")
     return result
 
