@@ -1,0 +1,49 @@
+{
+  "schema_version": 1,
+  "campaign_id": "catboost_tabm_blend_v1",
+  "review_only": true,
+  "submission_package": false,
+  "official_train_sha256": "d2081186b458b49f60b082be480c273135833e15ba59a76d033af28bcf8763ff",
+  "official_history_sha256": "f7818f9ee0ccefe7c2cf69fa99efe6e5cb882d8b886dd96d2394bcf3b53f33a9",
+  "stage_c": {
+    "delivery_sha256": "f054e8e819d1053299fef4749a32e923db9136e20fc9c12cda79bbc7ef8c484a",
+    "review_sha256": "461c4422cebdc7383577ad6c53b044bfe3d9d15b667383e454591135e4242d2c",
+    "resume_sha256": "25aa43a846357f0ac97bcb18dd1826727d92e0850cb51091bec002ba6e2ed838",
+    "stage_state_sha256": "290b3b10854aca9131e19f3fd1b0620aed17e9b9d40e25f0cb41f67bb2fcba76",
+    "selected_predictor": "single_s3407",
+    "prediction_members": {
+      "2022->2023": "predictions/c_final__a__p2__piecewise_linear__bce__plateau__s42__s3407__tr2022__va2023.csv",
+      "2023->2024": "predictions/c_final__a__p2__piecewise_linear__bce__plateau__s42__s3407__tr2023__va2024.csv"
+    }
+  },
+  "folds": [
+    {"train_end_year": 2022, "valid_year": 2023},
+    {"train_end_year": 2023, "valid_year": 2024}
+  ],
+  "preprocessing": {"profile": "tree_native", "components": ["hand_matchup"]},
+  "catboost": {
+    "iterations": 400,
+    "depth": 7,
+    "learning_rate": 0.05,
+    "loss_function": "RMSE",
+    "eval_metric": "RMSE",
+    "border_count": 128,
+    "bootstrap_type": "Bayesian",
+    "bagging_temperature": 1.0,
+    "l2_leaf_reg": 3.0,
+    "model_size_reg": 0.5,
+    "max_ctr_complexity": 1,
+    "random_seed": 42,
+    "task_type": "GPU",
+    "od_type": "Iter",
+    "od_wait": 50
+  },
+  "tabm_weights": [0.9, 0.8, 0.7],
+  "gates": {"minimum_weighted_gain": 0.00003, "maximum_fold_regression": 0.00003},
+  "budget": {
+    "wall_seconds": 10800,
+    "new_job_guard_seconds": 900,
+    "snapshot_interval_seconds": 300,
+    "download_interval_seconds": 1200
+  }
+}
