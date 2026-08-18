@@ -66,6 +66,14 @@ class ContextState:
     levels: tuple[LevelState, ...]
 
 
+@dataclass(frozen=True)
+class KSelection:
+    fold: str
+    selected_k: float
+    scores: Mapping[float, float]
+    row_count: int
+
+
 def _required(frame: pd.DataFrame, *, target: bool) -> None:
     columns = {"row_id", *HIERARCHY_LEVELS[-1]}
     if target:
@@ -220,6 +228,118 @@ def transform_frozen(frame: pd.DataFrame, state: ContextState) -> pd.DataFrame:
     return pd.DataFrame({"hier_context_rate": output}, index=frame.index)
 
 
+def _tie_tolerance(value: object) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ContextFeatureError("tie_tolerance must be finite and nonnegative")
+    result = float(value)
+    if not math.isfinite(result) or result < 0:
+        raise ContextFeatureError("tie_tolerance must be finite and nonnegative")
+    return result
+
+
+def select_k_from_scores(
+    scores: Mapping[float, float], *, tie_tolerance: float
+) -> float:
+    tolerance = _tie_tolerance(tie_tolerance)
+    if not isinstance(scores, Mapping) or not scores:
+        raise ContextFeatureError("scores must be a non-empty mapping")
+    parsed: dict[float, float] = {}
+    for raw_k, raw_score in scores.items():
+        if (
+            isinstance(raw_k, bool)
+            or not isinstance(raw_k, (int, float))
+            or isinstance(raw_score, bool)
+            or not isinstance(raw_score, (int, float))
+        ):
+            raise ContextFeatureError("scores contain an invalid key or value")
+        k = float(raw_k)
+        score = float(raw_score)
+        if (
+            not math.isfinite(k)
+            or k <= 0
+            or not math.isfinite(score)
+            or score < 0
+            or score > 1
+            or k in parsed
+        ):
+            raise ContextFeatureError("scores contain an invalid key or value")
+        parsed[k] = score
+    best = min(parsed.values())
+    eligible = [k for k, score in parsed.items() if score <= best + tolerance]
+    return max(eligible)
+
+
+def _candidate_grid(candidates: object) -> tuple[float, ...]:
+    if not isinstance(candidates, tuple) or not candidates:
+        raise ContextFeatureError("candidates must be a non-empty ordered tuple")
+    parsed: list[float] = []
+    for value in candidates:
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ContextFeatureError("candidates must be finite and positive")
+        candidate = float(value)
+        if not math.isfinite(candidate) or candidate <= 0:
+            raise ContextFeatureError("candidates must be finite and positive")
+        parsed.append(candidate)
+    if parsed != sorted(set(parsed)):
+        raise ContextFeatureError("candidates must be unique and increasing")
+    return tuple(parsed)
+
+
+def _development_seasons(
+    fit_rows: pd.DataFrame, valid_rows: pd.DataFrame
+) -> None:
+    if "season" not in fit_rows or "season" not in valid_rows:
+        raise ContextFeatureError("development fold requires season")
+    fit_season = pd.to_numeric(fit_rows["season"], errors="coerce").to_numpy(
+        dtype="float64"
+    )
+    valid_season = pd.to_numeric(valid_rows["season"], errors="coerce").to_numpy(
+        dtype="float64"
+    )
+    if (
+        not np.isfinite(fit_season).all()
+        or not np.isfinite(valid_season).all()
+        or fit_rows.empty
+        or valid_rows.empty
+        or (fit_season > 2021).any()
+        or not (valid_season == 2022).all()
+    ):
+        raise ContextFeatureError("development fold must be train<=2021 and valid=2022")
+
+
+def select_smoothing_k(
+    fit_rows: pd.DataFrame,
+    valid_rows: pd.DataFrame,
+    candidates: tuple[float, ...],
+    *,
+    tie_tolerance: float,
+) -> KSelection:
+    """Select K only on the sealed 2021-to-2022 development boundary."""
+
+    grid = _candidate_grid(candidates)
+    tolerance = _tie_tolerance(tie_tolerance)
+    _development_seasons(fit_rows, valid_rows)
+    if TARGET not in valid_rows:
+        raise ContextFeatureError("control_success is missing from validation")
+    target = _target(valid_rows)
+    transform_rows = valid_rows.drop(columns=[TARGET])
+    scores: dict[float, float] = {}
+    for candidate in grid:
+        state = fit_context_state(fit_rows, smoothing_k=candidate)
+        probability = transform_frozen(transform_rows, state)[
+            "hier_context_rate"
+        ].to_numpy(dtype="float64")
+        if len(probability) != len(target) or not np.isfinite(probability).all():
+            raise ContextFeatureError("development predictions are invalid")
+        scores[candidate] = float(np.mean(np.square(target - probability), dtype=np.float64))
+    return KSelection(
+        "2021->2022",
+        select_k_from_scores(scores, tie_tolerance=tolerance),
+        MappingProxyType(scores),
+        len(valid_rows),
+    )
+
+
 def _canonical_json(value: object) -> bytes:
     return json.dumps(
         value,
@@ -348,4 +468,3 @@ def context_state_from_payload(payload: Mapping[str, object]) -> ContextState:
 
 def context_state_sha256(state: ContextState) -> str:
     return sha256(_canonical_json(context_state_payload(state))).hexdigest()
-
