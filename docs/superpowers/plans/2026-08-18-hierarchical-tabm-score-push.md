@@ -1758,7 +1758,7 @@ GitHub, rename uploads, or upload evaluation data.
 Add only this link near the experiment-runbook section:
 
 ```markdown
-- [계층적 문맥 TabM H1/H2/H3 Colab 실행](docs/HIERARCHICAL_TABM_COLAB.md)
+- 계층적 문맥 TabM H1/H2/H3 Colab 실행: `docs/HIERARCHICAL_TABM_COLAB.md`
 ```
 
 - [ ] **Step 3: Run focused, rule, and full regressions**
