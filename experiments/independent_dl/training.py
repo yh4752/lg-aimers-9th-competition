@@ -525,6 +525,10 @@ def _make_scheduler(
     updates_per_epoch: int,
 ) -> tuple[object, str]:
     name = str(request.training_config["scheduler"])
+    if name == "constant":
+        return torch.optim.lr_scheduler.LambdaLR(
+            optimizer, lambda _epoch: 1.0
+        ), "epoch"
     if name == "plateau":
         return torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode="min"), "metric"
     if name == "cosine":
