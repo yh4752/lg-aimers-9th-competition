@@ -19,6 +19,7 @@ from experiments.hierarchical_tabm.contracts import DEFAULT_CONTRACT, build_jobs
 from experiments.hierarchical_tabm.metrics import CandidateDecision
 from experiments.hierarchical_tabm.inference import CandidateValidation
 from experiments.hierarchical_tabm.runner import (
+    HierarchicalRunnerError,
     choose_final_epochs,
     fit_final_calibration,
     run_campaign,
@@ -184,7 +185,7 @@ def test_campaign_runs_preregistered_order_and_writes_validated_delivery(tmp_pat
     runtime = FakeRuntime(tmp_path)
     run = run_campaign(
         _verified(tmp_path), tmp_path / "run", resume_bundle=None,
-        absolute_deadline=time.time() + 60, runtime=runtime,
+        absolute_deadline=time.time() + 3600, runtime=runtime,
         on_verified_resume=lambda path: None,
     )
     assert runtime.calls == [
@@ -239,7 +240,7 @@ def test_candidate_validation_failure_is_isolated(tmp_path: Path) -> None:
     runtime = PartiallyAcceptedRuntime(tmp_path)
     run = run_campaign(
         _verified(tmp_path), tmp_path / "run", resume_bundle=None,
-        absolute_deadline=time.time() + 60, runtime=runtime,
+        absolute_deadline=time.time() + 3600, runtime=runtime,
         on_verified_resume=lambda path: None,
     )
     assert run.candidate_delivery is not None
@@ -254,12 +255,50 @@ def test_no_eligible_candidate_skips_full_fit(tmp_path: Path) -> None:
     runtime = FakeRuntime(tmp_path, h1_status="rejected")
     run = run_campaign(
         _verified(tmp_path), tmp_path / "run", resume_bundle=None,
-        absolute_deadline=time.time() + 60, runtime=runtime,
+        absolute_deadline=time.time() + 3600, runtime=runtime,
         on_verified_resume=lambda path: None,
     )
     assert "full_fit_2019_2024" not in runtime.calls
     assert run.state.status == "completed_no_candidate"
     assert run.candidate_delivery is None
+
+
+def test_runner_publishes_atomic_active_and_completed_job_state(tmp_path: Path) -> None:
+    class StateObservingRuntime(FakeRuntime):
+        def run_oof(self, job, **kwargs):
+            output_dir = kwargs["output_dir"]
+            state_path = output_dir.parents[1] / "stage_state.json"
+            observed = json.loads(state_path.read_text())
+            assert observed["active_job_id"] == job.job_id
+            assert job.job_id not in observed["completed_job_ids"]
+            return super().run_oof(job, **kwargs)
+
+        def run_full_fit(self, job, **kwargs):
+            output_dir = kwargs["output_dir"]
+            observed = json.loads((output_dir.parents[1] / "stage_state.json").read_text())
+            assert observed["active_job_id"] == job.job_id
+            return super().run_full_fit(job, **kwargs)
+
+    runtime = StateObservingRuntime(tmp_path)
+    run = run_campaign(
+        _verified(tmp_path), tmp_path / "run", resume_bundle=None,
+        absolute_deadline=time.time() + 3600, runtime=runtime,
+        on_verified_resume=lambda path: None,
+    )
+    persisted = json.loads((tmp_path / "run" / "stage_state.json").read_text())
+    assert persisted["active_job_id"] is None
+    assert persisted["completed_job_ids"] == list(run.state.completed_job_ids)
+
+
+def test_runner_does_not_start_new_gpu_job_inside_contract_guard(tmp_path: Path) -> None:
+    runtime = FakeRuntime(tmp_path)
+    with pytest.raises(HierarchicalRunnerError, match="deadline"):
+        run_campaign(
+            _verified(tmp_path), tmp_path / "guarded-run", resume_bundle=None,
+            absolute_deadline=time.time() + 899, runtime=runtime,
+            on_verified_resume=lambda path: None,
+        )
+    assert not any(call.startswith("oof_") for call in runtime.calls)
 
 
 def test_resume_reuses_verified_k_and_completed_first_fold(tmp_path: Path) -> None:
@@ -311,10 +350,67 @@ def test_resume_reuses_verified_k_and_completed_first_fold(tmp_path: Path) -> No
     callbacks: list[Path] = []
     run_campaign(
         verified, tmp_path / "resumed-run", resume_bundle=resume,
-        absolute_deadline=time.time() + 60, runtime=runtime,
+        absolute_deadline=time.time() + 3600, runtime=runtime,
         on_verified_resume=callbacks.append,
     )
     assert callbacks == [resume]
     assert "select_k_2021_2022" not in runtime.calls
     assert "oof_2022_2023" not in runtime.calls
     assert "oof_2023_2024" in runtime.calls
+
+
+def test_resume_passes_verified_active_checkpoint_to_matching_job(tmp_path: Path) -> None:
+    verified = _verified(tmp_path)
+    source_runtime = FakeRuntime(tmp_path)
+    first_job = build_jobs(load_contract())[0]
+    root = tmp_path / "active-source"
+    active = root / "active"
+    active.mkdir(parents=True)
+    checkpoint = active / "checkpoint.pt"; checkpoint.write_bytes(b"active-checkpoint")
+    (active / "checkpoint.pt.meta.json").write_text(json.dumps({
+        "schema_version": 1,
+        "job_id": first_job.job_id,
+        "identity": dict(source_runtime.bindings),
+        "checkpoint_sha256": sha256(checkpoint.read_bytes()).hexdigest(),
+        "completed_epochs": 4,
+    }))
+    k_path = root / "k_selection.json"
+    k_path.write_text(json.dumps({
+        "fold": "2021->2022", "selected_k": 128.0,
+        "scores": {"32.0": 0.2}, "row_count": 1,
+    }))
+    state_path = root / "stage_state.json"
+    state_path.write_text(json.dumps({
+        "schema_version": 1, "status": "running",
+        "bindings": dict(source_runtime.bindings), "selected_k": 128.0,
+        "completed_job_ids": [], "active_job_id": first_job.job_id,
+        "decisions": {}, "delivery_candidate_ids": [],
+        "final_epochs": None, "final_fit_completed": False,
+    }))
+    log = root / "campaign.log"; log.write_text("CAMPAIGN_START\n")
+    resume = write_campaign_bundles(
+        CampaignEvidence(
+            source_runtime.bindings, DEFAULT_CONTRACT, log, state_path, k_path,
+            MappingProxyType({}), MappingProxyType({}), MappingProxyType({}), active,
+        ),
+        tmp_path / "active-bundles",
+    ).resume
+
+    class ActiveResumeRuntime(FakeRuntime):
+        def __init__(self, path: Path):
+            super().__init__(path)
+            self.resumed_from = None
+
+        def run_oof(self, job, **kwargs):
+            if job.job_id == first_job.job_id:
+                self.resumed_from = kwargs.get("resume_checkpoint")
+            return super().run_oof(job, **kwargs)
+
+    runtime = ActiveResumeRuntime(tmp_path)
+    run_campaign(
+        verified, tmp_path / "active-resumed-run", resume_bundle=resume,
+        absolute_deadline=time.time() + 3600, runtime=runtime,
+        on_verified_resume=lambda path: None,
+    )
+    assert runtime.resumed_from is not None
+    assert runtime.resumed_from.read_bytes() == b"active-checkpoint"

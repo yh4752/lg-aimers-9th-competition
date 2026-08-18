@@ -8,7 +8,7 @@ import os
 from pathlib import Path
 import time
 from types import MappingProxyType, SimpleNamespace
-from typing import Mapping, Protocol, Sequence
+from typing import Callable, Mapping, Protocol, Sequence
 
 import numpy as np
 import pandas as pd
@@ -331,6 +331,43 @@ def _restored_selection(path: Path, selected_k: object) -> object:
     return SimpleNamespace(**payload)
 
 
+def _restored_active_checkpoint(
+    directory: Path,
+    *,
+    job_id: str,
+    bindings: Mapping[str, str],
+) -> Path:
+    checkpoint = directory / "checkpoint.pt"
+    metadata_path = directory / "checkpoint.pt.meta.json"
+    if (
+        checkpoint.is_symlink()
+        or metadata_path.is_symlink()
+        or not checkpoint.is_file()
+        or not metadata_path.is_file()
+    ):
+        raise HierarchicalRunnerError("restored active checkpoint is incomplete")
+    try:
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    except Exception as error:
+        raise HierarchicalRunnerError("restored active checkpoint metadata is unreadable") from error
+    if (
+        type(metadata) is not dict
+        or set(metadata) != {
+            "schema_version", "job_id", "identity", "checkpoint_sha256",
+            "completed_epochs",
+        }
+        or metadata["schema_version"] != 1
+        or metadata["job_id"] != job_id
+        or metadata["identity"] != dict(bindings)
+        or metadata["checkpoint_sha256"] != _file_sha256(checkpoint)
+        or isinstance(metadata["completed_epochs"], bool)
+        or not isinstance(metadata["completed_epochs"], int)
+        or metadata["completed_epochs"] <= 0
+    ):
+        raise HierarchicalRunnerError("restored active checkpoint binding differs")
+    return checkpoint
+
+
 def run_campaign(
     verified: object,
     output_dir: Path,
@@ -339,6 +376,7 @@ def run_campaign(
     absolute_deadline: float,
     runtime: CampaignRuntime,
     on_verified_resume,
+    on_progress_state: Callable[[Path], None] | None = None,
 ) -> CampaignRun:
     contract = load_contract()
     output = Path(output_dir)
@@ -352,6 +390,8 @@ def run_campaign(
     restored = None
     restored_results: dict[str, TrainingJobResult] = {}
     restored_directories: dict[str, Path] = {}
+    active_resume_job_id: str | None = None
+    active_resume_checkpoint: Path | None = None
     jobs = build_jobs(contract)
     jobs_by_id = {job.job_id: job for job in jobs}
     if resume_bundle is not None:
@@ -362,8 +402,6 @@ def run_campaign(
             expected_bindings=bindings,
             check_deadline=lambda: _deadline(absolute_deadline),
         )
-        if restored.active_job_directory is not None:
-            raise HierarchicalRunnerError("active worker resume requires supervisor promotion")
         if restored.state.get("schema_version") != 1 or restored.state.get("bindings") != dict(bindings):
             raise HierarchicalRunnerError("restored campaign identity differs")
         completed = restored.state.get("completed_job_ids")
@@ -377,6 +415,21 @@ def run_campaign(
             directory = restored.completed_job_directories[job_id]
             restored_results[job_id] = _restored_result(directory, jobs_by_id[job_id])
             restored_directories[job_id] = directory
+        active_value = restored.state.get("active_job_id")
+        if active_value is not None:
+            if (
+                not isinstance(active_value, str)
+                or active_value not in jobs_by_id
+                or active_value in completed
+                or restored.active_job_directory is None
+            ):
+                raise HierarchicalRunnerError("restored active job identity differs")
+            active_resume_job_id = active_value
+            active_resume_checkpoint = _restored_active_checkpoint(
+                restored.active_job_directory,
+                job_id=active_value,
+                bindings=bindings,
+            )
         selection_path = restored.root / "k_selection.json"
         if not selection_path.is_file():
             raise HierarchicalRunnerError("restored K selection is missing")
@@ -391,23 +444,58 @@ def run_campaign(
     selected_k = float(selection.selected_k)
     k_path = output / "k_selection.json"
     _atomic_json(k_path, _selection_payload(selection))
+    state_path = output / "stage_state.json"
 
     results: dict[str, TrainingJobResult] = dict(restored_results)
     job_directories: dict[str, Path] = dict(restored_directories)
+
+    def publish_progress(
+        *,
+        active_job_id: str | None,
+        decisions: Mapping[str, CandidateDecision] | None = None,
+        delivery_candidate_ids: tuple[str, ...] = (),
+        final_epochs: int | None = None,
+        final_fit_completed: bool = False,
+    ) -> None:
+        state = CampaignState(
+            1,
+            "running",
+            bindings,
+            selected_k,
+            tuple(job_directories),
+            active_job_id,
+            MappingProxyType(dict(decisions or {})),
+            delivery_candidate_ids,
+            final_epochs,
+            final_fit_completed,
+        )
+        _atomic_json(state_path, _state_payload(state))
+        if on_progress_state is not None:
+            on_progress_state(state_path)
+
+    publish_progress(active_job_id=None)
     for job in jobs[:2]:
         if job.job_id in results:
             continue
-        _deadline(absolute_deadline, guard_seconds=0.0)
+        _deadline(
+            absolute_deadline,
+            guard_seconds=float(contract.new_job_guard_seconds),
+        )
         directory = output / "jobs" / job.job_id
+        publish_progress(active_job_id=job.job_id)
         result = runtime.run_oof(
             job, output_dir=directory, selected_k=selected_k,
             absolute_deadline=absolute_deadline,
+            resume_checkpoint=(
+                active_resume_checkpoint if job.job_id == active_resume_job_id else None
+            ),
         )
         if result.status != "completed" or result.predictions_path is None:
             raise HierarchicalRunnerError(f"OOF job did not complete: {job.job_id}")
         _ensure_worker_result(result, directory)
         results[job.job_id] = result
         job_directories[job.job_id] = directory
+        publish_progress(active_job_id=None)
     oof = {
         "2022->2023": pd.read_csv(results[jobs[0].job_id].predictions_path),
         "2023->2024": pd.read_csv(results[jobs[1].job_id].predictions_path),
@@ -450,16 +538,29 @@ def run_campaign(
             minimum=contract.final_min_epochs,
             maximum=contract.final_max_epochs,
         )
-        _deadline(absolute_deadline)
+        _deadline(
+            absolute_deadline,
+            guard_seconds=float(contract.new_job_guard_seconds),
+        )
         final_job = jobs[2]
         if final_job.job_id in results:
             final_result = results[final_job.job_id]
             directory = job_directories[final_job.job_id]
         else:
             directory = output / "jobs" / final_job.job_id
+            publish_progress(
+                active_job_id=final_job.job_id,
+                decisions=decisions,
+                delivery_candidate_ids=delivery_ids,
+                final_epochs=final_epochs,
+            )
             final_result = runtime.run_full_fit(
                 final_job, output_dir=directory, selected_k=selected_k,
                 absolute_deadline=absolute_deadline, final_epochs=final_epochs,
+                resume_checkpoint=(
+                    active_resume_checkpoint
+                    if final_job.job_id == active_resume_job_id else None
+                ),
             )
         if final_result.status != "completed" or final_result.final_model_path is None:
             raise HierarchicalRunnerError("full fit did not complete")
@@ -467,6 +568,13 @@ def run_campaign(
             _ensure_worker_result(final_result, directory)
             results[final_job.job_id] = final_result
             job_directories[final_job.job_id] = directory
+            publish_progress(
+                active_job_id=None,
+                decisions=decisions,
+                delivery_candidate_ids=delivery_ids,
+                final_epochs=final_epochs,
+                final_fit_completed=True,
+            )
         final_completed = True
         for candidate_id in delivery_ids:
             if candidate_id == "H1":
@@ -552,8 +660,9 @@ def run_campaign(
         1, status, bindings, selected_k, tuple(job_directories), None,
         MappingProxyType(decisions), delivery_ids, final_epochs, final_completed,
     )
-    state_path = output / "stage_state.json"
     _atomic_json(state_path, _state_payload(state))
+    if on_progress_state is not None:
+        on_progress_state(state_path)
     bundles = write_campaign_bundles(
         CampaignEvidence(
             bindings, DEFAULT_CONTRACT, log_path, state_path, k_path,
