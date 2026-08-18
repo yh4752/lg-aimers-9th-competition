@@ -366,6 +366,7 @@ def test_piecewise_edges_retain_constant_numeric_columns() -> None:
 
     assert len(edges[0]) == 2
     assert edges[0][0] < 0.0 < edges[0][1]
+    assert float(edges[0][1] - edges[0][0]) >= np.finfo(np.float32).eps
     assert all(len(item) >= 2 for item in edges)
 
 

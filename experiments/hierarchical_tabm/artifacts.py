@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from hashlib import sha256
 import json
+import math
 import os
 from pathlib import Path, PurePosixPath
 import shutil
@@ -461,4 +462,121 @@ def verify_candidate_delivery(
         raise HierarchicalArtifactError("candidate delivery policy differs")
     if "model/final_checkpoint.pt" not in manifest["members"] or "state/feature_state.json" not in manifest["members"]:
         raise HierarchicalArtifactError("candidate delivery model state is missing")
+    expected_calibration = {
+        f"state/calibration_{candidate}.json" for candidate in ids if candidate != "H1"
+    }
+    observed_calibration = {
+        name for name in manifest["members"] if name.startswith("state/calibration_")
+    }
+    if observed_calibration != expected_calibration:
+        raise HierarchicalArtifactError("candidate calibration evidence differs")
+    expected_reports = {f"evidence/decision_{candidate}.json" for candidate in ids}
+    observed_reports = {
+        name for name in manifest["members"] if name.startswith("evidence/decision_")
+    }
+    if observed_reports != expected_reports:
+        raise HierarchicalArtifactError("candidate independence evidence differs")
+    try:
+        with ZipFile(path) as archive:
+            for candidate in ids:
+                report = json.loads(archive.read(f"evidence/decision_{candidate}.json"))
+                _validate_independence_report(
+                    report,
+                    candidate_id=candidate,
+                    delivery_role=roles[candidate],
+                    manifest_members=manifest["members"],
+                )
+    except HierarchicalArtifactError:
+        raise
+    except Exception as error:
+        raise HierarchicalArtifactError("candidate independence evidence is unreadable") from error
     return MappingProxyType(manifest)
+
+
+def _validate_independence_report(
+    report: object,
+    *,
+    candidate_id: str,
+    delivery_role: str,
+    manifest_members: Mapping[str, object],
+) -> None:
+    expected = {
+        "schema_version", "candidate_id", "delivery_role", "passed",
+        "independence", "resources", "validated_members", "failure",
+    }
+    if (
+        type(report) is not dict
+        or set(report) != expected
+        or report["schema_version"] != 1
+        or report["candidate_id"] != candidate_id
+        or report["delivery_role"] != delivery_role
+        or report["passed"] is not True
+        or report["failure"] is not None
+    ):
+        raise HierarchicalArtifactError("candidate independence evidence differs")
+    expected_validated = {
+        "model/final_checkpoint.pt", "state/feature_state.json",
+        *(() if candidate_id == "H1" else (f"state/calibration_{candidate_id}.json",)),
+    }
+    validated = report["validated_members"]
+    if type(validated) is not dict or set(validated) != expected_validated:
+        raise HierarchicalArtifactError("candidate validated member evidence differs")
+    for name, digest in validated.items():
+        member = manifest_members.get(name)
+        if (
+            not isinstance(digest, str)
+            or len(digest) != 64
+            or any(character not in "0123456789abcdef" for character in digest)
+            or type(member) is not dict
+            or member.get("sha256") != digest
+        ):
+            raise HierarchicalArtifactError("candidate validated member evidence differs")
+    independence = report["independence"]
+    if (
+        type(independence) is not dict
+        or set(independence) != {
+            "row_count", "features_exact", "maximum_probability_delta",
+            "state_before", "state_after", "batch_sizes",
+        }
+        or isinstance(independence["row_count"], bool)
+        or not isinstance(independence["row_count"], int)
+        or independence["row_count"] <= 0
+        or independence["features_exact"] is not True
+        or isinstance(independence["maximum_probability_delta"], bool)
+        or not isinstance(independence["maximum_probability_delta"], (int, float))
+        or not math.isfinite(float(independence["maximum_probability_delta"]))
+        or not 0 <= float(independence["maximum_probability_delta"]) <= 1e-6
+        or independence["batch_sizes"] != [1, 257, 2048]
+    ):
+        raise HierarchicalArtifactError("candidate independence evidence differs")
+    before = independence["state_before"]
+    after = independence["state_after"]
+    if before != after or not isinstance(before, str) or len(before) != 64 or any(
+        character not in "0123456789abcdef" for character in before
+    ):
+        raise HierarchicalArtifactError("candidate independence state differs")
+    resources = report["resources"]
+    if (
+        type(resources) is not dict
+        or set(resources) != {
+            "row_count", "python_version", "elapsed_seconds", "peak_gpu_bytes",
+            "peak_rss_bytes", "artifact_bytes", "passed",
+        }
+        or resources["row_count"] != 245789
+        or resources["python_version"] != "3.11.15"
+        or resources["passed"] is not True
+        or isinstance(resources["elapsed_seconds"], bool)
+        or not isinstance(resources["elapsed_seconds"], (int, float))
+        or not math.isfinite(float(resources["elapsed_seconds"]))
+        or not 0 <= float(resources["elapsed_seconds"]) <= 480
+    ):
+        raise HierarchicalArtifactError("candidate resource evidence differs")
+    limits = {
+        "peak_gpu_bytes": 21474836480,
+        "peak_rss_bytes": 22000000000,
+        "artifact_bytes": 2000000000,
+    }
+    for key, maximum in limits.items():
+        value = resources[key]
+        if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= maximum:
+            raise HierarchicalArtifactError("candidate resource evidence differs")

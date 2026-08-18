@@ -10,9 +10,14 @@ import pandas as pd
 import pytest
 
 from experiments.hierarchical_tabm.calibration import fit_h2
-from experiments.hierarchical_tabm.artifacts import CampaignEvidence, write_campaign_bundles
+from experiments.hierarchical_tabm.artifacts import (
+    CampaignEvidence,
+    verify_candidate_delivery,
+    write_campaign_bundles,
+)
 from experiments.hierarchical_tabm.contracts import DEFAULT_CONTRACT, build_jobs, load_contract
 from experiments.hierarchical_tabm.metrics import CandidateDecision
+from experiments.hierarchical_tabm.inference import CandidateValidation
 from experiments.hierarchical_tabm.runner import (
     choose_final_epochs,
     fit_final_calibration,
@@ -20,6 +25,42 @@ from experiments.hierarchical_tabm.runner import (
 )
 from experiments.hierarchical_tabm.training import TrainingJobResult
 from experiments.hierarchical_tabm.training import training_result_payload
+
+
+def _validation_report(
+    candidate_id: str,
+    role: str,
+    *,
+    passed: bool,
+    members: dict[str, Path],
+) -> dict[str, object]:
+    return {
+        "schema_version": 1,
+        "candidate_id": candidate_id,
+        "delivery_role": role,
+        "passed": passed,
+        "independence": None if not passed else {
+            "row_count": 2,
+            "features_exact": True,
+            "maximum_probability_delta": 0.0,
+            "state_before": "1" * 64,
+            "state_after": "1" * 64,
+            "batch_sizes": [1, 257, 2048],
+        },
+        "resources": None if not passed else {
+            "row_count": 245789,
+            "python_version": "3.11.15",
+            "elapsed_seconds": 1.0,
+            "peak_gpu_bytes": 1,
+            "peak_rss_bytes": 1,
+            "artifact_bytes": 1,
+            "passed": True,
+        },
+        "validated_members": {
+            name: sha256(path.read_bytes()).hexdigest() for name, path in members.items()
+        },
+        "failure": None if passed else "fixture_rejection",
+    }
 
 
 def test_final_epoch_is_row_weighted_median_clamped_to_contract() -> None:
@@ -109,6 +150,29 @@ class FakeRuntime:
         feature = out / "feature_state.json"; feature.write_text("{}")
         return TrainingJobResult(job.job_id, "full_fit", "completed", 200, None, None, None, kwargs["final_epochs"], None, checkpoint, model, feature, None)
 
+    def validate_candidates(
+        self, *, delivery_roles, output_dir, final_checkpoint_path,
+        feature_state_path, calibration_paths, **kwargs
+    ):
+        self.calls.append("validate_candidates")
+        reports = {}
+        for candidate_id in delivery_roles:
+            path = output_dir / f"independence_{candidate_id}.json"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            members = {
+                "model/final_checkpoint.pt": final_checkpoint_path,
+                "state/feature_state.json": feature_state_path,
+            }
+            if candidate_id != "H1":
+                members[f"state/calibration_{candidate_id}.json"] = calibration_paths[candidate_id]
+            path.write_text(json.dumps(_validation_report(
+                candidate_id, delivery_roles[candidate_id], passed=True, members=members
+            )))
+            reports[candidate_id] = path
+        return CandidateValidation(
+            MappingProxyType(dict(delivery_roles)), MappingProxyType(reports)
+        )
+
 
 def _verified(tmp_path: Path):
     data = tmp_path / "data"; data.mkdir()
@@ -116,7 +180,7 @@ def _verified(tmp_path: Path):
     return SimpleNamespace(training=SimpleNamespace(data_dir=data), anchor_predictions={})
 
 
-def test_campaign_runs_preregistered_order_and_stops_pending_validation(tmp_path: Path) -> None:
+def test_campaign_runs_preregistered_order_and_writes_validated_delivery(tmp_path: Path) -> None:
     runtime = FakeRuntime(tmp_path)
     run = run_campaign(
         _verified(tmp_path), tmp_path / "run", resume_bundle=None,
@@ -126,12 +190,64 @@ def test_campaign_runs_preregistered_order_and_stops_pending_validation(tmp_path
     assert runtime.calls == [
         "select_k_2021_2022", "oof_2022_2023", "oof_2023_2024",
         "calibrate_H2", "calibrate_H3", "decide_H1", "decide_H2", "decide_H3",
-        "full_fit_2019_2024",
+        "full_fit_2019_2024", "validate_candidates",
     ]
     assert run.state.selected_k == 128.0
-    assert run.state.status == "delivery_pending_validation"
-    assert run.candidate_delivery is None
+    assert run.state.status == "completed_candidate_delivery"
+    assert run.candidate_delivery is not None and run.candidate_delivery.is_file()
     assert run.bundles.review.is_file() and run.bundles.resume.is_file()
+
+
+def test_candidate_validation_failure_is_isolated(tmp_path: Path) -> None:
+    class PartiallyAcceptedRuntime(FakeRuntime):
+        def decide(self, candidate_id, **kwargs):
+            self.calls.append(f"decide_{candidate_id}")
+            status = "strong" if candidate_id == "H1" else (
+                "accepted" if candidate_id == "H2" else "rejected"
+            )
+            role = "final_candidate" if status in {"strong", "accepted"} else None
+            return CandidateDecision(
+                candidate_id, status, role is not None, role,
+                {"2022->2023": .2, "2023->2024": .2},
+                {"2022->2023": 0., "2023->2024": 0.}, 0., 0., "fixture",
+            )
+
+        def validate_candidates(
+            self, *, delivery_roles, output_dir, final_checkpoint_path,
+            feature_state_path, calibration_paths, **kwargs
+        ):
+            self.calls.append("validate_candidates")
+            reports = {}
+            for candidate_id in delivery_roles:
+                path = output_dir / f"independence_{candidate_id}.json"
+                path.parent.mkdir(parents=True, exist_ok=True)
+                members = {
+                    "model/final_checkpoint.pt": final_checkpoint_path,
+                    "state/feature_state.json": feature_state_path,
+                }
+                if candidate_id != "H1":
+                    members[f"state/calibration_{candidate_id}.json"] = calibration_paths[candidate_id]
+                path.write_text(json.dumps(_validation_report(
+                    candidate_id, delivery_roles[candidate_id],
+                    passed=candidate_id == "H2", members=members,
+                )))
+                reports[candidate_id] = path
+            return CandidateValidation(
+                MappingProxyType({"H2": "final_candidate"}), MappingProxyType(reports)
+            )
+
+    runtime = PartiallyAcceptedRuntime(tmp_path)
+    run = run_campaign(
+        _verified(tmp_path), tmp_path / "run", resume_bundle=None,
+        absolute_deadline=time.time() + 60, runtime=runtime,
+        on_verified_resume=lambda path: None,
+    )
+    assert run.candidate_delivery is not None
+    manifest = verify_candidate_delivery(
+        run.candidate_delivery, expected_bindings=runtime.bindings
+    )
+    assert manifest["delivery_candidate_ids"] == ["H2"]
+    assert run.state.delivery_candidate_ids == ("H2",)
 
 
 def test_no_eligible_candidate_skips_full_fit(tmp_path: Path) -> None:

@@ -388,7 +388,7 @@ def feature_state_from_payload(payload: Mapping[str, object]) -> HierarchicalFea
     if numeric != preprocessing.numeric_columns or categorical != preprocessing.categorical_columns:
         raise HierarchicalFeatureError("feature columns differ from preprocessing")
     maps_payload = payload["category_maps"]
-    if not isinstance(maps_payload, Mapping) or tuple(maps_payload) != categorical:
+    if not isinstance(maps_payload, Mapping) or set(maps_payload) != set(categorical):
         raise HierarchicalFeatureError("category map columns differ")
     maps: dict[str, Mapping[str, int]] = {}
     for column in categorical:

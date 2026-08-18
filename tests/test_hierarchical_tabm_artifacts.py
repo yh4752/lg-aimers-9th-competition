@@ -37,6 +37,38 @@ def _bindings() -> MappingProxyType:
     )
 
 
+def _passed_report(
+    candidate_id: str, role: str, members: dict[str, Path]
+) -> dict[str, object]:
+    return {
+        "schema_version": 1,
+        "candidate_id": candidate_id,
+        "delivery_role": role,
+        "passed": True,
+        "independence": {
+            "row_count": 257,
+            "features_exact": True,
+            "maximum_probability_delta": 0.0,
+            "state_before": "1" * 64,
+            "state_after": "1" * 64,
+            "batch_sizes": [1, 257, 2048],
+        },
+        "resources": {
+            "row_count": 245789,
+            "python_version": "3.11.15",
+            "elapsed_seconds": 120.0,
+            "peak_gpu_bytes": 1,
+            "peak_rss_bytes": 2,
+            "artifact_bytes": 3,
+            "passed": True,
+        },
+        "validated_members": {
+            name: sha256(path.read_bytes()).hexdigest() for name, path in members.items()
+        },
+        "failure": None,
+    }
+
+
 def _campaign(tmp_path: Path, *, active: bool = True) -> CampaignEvidence:
     root = tmp_path / "source"
     contract = _write(root / "contract.json", {"campaign": "fixture"})
@@ -115,18 +147,32 @@ def test_binding_or_payload_tamper_is_rejected(tmp_path: Path) -> None:
 
 def test_candidate_delivery_is_review_only_and_contains_no_submission(tmp_path: Path) -> None:
     root = tmp_path / "delivery-source"
+    model = _write(root / "final_checkpoint.pt", b"model")
+    feature = _write(root / "feature_state.json", {"state": 1})
+    calibration = _write(root / "calibration_H2.json", {"kind": "H2"})
     evidence = DeliveryEvidence(
         bindings=_bindings(),
         delivery_roles=MappingProxyType({"H1": "final_candidate", "H2": "final_candidate"}),
-        final_checkpoint_path=_write(root / "final_checkpoint.pt", b"model"),
-        feature_state_path=_write(root / "feature_state.json", {"state": 1}),
+        final_checkpoint_path=model,
+        feature_state_path=feature,
         calibration_paths=MappingProxyType(
-            {"H2": _write(root / "calibration_H2.json", {"kind": "H2"})}
+            {"H2": calibration}
         ),
         independence_report_paths=MappingProxyType(
             {
-                "H1": _write(root / "independence_H1.json", {"accepted": True}),
-                "H2": _write(root / "independence_H2.json", {"accepted": True}),
+                "H1": _write(root / "independence_H1.json", _passed_report(
+                    "H1", "final_candidate", {
+                        "model/final_checkpoint.pt": model,
+                        "state/feature_state.json": feature,
+                    },
+                )),
+                "H2": _write(root / "independence_H2.json", _passed_report(
+                    "H2", "final_candidate", {
+                        "model/final_checkpoint.pt": model,
+                        "state/feature_state.json": feature,
+                        "state/calibration_H2.json": calibration,
+                    },
+                )),
             }
         ),
     )
@@ -144,16 +190,39 @@ def test_candidate_delivery_is_review_only_and_contains_no_submission(tmp_path: 
 
 def test_frontier_delivery_cannot_claim_final_acceptance(tmp_path: Path) -> None:
     root = tmp_path / "frontier"
+    model = _write(root / "model.pt", b"model")
+    feature = _write(root / "state.json", {})
     evidence = DeliveryEvidence(
         bindings=_bindings(),
         delivery_roles=MappingProxyType({"H1": "public_diagnostic_only"}),
-        final_checkpoint_path=_write(root / "model.pt", b"model"),
-        feature_state_path=_write(root / "state.json", {}),
+        final_checkpoint_path=model,
+        feature_state_path=feature,
         calibration_paths=MappingProxyType({}),
         independence_report_paths=MappingProxyType(
-            {"H1": _write(root / "decision.json", {"final_acceptance": False})}
+            {"H1": _write(root / "decision.json", _passed_report(
+                "H1", "public_diagnostic_only", {
+                    "model/final_checkpoint.pt": model,
+                    "state/feature_state.json": feature,
+                },
+            ))}
         ),
     )
     delivery = write_candidate_delivery(evidence, tmp_path / "out")
     manifest = verify_candidate_delivery(delivery, expected_bindings=evidence.bindings)
     assert manifest["delivery_roles"] == {"H1": "public_diagnostic_only"}
+
+
+def test_candidate_delivery_rejects_unsealed_independence_report(tmp_path: Path) -> None:
+    root = tmp_path / "invalid-report"
+    evidence = DeliveryEvidence(
+        bindings=_bindings(),
+        delivery_roles=MappingProxyType({"H1": "final_candidate"}),
+        final_checkpoint_path=_write(root / "model.pt", b"model"),
+        feature_state_path=_write(root / "state.json", {}),
+        calibration_paths=MappingProxyType({}),
+        independence_report_paths=MappingProxyType(
+            {"H1": _write(root / "report.json", {"passed": False})}
+        ),
+    )
+    with pytest.raises(HierarchicalArtifactError, match="independence"):
+        write_candidate_delivery(evidence, tmp_path / "out")

@@ -116,14 +116,17 @@ def quantile_bin_edges(values: np.ndarray, *, n_bins: int = 48) -> tuple[np.ndar
             "float32"
         )
         if len(edges) == 1:
-            value = edges[0]
-            edges = np.array(
-                [
-                    np.nextafter(value, np.float32("-inf")),
-                    np.nextafter(value, np.float32("inf")),
-                ],
-                dtype="float32",
-            )
+            value = float(edges[0])
+            width = max(1.0, abs(value)) * 1e-4
+            lower = np.float32(value - width)
+            upper = np.float32(value + width)
+            if not np.isfinite(lower):
+                lower = np.float32(value)
+            if not np.isfinite(upper):
+                upper = np.float32(value)
+            edges = np.array([lower, upper], dtype="float32")
+            if edges[0] == edges[1]:
+                raise ValueError("constant piecewise bin cannot be represented safely")
         if not np.isfinite(edges).all():
             raise ValueError("piecewise bin edges must remain finite")
         result.append(edges)

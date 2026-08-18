@@ -16,17 +16,21 @@ import pandas as pd
 from .artifacts import (
     CampaignBundles,
     CampaignEvidence,
+    DeliveryEvidence,
     restore_resume,
     write_campaign_bundles,
+    write_candidate_delivery,
 )
 from .calibration import (
     CalibrationSelection,
     CalibrationState,
+    canonical_state_json,
     fit_h2,
     fit_h3,
 )
 from .contracts import DEFAULT_CONTRACT, HierarchicalJob, build_jobs, load_contract
 from .metrics import CandidateDecision, candidate_decision_payload
+from .inference import CandidateValidation, validate_candidate_artifacts
 from .training import TrainingJobResult, training_result_payload
 
 
@@ -435,6 +439,8 @@ def run_campaign(
     )
     final_epochs = None
     final_completed = False
+    candidate_delivery = None
+    final_calibration_paths: dict[str, Path] = {}
     if delivery_ids:
         final_epochs = choose_final_epochs(
             [
@@ -462,7 +468,84 @@ def run_campaign(
             results[final_job.job_id] = final_result
             job_directories[final_job.job_id] = directory
         final_completed = True
-        status = "delivery_pending_validation"
+        for candidate_id in delivery_ids:
+            if candidate_id == "H1":
+                continue
+            final_state = fit_final_calibration(selections[candidate_id], oof)
+            path = output / "final_calibration" / f"{candidate_id}.json"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(canonical_state_json(final_state))
+            final_calibration_paths[candidate_id] = path
+        delivery_roles = MappingProxyType(
+            {
+                candidate_id: str(decisions[candidate_id].delivery_role)
+                for candidate_id in delivery_ids
+            }
+        )
+        validation_method = getattr(runtime, "validate_candidates", None)
+        if validation_method is None:
+            validation = validate_candidate_artifacts(
+                bindings=bindings,
+                delivery_roles=delivery_roles,
+                final_checkpoint_path=final_result.final_model_path,
+                feature_state_path=final_result.feature_state_path,
+                calibration_paths=MappingProxyType(final_calibration_paths),
+                audit_frame=train,
+                output_dir=output / "candidate_validation",
+                device=str(getattr(runtime, "inference_device", "cuda")),
+                contract=contract,
+            )
+        else:
+            validation = validation_method(
+                bindings=bindings,
+                delivery_roles=delivery_roles,
+                final_checkpoint_path=final_result.final_model_path,
+                feature_state_path=final_result.feature_state_path,
+                calibration_paths=MappingProxyType(final_calibration_paths),
+                audit_frame=train,
+                output_dir=output / "candidate_validation",
+                absolute_deadline=absolute_deadline,
+            )
+        if not isinstance(validation, CandidateValidation):
+            raise HierarchicalRunnerError("candidate validation result differs")
+        if (
+            set(validation.report_paths) != set(delivery_roles)
+            or not set(validation.accepted_roles).issubset(delivery_roles)
+            or any(
+                validation.accepted_roles[candidate_id] != delivery_roles[candidate_id]
+                for candidate_id in validation.accepted_roles
+            )
+        ):
+            raise HierarchicalRunnerError("candidate validation evidence differs")
+        for candidate_id, report_path in validation.report_paths.items():
+            decision_paths[f"inference_{candidate_id}"] = report_path
+        accepted_roles = dict(validation.accepted_roles)
+        if accepted_roles:
+            accepted_calibration = {
+                candidate_id: final_calibration_paths[candidate_id]
+                for candidate_id in accepted_roles
+                if candidate_id != "H1"
+            }
+            accepted_reports = {
+                candidate_id: validation.report_paths[candidate_id]
+                for candidate_id in accepted_roles
+            }
+            candidate_delivery = write_candidate_delivery(
+                DeliveryEvidence(
+                    bindings,
+                    MappingProxyType(accepted_roles),
+                    final_result.final_model_path,
+                    final_result.feature_state_path,
+                    MappingProxyType(accepted_calibration),
+                    MappingProxyType(accepted_reports),
+                ),
+                output / "candidate_delivery",
+            )
+            delivery_ids = tuple(accepted_roles)
+            status = "completed_candidate_delivery"
+        else:
+            delivery_ids = ()
+            status = "completed_validation_rejected"
     else:
         status = "completed_no_candidate"
     state = CampaignState(
@@ -479,4 +562,4 @@ def run_campaign(
         ),
         output / "bundles",
     )
-    return CampaignRun(state, bundles, None)
+    return CampaignRun(state, bundles, candidate_delivery)
