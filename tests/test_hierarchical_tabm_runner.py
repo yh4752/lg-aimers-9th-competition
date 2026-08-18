@@ -263,6 +263,29 @@ def test_no_eligible_candidate_skips_full_fit(tmp_path: Path) -> None:
     assert run.candidate_delivery is None
 
 
+def test_campaign_preserves_leading_zero_base_state_when_loading_csv(
+    tmp_path: Path,
+) -> None:
+    verified = _verified(tmp_path)
+    frame = pd.read_csv(verified.training.data_dir / "train.csv")
+    frame["base_state"] = ["000", "001", "010", "011", "100", "111"]
+    frame.to_csv(verified.training.data_dir / "train.csv", index=False)
+
+    class InspectingRuntime(FakeRuntime):
+        def select_k(self, fit_rows, valid_rows):
+            assert fit_rows["base_state"].tolist() == ["000", "001", "010"]
+            assert valid_rows["base_state"].tolist() == ["011"]
+            raise RuntimeError("inspection complete")
+
+    with pytest.raises(RuntimeError, match="inspection complete"):
+        run_campaign(
+            verified, tmp_path / "run", resume_bundle=None,
+            absolute_deadline=time.time() + 3600,
+            runtime=InspectingRuntime(tmp_path),
+            on_verified_resume=lambda path: None,
+        )
+
+
 def test_runner_publishes_atomic_active_and_completed_job_state(tmp_path: Path) -> None:
     class StateObservingRuntime(FakeRuntime):
         def run_oof(self, job, **kwargs):

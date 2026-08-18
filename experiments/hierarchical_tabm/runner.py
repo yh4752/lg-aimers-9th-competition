@@ -386,7 +386,10 @@ def run_campaign(
     log_path = output / "campaign.log"
     log_path.write_text("CAMPAIGN_START\n", encoding="utf-8")
     bindings = MappingProxyType(dict(runtime.bindings))
-    train = pd.read_csv(verified.training.data_dir / "train.csv")
+    train = pd.read_csv(
+        verified.training.data_dir / "train.csv",
+        dtype={"row_id": "string", "base_state": "string"},
+    )
     restored = None
     restored_results: dict[str, TrainingJobResult] = {}
     restored_directories: dict[str, Path] = {}
