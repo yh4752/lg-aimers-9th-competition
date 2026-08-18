@@ -1,18 +1,24 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from hashlib import sha256
 import json
 import math
 import os
 from pathlib import Path
 import time
-from types import MappingProxyType
+from types import MappingProxyType, SimpleNamespace
 from typing import Mapping, Protocol, Sequence
 
 import numpy as np
 import pandas as pd
 
-from .artifacts import CampaignBundles, CampaignEvidence, write_campaign_bundles
+from .artifacts import (
+    CampaignBundles,
+    CampaignEvidence,
+    restore_resume,
+    write_campaign_bundles,
+)
 from .calibration import (
     CalibrationSelection,
     CalibrationState,
@@ -181,6 +187,146 @@ def _ensure_worker_result(result: TrainingJobResult, directory: Path) -> None:
         _atomic_json(path, training_result_payload(result))
 
 
+def _file_sha256(path: Path) -> str:
+    digest = sha256()
+    with path.open("rb") as stream:
+        while chunk := stream.read(1024 * 1024):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _restored_path(
+    directory: Path,
+    payload: Mapping[str, object],
+    *,
+    name_key: str,
+    sha_key: str,
+) -> Path | None:
+    name = payload[name_key]
+    digest = payload[sha_key]
+    if name is None or digest is None:
+        if name is not None or digest is not None:
+            raise HierarchicalRunnerError("restored worker artifact binding is incomplete")
+        return None
+    if (
+        not isinstance(name, str)
+        or not name
+        or Path(name).name != name
+        or not isinstance(digest, str)
+        or len(digest) != 64
+    ):
+        raise HierarchicalRunnerError("restored worker artifact binding is invalid")
+    path = directory / name
+    if path.is_symlink() or not path.is_file() or _file_sha256(path) != digest:
+        raise HierarchicalRunnerError("restored worker artifact hash differs")
+    return path
+
+
+def _restored_result(directory: Path, expected_job: HierarchicalJob) -> TrainingJobResult:
+    result_path = directory / "worker_result.json"
+    if result_path.is_symlink() or not result_path.is_file():
+        raise HierarchicalRunnerError("restored worker result is missing")
+    try:
+        payload = json.loads(result_path.read_text(encoding="utf-8"))
+    except Exception as error:
+        raise HierarchicalRunnerError("restored worker result is unreadable") from error
+    expected_keys = {
+        "schema_version", "job_id", "kind", "status", "train_rows", "valid_rows",
+        "best_epoch", "best_brier", "completed_epochs", "predictions", "checkpoint",
+        "final_model", "feature_state", "failure", "predictions_sha256",
+        "checkpoint_sha256", "final_model_sha256", "feature_state_sha256",
+    }
+    if (
+        type(payload) is not dict
+        or set(payload) != expected_keys
+        or payload["schema_version"] != 1
+        or payload["job_id"] != expected_job.job_id
+        or payload["kind"] != expected_job.kind
+        or payload["status"] != "completed"
+        or payload["failure"] is not None
+    ):
+        raise HierarchicalRunnerError("restored worker result identity differs")
+    integer_keys = ("train_rows", "completed_epochs")
+    if any(
+        isinstance(payload[key], bool)
+        or not isinstance(payload[key], int)
+        or payload[key] <= 0
+        for key in integer_keys
+    ):
+        raise HierarchicalRunnerError("restored worker result counters are invalid")
+    if expected_job.kind == "oof":
+        if (
+            isinstance(payload["valid_rows"], bool)
+            or not isinstance(payload["valid_rows"], int)
+            or payload["valid_rows"] <= 0
+            or isinstance(payload["best_epoch"], bool)
+            or not isinstance(payload["best_epoch"], int)
+            or payload["best_epoch"] < 0
+            or isinstance(payload["best_brier"], bool)
+            or not isinstance(payload["best_brier"], (int, float))
+            or not math.isfinite(float(payload["best_brier"]))
+        ):
+            raise HierarchicalRunnerError("restored OOF metrics are invalid")
+    elif any(payload[key] is not None for key in ("valid_rows", "best_epoch", "best_brier")):
+        raise HierarchicalRunnerError("restored full-fit metrics differ")
+    predictions = _restored_path(
+        directory, payload, name_key="predictions", sha_key="predictions_sha256"
+    )
+    checkpoint = _restored_path(
+        directory, payload, name_key="checkpoint", sha_key="checkpoint_sha256"
+    )
+    final_model = _restored_path(
+        directory, payload, name_key="final_model", sha_key="final_model_sha256"
+    )
+    feature_state = _restored_path(
+        directory, payload, name_key="feature_state", sha_key="feature_state_sha256"
+    )
+    if checkpoint is None or feature_state is None:
+        raise HierarchicalRunnerError("restored worker state is incomplete")
+    if expected_job.kind == "oof" and (predictions is None or final_model is not None):
+        raise HierarchicalRunnerError("restored OOF artifacts differ")
+    if expected_job.kind == "full_fit" and (predictions is not None or final_model is None):
+        raise HierarchicalRunnerError("restored full-fit artifacts differ")
+    return TrainingJobResult(
+        expected_job.job_id,
+        expected_job.kind,
+        "completed",
+        int(payload["train_rows"]),
+        None if payload["valid_rows"] is None else int(payload["valid_rows"]),
+        None if payload["best_epoch"] is None else int(payload["best_epoch"]),
+        None if payload["best_brier"] is None else float(payload["best_brier"]),
+        int(payload["completed_epochs"]),
+        predictions,
+        checkpoint,
+        final_model,
+        feature_state,
+        None,
+    )
+
+
+def _restored_selection(path: Path, selected_k: object) -> object:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as error:
+        raise HierarchicalRunnerError("restored K selection is unreadable") from error
+    if (
+        type(payload) is not dict
+        or set(payload) != {"fold", "selected_k", "scores", "row_count"}
+        or payload["fold"] != "2021->2022"
+        or isinstance(payload["selected_k"], bool)
+        or not isinstance(payload["selected_k"], (int, float))
+        or not math.isfinite(float(payload["selected_k"]))
+        or float(payload["selected_k"]) <= 0
+        or selected_k != payload["selected_k"]
+        or type(payload["scores"]) is not dict
+        or isinstance(payload["row_count"], bool)
+        or not isinstance(payload["row_count"], int)
+        or payload["row_count"] <= 0
+    ):
+        raise HierarchicalRunnerError("restored K selection differs")
+    return SimpleNamespace(**payload)
+
+
 def run_campaign(
     verified: object,
     output_dir: Path,
@@ -190,7 +336,6 @@ def run_campaign(
     runtime: CampaignRuntime,
     on_verified_resume,
 ) -> CampaignRun:
-    del resume_bundle, on_verified_resume  # Resume restoration is wired by the Colab supervisor.
     contract = load_contract()
     output = Path(output_dir)
     if output.exists() or output.is_symlink():
@@ -200,19 +345,54 @@ def run_campaign(
     log_path.write_text("CAMPAIGN_START\n", encoding="utf-8")
     bindings = MappingProxyType(dict(runtime.bindings))
     train = pd.read_csv(verified.training.data_dir / "train.csv")
-    _deadline(absolute_deadline)
-    selection = runtime.select_k(
-        train.loc[train["season"] <= 2021].copy(),
-        train.loc[train["season"] == 2022].copy(),
-    )
+    restored = None
+    restored_results: dict[str, TrainingJobResult] = {}
+    restored_directories: dict[str, Path] = {}
+    jobs = build_jobs(contract)
+    jobs_by_id = {job.job_id: job for job in jobs}
+    if resume_bundle is not None:
+        _deadline(absolute_deadline)
+        restored = restore_resume(
+            Path(resume_bundle),
+            output / "restored_resume",
+            expected_bindings=bindings,
+            check_deadline=lambda: _deadline(absolute_deadline),
+        )
+        if restored.active_job_directory is not None:
+            raise HierarchicalRunnerError("active worker resume requires supervisor promotion")
+        if restored.state.get("schema_version") != 1 or restored.state.get("bindings") != dict(bindings):
+            raise HierarchicalRunnerError("restored campaign identity differs")
+        completed = restored.state.get("completed_job_ids")
+        if (
+            type(completed) is not list
+            or len(completed) != len(set(completed))
+            or any(not isinstance(job_id, str) or job_id not in jobs_by_id for job_id in completed)
+        ):
+            raise HierarchicalRunnerError("restored completed job set differs")
+        for job_id in completed:
+            directory = restored.completed_job_directories[job_id]
+            restored_results[job_id] = _restored_result(directory, jobs_by_id[job_id])
+            restored_directories[job_id] = directory
+        selection_path = restored.root / "k_selection.json"
+        if not selection_path.is_file():
+            raise HierarchicalRunnerError("restored K selection is missing")
+        selection = _restored_selection(selection_path, restored.state.get("selected_k"))
+        on_verified_resume(Path(resume_bundle))
+    else:
+        _deadline(absolute_deadline)
+        selection = runtime.select_k(
+            train.loc[train["season"] <= 2021].copy(),
+            train.loc[train["season"] == 2022].copy(),
+        )
     selected_k = float(selection.selected_k)
     k_path = output / "k_selection.json"
     _atomic_json(k_path, _selection_payload(selection))
 
-    jobs = build_jobs(contract)
-    results: dict[str, TrainingJobResult] = {}
-    job_directories: dict[str, Path] = {}
+    results: dict[str, TrainingJobResult] = dict(restored_results)
+    job_directories: dict[str, Path] = dict(restored_directories)
     for job in jobs[:2]:
+        if job.job_id in results:
+            continue
         _deadline(absolute_deadline, guard_seconds=0.0)
         directory = output / "jobs" / job.job_id
         result = runtime.run_oof(
@@ -266,16 +446,21 @@ def run_campaign(
         )
         _deadline(absolute_deadline)
         final_job = jobs[2]
-        directory = output / "jobs" / final_job.job_id
-        final_result = runtime.run_full_fit(
-            final_job, output_dir=directory, selected_k=selected_k,
-            absolute_deadline=absolute_deadline, final_epochs=final_epochs,
-        )
+        if final_job.job_id in results:
+            final_result = results[final_job.job_id]
+            directory = job_directories[final_job.job_id]
+        else:
+            directory = output / "jobs" / final_job.job_id
+            final_result = runtime.run_full_fit(
+                final_job, output_dir=directory, selected_k=selected_k,
+                absolute_deadline=absolute_deadline, final_epochs=final_epochs,
+            )
         if final_result.status != "completed" or final_result.final_model_path is None:
             raise HierarchicalRunnerError("full fit did not complete")
-        _ensure_worker_result(final_result, directory)
-        results[final_job.job_id] = final_result
-        job_directories[final_job.job_id] = directory
+        if final_job.job_id not in results:
+            _ensure_worker_result(final_result, directory)
+            results[final_job.job_id] = final_result
+            job_directories[final_job.job_id] = directory
         final_completed = True
         status = "delivery_pending_validation"
     else:

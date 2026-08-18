@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from hashlib import sha256
+import json
 from pathlib import Path
 from types import MappingProxyType, SimpleNamespace
 import time
@@ -9,7 +10,8 @@ import pandas as pd
 import pytest
 
 from experiments.hierarchical_tabm.calibration import fit_h2
-from experiments.hierarchical_tabm.contracts import build_jobs, load_contract
+from experiments.hierarchical_tabm.artifacts import CampaignEvidence, write_campaign_bundles
+from experiments.hierarchical_tabm.contracts import DEFAULT_CONTRACT, build_jobs, load_contract
 from experiments.hierarchical_tabm.metrics import CandidateDecision
 from experiments.hierarchical_tabm.runner import (
     choose_final_epochs,
@@ -17,6 +19,7 @@ from experiments.hierarchical_tabm.runner import (
     run_campaign,
 )
 from experiments.hierarchical_tabm.training import TrainingJobResult
+from experiments.hierarchical_tabm.training import training_result_payload
 
 
 def test_final_epoch_is_row_weighted_median_clamped_to_contract() -> None:
@@ -141,3 +144,61 @@ def test_no_eligible_candidate_skips_full_fit(tmp_path: Path) -> None:
     assert "full_fit_2019_2024" not in runtime.calls
     assert run.state.status == "completed_no_candidate"
     assert run.candidate_delivery is None
+
+
+def test_resume_reuses_verified_k_and_completed_first_fold(tmp_path: Path) -> None:
+    verified = _verified(tmp_path)
+    source_runtime = FakeRuntime(tmp_path)
+    first_job = build_jobs(load_contract())[0]
+    first_dir = tmp_path / "partial-source" / "jobs" / first_job.job_id
+    first_result = source_runtime.run_oof(first_job, output_dir=first_dir)
+    (first_dir / "worker_result.json").write_text(
+        json.dumps(training_result_payload(first_result), sort_keys=True, separators=(",", ":"))
+    )
+    root = tmp_path / "partial-source"
+    k_path = root / "k_selection.json"
+    k_path.write_text(
+        json.dumps(
+            {"fold": "2021->2022", "selected_k": 128.0, "scores": {"32.0": 0.2}, "row_count": 1}
+        )
+    )
+    state_path = root / "stage_state.json"
+    state_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "status": "running",
+                "bindings": dict(source_runtime.bindings),
+                "selected_k": 128.0,
+                "completed_job_ids": [first_job.job_id],
+                "active_job_id": None,
+                "decisions": {},
+                "delivery_candidate_ids": [],
+                "final_epochs": None,
+                "final_fit_completed": False,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+    )
+    log = root / "campaign.log"; log.write_text("CAMPAIGN_START\n")
+    resume = write_campaign_bundles(
+        CampaignEvidence(
+            source_runtime.bindings, DEFAULT_CONTRACT, log, state_path, k_path,
+            MappingProxyType({first_job.job_id: first_dir}),
+            MappingProxyType({}), MappingProxyType({}), None,
+        ),
+        tmp_path / "partial-bundles",
+    ).resume
+
+    runtime = FakeRuntime(tmp_path)
+    callbacks: list[Path] = []
+    run_campaign(
+        verified, tmp_path / "resumed-run", resume_bundle=resume,
+        absolute_deadline=time.time() + 60, runtime=runtime,
+        on_verified_resume=callbacks.append,
+    )
+    assert callbacks == [resume]
+    assert "select_k_2021_2022" not in runtime.calls
+    assert "oof_2022_2023" not in runtime.calls
+    assert "oof_2023_2024" in runtime.calls
