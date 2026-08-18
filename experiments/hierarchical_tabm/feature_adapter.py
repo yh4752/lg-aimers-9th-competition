@@ -11,7 +11,7 @@ import numpy as np
 import pandas as pd
 
 from experiments.independent_dl.features import FeatureBatch
-from experiments.independent_dl.models.common import ModelMetadata
+from experiments.independent_dl.models.common import ModelMetadata, quantile_bin_edges
 from experiments.independent_dl.preprocessing import (
     PreprocessingSpec,
     PreprocessingState,
@@ -57,6 +57,7 @@ class HierarchicalFeatureState:
     numeric_columns: tuple[str, ...]
     categorical_columns: tuple[str, ...]
     category_maps: Mapping[str, Mapping[str, int]]
+    piecewise_bin_edges: tuple[tuple[float, ...], ...]
     pitcher_k: float
     batter_k: float
 
@@ -342,6 +343,7 @@ def _feature_body(state: HierarchicalFeatureState) -> dict[str, object]:
         "category_maps": {
             column: dict(state.category_maps[column]) for column in state.categorical_columns
         },
+        "piecewise_bin_edges": [list(edges) for edges in state.piecewise_bin_edges],
         "pitcher_k": state.pitcher_k,
         "batter_k": state.batter_k,
     }
@@ -361,8 +363,8 @@ def feature_state_from_payload(payload: Mapping[str, object]) -> HierarchicalFea
         raise HierarchicalFeatureError("feature state payload is invalid")
     expected = {
         "schema_version", "context", "context_sha256", "preprocessing",
-        "numeric_columns", "categorical_columns", "category_maps", "pitcher_k",
-        "batter_k", "state_sha256",
+        "numeric_columns", "categorical_columns", "category_maps",
+        "piecewise_bin_edges", "pitcher_k", "batter_k", "state_sha256",
     }
     _exact_keys(payload, expected, "feature state")
     if payload["schema_version"] != 1:
@@ -399,12 +401,31 @@ def feature_state_from_payload(payload: Mapping[str, object]) -> HierarchicalFea
         if list(parsed) != sorted(parsed) or list(parsed.values()) != list(range(1, len(parsed) + 1)):
             raise HierarchicalFeatureError("category indices are invalid")
         maps[column] = MappingProxyType(parsed)
+    raw_edges = payload["piecewise_bin_edges"]
+    if not isinstance(raw_edges, list) or len(raw_edges) != len(numeric):
+        raise HierarchicalFeatureError("piecewise bin edge columns differ")
+    piecewise_edges: list[tuple[float, ...]] = []
+    for raw_column in raw_edges:
+        if not isinstance(raw_column, list) or len(raw_column) < 2:
+            raise HierarchicalFeatureError("piecewise bin edges are invalid")
+        column_edges: list[float] = []
+        for value in raw_column:
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise HierarchicalFeatureError("piecewise bin edges are invalid")
+            number = float(value)
+            if not math.isfinite(number):
+                raise HierarchicalFeatureError("piecewise bin edges are invalid")
+            column_edges.append(number)
+        if any(right <= left for left, right in zip(column_edges, column_edges[1:])):
+            raise HierarchicalFeatureError("piecewise bin edges are invalid")
+        piecewise_edges.append(tuple(column_edges))
     state = HierarchicalFeatureState(
         context,
         MappingProxyType(_preprocessing_payload(preprocessing)),
         numeric,
         categorical,
         MappingProxyType(maps),
+        tuple(piecewise_edges),
         _positive_finite(payload["pitcher_k"], "pitcher_k"),
         _positive_finite(payload["batter_k"], "batter_k"),
     )
@@ -449,31 +470,37 @@ def prepare_fold(
     )
     valid_prepared = transform_preprocessor(valid_source, preprocessing)
     maps = _category_maps(fit_prepared, preprocessing.categorical_columns)
+    train_batch = _build_batch(
+        fit_rows, fit_prepared,
+        numeric_columns=preprocessing.numeric_columns,
+        categorical_columns=preprocessing.categorical_columns,
+        category_maps=maps,
+    )
+    valid_batch = _build_batch(
+        valid_rows, valid_prepared,
+        numeric_columns=preprocessing.numeric_columns,
+        categorical_columns=preprocessing.categorical_columns,
+        category_maps=maps,
+    )
+    piecewise_arrays = quantile_bin_edges(train_batch.x_num)
+    piecewise_edges = tuple(
+        tuple(float(value) for value in edges) for edges in piecewise_arrays
+    )
     state = HierarchicalFeatureState(
         context_state,
         MappingProxyType(_preprocessing_payload(preprocessing)),
         preprocessing.numeric_columns,
         preprocessing.categorical_columns,
         maps,
+        piecewise_edges,
         pitcher_smoothing,
         batter_smoothing,
-    )
-    train_batch = _build_batch(
-        fit_rows, fit_prepared,
-        numeric_columns=state.numeric_columns,
-        categorical_columns=state.categorical_columns,
-        category_maps=state.category_maps,
-    )
-    valid_batch = _build_batch(
-        valid_rows, valid_prepared,
-        numeric_columns=state.numeric_columns,
-        categorical_columns=state.categorical_columns,
-        category_maps=state.category_maps,
     )
     metadata = ModelMetadata(
         n_num_features=train_batch.x_num.shape[1],
         categorical_cardinalities=tuple(len(maps[column]) + 1 for column in state.categorical_columns),
         train_x_num=train_batch.x_num,
+        piecewise_bin_edges=piecewise_arrays,
     )
     return PreparedFold(train_batch, valid_batch, state, metadata)
 

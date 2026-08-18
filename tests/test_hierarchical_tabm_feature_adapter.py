@@ -143,6 +143,12 @@ def test_prepare_fold_uses_loo_for_train_and_frozen_for_valid() -> None:
     assert prepared.train.y.tolist() == train["control_success"].astype(float).tolist()
     assert prepared.metadata.n_num_features == prepared.train.x_num.shape[1]
     assert prepared.metadata.train_x_num is prepared.train.x_num
+    assert prepared.metadata.piecewise_bin_edges is not None
+    assert len(prepared.metadata.piecewise_bin_edges) == prepared.metadata.n_num_features
+    assert tuple(
+        tuple(float(value) for value in edges)
+        for edges in prepared.metadata.piecewise_bin_edges
+    ) == prepared.state.piecewise_bin_edges
     assert tuple(prepared.state.numeric_columns[-8:]) == EXPECTED_HIERARCHY_COLUMNS
     assert prepared.state.categorical_columns.count("hand_matchup") == 1
     assert np.isfinite(prepared.train.x_num).all()
@@ -195,6 +201,7 @@ def test_feature_state_round_trip_is_canonical_and_exact() -> None:
 
     assert feature_state_payload(restored) == payload
     assert feature_state_sha256(restored) == feature_state_sha256(prepared.state)
+    assert restored.piecewise_bin_edges == prepared.state.piecewise_bin_edges
     assert _batch_by_id(transform_with_state(valid, restored)) == _batch_by_id(
         transform_with_state(valid, prepared.state)
     )
