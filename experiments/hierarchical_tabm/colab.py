@@ -119,12 +119,14 @@ class SubprocessCampaignRuntime:
         self._contract = load_contract()
 
     def select_k(self, fit_rows, valid_rows):
-        return select_smoothing_k(
+        selection = select_smoothing_k(
             fit_rows,
             valid_rows,
             self._contract.k_candidates,
             tie_tolerance=self._contract.k_tie_tolerance,
         )
+        print(f"HIER_CONTEXT_SELECTED k={selection.selected_k:g}", flush=True)
+        return selection
 
     def _run_job(self, job: HierarchicalJob, **kwargs: object):
         output = Path(kwargs["output_dir"])
@@ -162,6 +164,13 @@ class SubprocessCampaignRuntime:
         environment["PYTHONPATH"] = repository + os.pathsep + environment.get("PYTHONPATH", "")
         self._active_job = job
         self._active_directory = output
+        fold = (
+            f"{job.train_end_year}->{job.valid_year}"
+            if job.valid_year is not None else f"2019->{job.train_end_year}"
+        )
+        if job.kind == "full_fit":
+            print(f"HIER_FULL_TRAIN_START fold={fold}", flush=True)
+        print(f"HIER_JOB_START fold={fold} job={job.job_id}", flush=True)
         self._process = subprocess.Popen(
             command,
             stdout=subprocess.PIPE,
@@ -179,12 +188,19 @@ class SubprocessCampaignRuntime:
                     print(line, end="", flush=True)
                     log.write(line)
                     log.flush()
+                    if "TRAINING_PROGRESS" in line:
+                        print(f"HIER_TRAINING_PROGRESS fold={fold}", flush=True)
             return_code = self._process.wait()
             if return_code != 0 and not (output / "worker_result.json").is_file():
                 raise HierarchicalColabError(
                     f"training subprocess failed without result: {job.job_id}"
                 )
-            return _restored_result(output, job)
+            result = _restored_result(output, job)
+            print(
+                f"HIER_JOB_END fold={fold} job={job.job_id} status={result.status}",
+                flush=True,
+            )
+            return result
         finally:
             self._process = None
             self._active_job = None
@@ -222,7 +238,11 @@ class SubprocessCampaignRuntime:
                 anchors, oof, segment_min_rows=self._contract.segment_min_rows
             )
             self._metrics["H1"] = metrics
-            return decide_h1(metrics, self._contract)
+            decision = decide_h1(metrics, self._contract)
+            print(
+                f"HIER_DECISION candidate=H1 status={decision.status}", flush=True
+            )
+            return decision
         selection = kwargs["selections"][candidate_id]
         calibrated = {}
         for fold, frame in oof.items():
@@ -235,13 +255,18 @@ class SubprocessCampaignRuntime:
             anchors, calibrated, segment_min_rows=self._contract.segment_min_rows
         )
         self._metrics[candidate_id] = metrics
-        return decide_calibrated(
+        decision = decide_calibrated(
             candidate_id,
             self._metrics["H1"],
             metrics,
             self._contract,
             h2_metrics=self._metrics.get("H2"),
         )
+        print(
+            f"HIER_DECISION candidate={candidate_id} status={decision.status}",
+            flush=True,
+        )
+        return decision
 
     def active_checkpoint(self) -> ActiveCheckpoint | None:
         job = self._active_job
