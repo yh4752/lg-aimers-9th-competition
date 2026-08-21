@@ -57,6 +57,7 @@
 - [TabM Kaggle 실행 안내](docs/TABM_CHAMPION_KAGGLE.md): A–D 입력, 시간, 로그와 전달 파일
 - [TabM 행 단위 파생변수 실행 안내](docs/TABM_ROW_FEATURE_PROXY_RUNBOOK.md): Stage P 입력, Colab 재개와 검토 파일
 - [CatBoost·TabM 블렌드 실행 안내](docs/CATBOOST_TABM_BLEND_COLAB.md): Stage C 재사용, Colab 재개와 판정 파일
+- [CatBoost 50:50 배포 정렬 재검증 실행 안내](docs/CATBOOST_50_50_REALIGN_RUNBOOK.md): 세 fold 재검증, T4 재개와 조건부 전체 학습
 - [CatBoost 고정 트리 수·전체 학습 안내](docs/CATBOOST_DEPLOYMENT_TRAINING_COLAB.md): 70:30 고정 블렌드 확인, 중단 재개와 전달 파일
 - [계층적 문맥 TabM H1/H2/H3 Colab 실행](docs/HIERARCHICAL_TABM_COLAB.md): 시간 전이·segment gate, 중단 재개와 전달 파일
 - [TabM 첫 공식 제출](docs/rounds/07-tabm-first-submission.md): 모델, 점수와 해석

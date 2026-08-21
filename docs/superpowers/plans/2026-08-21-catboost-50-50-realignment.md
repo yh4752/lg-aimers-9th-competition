@@ -1001,7 +1001,7 @@ delivery가 없는 것이 정상이라고 설명한다.
 - [ ] **Step 2: README에 runbook 링크 추가**
 
 ```markdown
-- [CatBoost 50:50 배포 정렬 재검증 실행 안내](docs/CATBOOST_50_50_REALIGN_RUNBOOK.md)
+- [CatBoost 50:50 배포 정렬 재검증 실행 안내](../../CATBOOST_50_50_REALIGN_RUNBOOK.md)
 ```
 
 - [ ] **Step 3: focused suite 실행**
