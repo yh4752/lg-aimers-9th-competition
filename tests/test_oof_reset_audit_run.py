@@ -114,9 +114,13 @@ def test_shared_fold_drift_with_high_residual_correlation_supports_recency(tmp_p
         _prediction("safe_model", FOLDS[0], 0.07),
         _prediction("safe_model", FOLDS[1], 0.02),
     ]
+    for item in values:
+        if item.fold == FOLDS[0]:
+            item.frame["probability"] += 0.02
     result = run_audit(predictions=values, inventory=_inventory(), output_root=tmp_path)
     decision = json.loads((result.output_dir / "next_experiment.json").read_text())
     assert "RECENCY_WEIGHTING" in decision["supported_directions"]
+    assert decision["evidence"]["recency_weighting"]["common_calibration_shift"] is True
     assert decision["manual_review_required"] is True
 
 

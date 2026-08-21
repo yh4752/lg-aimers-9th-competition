@@ -198,13 +198,21 @@ def _diagnose(
     common_direction = False
     fold_order = ["2022->2023", "2023->2024"]
     changes = []
+    calibration_changes = []
     for _, group in model[model["trust"] == TrustClass.RULE_SAFE.value].groupby("model_id"):
         indexed = group.set_index("fold")
         if all(fold in indexed.index for fold in fold_order):
             changes.append(float(indexed.loc[fold_order[1], "brier"] - indexed.loc[fold_order[0], "brier"]))
+            old_gap = float(indexed.loc[fold_order[0], "prediction_mean"] - indexed.loc[fold_order[0], "target_mean"])
+            latest_gap = float(indexed.loc[fold_order[1], "prediction_mean"] - indexed.loc[fold_order[1], "target_mean"])
+            calibration_changes.append(latest_gap - old_gap)
     high_residual = bool(not correlations.empty and correlations.loc[correlations["trust"] == TrustClass.RULE_SAFE.value, "residual_correlation"].dropna().gt(0.9).any())
     common_direction = len(changes) >= 2 and (all(value > 0 for value in changes) or all(value < 0 for value in changes))
-    recency = common_direction and high_residual
+    common_calibration = len(calibration_changes) >= 2 and (
+        all(value > 1e-12 for value in calibration_changes)
+        or all(value < -1e-12 for value in calibration_changes)
+    )
+    recency = common_direction and common_calibration and high_residual
     diverse = bool(blend_candidates)
     stop = not recency and not diverse
     supported = [name for name, value in (
@@ -219,7 +227,12 @@ def _diagnose(
         "missing_evidence": missing,
         "supported_directions": supported,
         "evidence": {
-            "recency_weighting": {"supported": recency, "common_fold_direction": common_direction, "high_residual_correlation": high_residual},
+            "recency_weighting": {
+                "supported": recency,
+                "common_fold_direction": common_direction,
+                "common_calibration_shift": common_calibration,
+                "high_residual_correlation": high_residual,
+            },
             "diverse_blend": {"supported": diverse, "stable_candidates": blend_candidates},
             "stop_and_reframe": {"supported": stop, "reason": "no stable safe improvement" if stop else "other evidence exists"},
         },
