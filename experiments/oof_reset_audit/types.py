@@ -13,6 +13,7 @@ class TrustClass(str, Enum):
 
 
 class ArtifactRole(str, Enum):
+    UNKNOWN = "unknown"
     STAGE_C_TABM = "stage_c_tabm"
     ROW_FEATURE = "row_feature"
     CATBOOST_BLEND = "catboost_blend"
