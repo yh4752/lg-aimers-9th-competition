@@ -371,15 +371,106 @@ def test_resume_reuses_verified_k_and_completed_first_fold(tmp_path: Path) -> No
 
     runtime = FakeRuntime(tmp_path)
     callbacks: list[Path] = []
+    resumed_output = tmp_path / "resumed-run"
+
+    def observe_progress(path: Path) -> None:
+        state = json.loads(path.read_text())
+        for job_id in state["completed_job_ids"]:
+            assert (resumed_output / "jobs" / job_id).is_dir()
+
     run_campaign(
-        verified, tmp_path / "resumed-run", resume_bundle=resume,
+        verified, resumed_output, resume_bundle=resume,
         absolute_deadline=time.time() + 3600, runtime=runtime,
         on_verified_resume=callbacks.append,
+        on_progress_state=observe_progress,
     )
     assert callbacks == [resume]
     assert "select_k_2021_2022" not in runtime.calls
     assert "oof_2022_2023" not in runtime.calls
     assert "oof_2023_2024" in runtime.calls
+
+
+def test_exact_pre_metric_fix_resume_reuses_both_completed_oof_folds(
+    tmp_path: Path,
+) -> None:
+    verified = _verified(tmp_path)
+    runtime = FakeRuntime(tmp_path, h1_status="rejected")
+    legacy_bindings = dict(runtime.bindings)
+    legacy_bindings["code_sha256"] = (
+        "cdd9f63f48c79f6b715c58a2dc455fb177ae12e40335a4b3a64d5f9599273c60"
+    )
+    source_runtime = FakeRuntime(tmp_path)
+    source_runtime.bindings = MappingProxyType(legacy_bindings)
+    root = tmp_path / "legacy-source"
+    completed = {}
+    for job in build_jobs(load_contract())[:2]:
+        directory = root / "jobs" / job.job_id
+        result = source_runtime.run_oof(job, output_dir=directory)
+        (directory / "worker_result.json").write_text(
+            json.dumps(
+                training_result_payload(result), sort_keys=True, separators=(",", ":")
+            )
+        )
+        completed[job.job_id] = directory
+    k_path = root / "k_selection.json"
+    k_path.write_text(json.dumps({
+        "fold": "2021->2022", "selected_k": 128.0,
+        "scores": {"32.0": 0.2}, "row_count": 1,
+    }))
+    state_path = root / "stage_state.json"
+    state_path.write_text(json.dumps({
+        "schema_version": 1, "status": "running",
+        "bindings": legacy_bindings, "selected_k": 128.0,
+        "completed_job_ids": list(completed), "active_job_id": None,
+        "decisions": {}, "delivery_candidate_ids": [],
+        "final_epochs": None, "final_fit_completed": False,
+    }))
+    log = root / "campaign.log"
+    log.write_text("CAMPAIGN_START\n")
+    resume = write_campaign_bundles(
+        CampaignEvidence(
+            MappingProxyType(legacy_bindings), DEFAULT_CONTRACT, log, state_path,
+            k_path, MappingProxyType(completed), MappingProxyType({}),
+            MappingProxyType({}), None,
+        ),
+        tmp_path / "legacy-bundles",
+    ).resume
+
+    run = run_campaign(
+        verified, tmp_path / "legacy-resumed-run", resume_bundle=resume,
+        absolute_deadline=time.time() + 3600, runtime=runtime,
+        on_verified_resume=lambda path: None,
+    )
+
+    assert not any(call.startswith("oof_") for call in runtime.calls)
+    assert run.state.status == "completed_no_candidate"
+    assert "LEGACY_RESUME_ACCEPTED" in (
+        tmp_path / "legacy-resumed-run" / "campaign.log"
+    ).read_text()
+
+    first_job_id = next(iter(completed))
+    partial_state = root / "partial_stage_state.json"
+    partial_state.write_text(json.dumps({
+        "schema_version": 1, "status": "running",
+        "bindings": legacy_bindings, "selected_k": 128.0,
+        "completed_job_ids": [first_job_id], "active_job_id": None,
+        "decisions": {}, "delivery_candidate_ids": [],
+        "final_epochs": None, "final_fit_completed": False,
+    }))
+    partial_resume = write_campaign_bundles(
+        CampaignEvidence(
+            MappingProxyType(legacy_bindings), DEFAULT_CONTRACT, log, partial_state,
+            k_path, MappingProxyType({first_job_id: completed[first_job_id]}),
+            MappingProxyType({}), MappingProxyType({}), None,
+        ),
+        tmp_path / "partial-legacy-bundles",
+    ).resume
+    with pytest.raises(HierarchicalRunnerError, match="sealed pre-decision state"):
+        run_campaign(
+            verified, tmp_path / "partial-legacy-run", resume_bundle=partial_resume,
+            absolute_deadline=time.time() + 3600, runtime=FakeRuntime(tmp_path),
+            on_verified_resume=lambda path: None,
+        )
 
 
 def test_resume_passes_verified_active_checkpoint_to_matching_job(tmp_path: Path) -> None:

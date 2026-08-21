@@ -38,8 +38,8 @@ def _prediction(ids=("r1", "r2", "r3"), probability=(0.2, 0.8, 0.4)):
 
 def test_aligns_only_exact_row_id_and_target_sets() -> None:
     anchor = _prediction()
-    h1 = _prediction(ids=("r3", "r1", "r2"), probability=(0.3, 0.1, 0.7))
-    h1["target"] = [0, 0, 1]
+    h1 = anchor.set_index("row_id", drop=False).loc[["r3", "r1", "r2"]].reset_index(drop=True)
+    h1["probability"] = [0.3, 0.1, 0.7]
     aligned = align_anchor_and_h1(anchor, h1)
     assert aligned["row_id"].tolist() == anchor["row_id"].tolist()
     assert aligned["candidate_probability"].tolist() == [0.1, 0.7, 0.3]
@@ -105,6 +105,41 @@ def test_paired_metrics_are_row_weighted_and_exclude_small_hard_segments() -> No
     assert any(not row["eligible"] for row in metrics["segments"])
     assert "ece_10" in metrics
     assert "monthly" in metrics
+
+
+def test_paired_metrics_take_segments_from_row_aligned_candidate() -> None:
+    candidate = {
+        "2022->2023": _prediction(ids=("r3", "r1", "r2")),
+        "2023->2024": _prediction(ids=("c", "a", "b")),
+    }
+    candidate["2022->2023"]["target"] = [0, 0, 1]
+    candidate["2023->2024"]["target"] = [0, 0, 1]
+    anchor = {
+        fold: frame[["row_id", "target", "probability", "game_type", "game_month"]]
+        .sort_values("row_id")
+        .reset_index(drop=True)
+        for fold, frame in candidate.items()
+    }
+
+    metrics = paired_fold_metrics(anchor, candidate, segment_min_rows=1)
+
+    assert metrics["status"] == "completed"
+    assert {row["column"] for row in metrics["segments"]} == {
+        "game_type", "count_state", "hand_matchup", "base_out_state",
+        "pitcher_known", "batter_known",
+    }
+
+
+def test_paired_metrics_reject_conflicting_anchor_segment_values() -> None:
+    anchor = _prediction()
+    candidate = _prediction()
+    anchor.loc[0, "game_type"] = "P"
+    with pytest.raises(HierarchicalMetricError, match="differs for segment: game_type"):
+        paired_fold_metrics(
+            {"2022->2023": anchor, "2023->2024": _prediction()},
+            {"2022->2023": candidate, "2023->2024": _prediction()},
+            segment_min_rows=1,
+        )
 
 
 def _metrics(

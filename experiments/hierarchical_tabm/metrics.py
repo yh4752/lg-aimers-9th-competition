@@ -100,6 +100,20 @@ def align_anchor_and_h1(anchor: pd.DataFrame, candidate: pd.DataFrame) -> pd.Dat
     output["anchor_probability"] = left["probability"].to_numpy(dtype="float64")
     output["candidate_probability"] = indexed["probability"].to_numpy(dtype="float64")
     output = output.drop(columns=["probability"])
+    for column in (*SEGMENT_COLUMNS, "game_month"):
+        if column not in indexed:
+            continue
+        candidate_values = indexed[column].reset_index(drop=True)
+        if column in output:
+            anchor_values = output[column].reset_index(drop=True)
+            matches = anchor_values.eq(candidate_values) | (
+                anchor_values.isna() & candidate_values.isna()
+            )
+            if not bool(matches.all()):
+                raise HierarchicalMetricError(
+                    f"paired evidence differs for segment: {column}"
+                )
+        output[column] = candidate_values.to_numpy()
     return output
 
 

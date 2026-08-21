@@ -126,7 +126,7 @@ def render_cell(root: Path) -> bytes:
     archive_sha = sha256(archive).hexdigest()
     code_sha = code_identity_sha256(root)
     source = f'''from __future__ import annotations
-import base64, hashlib, json, os, pathlib, subprocess, sys, tarfile, time, traceback
+import base64, hashlib, importlib, json, os, pathlib, subprocess, sys, tarfile, time, traceback
 from io import BytesIO
 
 SESSION_DEADLINE = time.time() + 10800
@@ -167,6 +167,10 @@ try:
                 while chunk := source.read(1024 * 1024):
                     destination.write(chunk)
     sys.path.insert(0, str(RUNTIME_ROOT))
+    for module_name in tuple(sys.modules):
+        if module_name == "experiments" or module_name.startswith("experiments."):
+            del sys.modules[module_name]
+    importlib.invalidate_caches()
     from experiments.hierarchical_tabm.runtime_inventory import code_identity_sha256
     if code_identity_sha256(RUNTIME_ROOT) != EXPECTED_CODE_SHA256:
         raise RuntimeError("embedded code identity differs")
@@ -189,7 +193,11 @@ try:
     from google.colab import files
     from experiments.hierarchical_tabm.inputs import classify_upload
     from experiments.hierarchical_tabm.runtime_inventory import discover_cached_uploads
-    cached_candidates = tuple(UPLOAD_ROOT.glob("*.zip")) + tuple(pathlib.Path("/content").glob("*.zip"))
+    cached_candidates = (
+        tuple(UPLOAD_ROOT.glob("*.zip"))
+        + tuple(pathlib.Path("/content").glob("*.zip"))
+        + tuple(RUN_BASE.rglob("hierarchical_tabm_resume.zip"))
+    )
     paths = list(discover_cached_uploads(cached_candidates, classifier=classify_upload))
     if paths:
         print(f"HIER_UPLOAD_CACHE_REUSED count={{len(paths)}}", flush=True)

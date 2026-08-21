@@ -103,4 +103,10 @@ def test_checked_in_cell_matches_renderer_and_static_safety() -> None:
     assert "HIER_ERROR" in text
     assert "HIER_INPUTS_VERIFIED" in text
     assert "HIER_UPLOAD_CACHE_REUSED" in text
+    assert 'RUN_BASE.rglob("hierarchical_tabm_resume.zip")' in text
+    purge = 'if module_name == "experiments" or module_name.startswith("experiments."):'
+    assert purge in text
+    assert text.index(purge) < text.index(
+        "from experiments.hierarchical_tabm.runtime_inventory import code_identity_sha256"
+    )
     assert sha256(first).hexdigest()

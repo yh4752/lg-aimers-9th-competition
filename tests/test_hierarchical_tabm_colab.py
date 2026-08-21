@@ -109,6 +109,22 @@ def test_snapshot_cadence_starts_at_session_start_not_first_checkpoint() -> None
     assert cadence.snapshot_due(700.0) is True
 
 
+def test_active_checkpoint_download_is_immediate_then_interval_limited() -> None:
+    cadence = SnapshotCadence(300.0, 1200.0, started_at=0.0)
+    snapshots = []
+    requested = []
+    for epoch, now in enumerate(range(60, 24 * 60 + 1, 60), start=1):
+        if cadence.active_snapshot_due(float(now), new_job=epoch == 1):
+            snapshots.append(epoch)
+            cadence.mark_snapshot(float(now))
+            if cadence.active_download_due(float(now)):
+                requested.append(epoch)
+                cadence.mark_active_download(float(now))
+
+    assert snapshots == [1, 6, 11, 16, 21]
+    assert requested == [1, 21]
+
+
 def test_active_checkpoint_becomes_verified_incomplete_resume(tmp_path: Path) -> None:
     job_id = "h1__tr2022__va2023__s3407"
     active = _active_checkpoint(tmp_path, job_id)
@@ -279,6 +295,6 @@ def test_supervisor_callbacks_receive_only_recursively_verified_resumes(tmp_path
         runtime=runtime,
     )
     assert result.state.status == "completed_no_candidate"
-    assert len(downloads) >= 2
+    assert len(downloads) == 2
     for path in downloads:
         verify_resume_bundle(path, expected_bindings=runtime.bindings)

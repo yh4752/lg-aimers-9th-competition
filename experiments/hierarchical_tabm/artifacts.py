@@ -83,7 +83,7 @@ def _file_sha256(path: Path, check_deadline: Callable[[], None] | None = None) -
 
 
 def _bindings(value: Mapping[str, str]) -> dict[str, str]:
-    if set(value) != EXPECTED_BINDING_KEYS:
+    if not isinstance(value, Mapping) or set(value) != EXPECTED_BINDING_KEYS:
         raise HierarchicalArtifactError("artifact bindings keys differ")
     output: dict[str, str] = {}
     for key in sorted(value):
@@ -356,6 +356,26 @@ def verify_resume_bundle(
     return MappingProxyType(
         _verify(Path(path), kind="hierarchical_tabm_resume_v1", expected_bindings=expected_bindings)
     )
+
+
+def verified_resume_bindings(path: Path) -> Mapping[str, str]:
+    """Return self-declared bindings only after recursively verifying the ZIP."""
+    try:
+        with ZipFile(path) as archive:
+            info = archive.getinfo("manifest.json")
+            _validate_info(info)
+            if info.file_size > _MAX_MANIFEST:
+                raise HierarchicalArtifactError("artifact manifest exceeds limit")
+            manifest = json.loads(archive.read(info))
+    except HierarchicalArtifactError:
+        raise
+    except Exception as error:
+        raise HierarchicalArtifactError("resume manifest is unreadable") from error
+    if type(manifest) is not dict:
+        raise HierarchicalArtifactError("artifact manifest must be an object")
+    declared = _bindings(manifest.get("bindings"))
+    verify_resume_bundle(Path(path), expected_bindings=declared)
+    return MappingProxyType(declared)
 
 
 def restore_resume(

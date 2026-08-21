@@ -17,7 +17,9 @@ from .artifacts import (
     CampaignBundles,
     CampaignEvidence,
     DeliveryEvidence,
+    HierarchicalArtifactError,
     restore_resume,
+    verified_resume_bindings,
     write_campaign_bundles,
     write_candidate_delivery,
 )
@@ -36,6 +38,11 @@ from .training import TrainingJobResult, training_result_payload
 
 class HierarchicalRunnerError(ValueError):
     """Raised when the restartable campaign state cannot advance safely."""
+
+
+_PRE_METRIC_FIX_CODE_SHA256 = (
+    "cdd9f63f48c79f6b715c58a2dc455fb177ae12e40335a4b3a64d5f9599273c60"
+)
 
 
 @dataclass(frozen=True)
@@ -399,14 +406,34 @@ def run_campaign(
     jobs_by_id = {job.job_id: job for job in jobs}
     if resume_bundle is not None:
         _deadline(absolute_deadline)
-        restored = restore_resume(
-            Path(resume_bundle),
-            output / "restored_resume",
-            expected_bindings=bindings,
-            check_deadline=lambda: _deadline(absolute_deadline),
-        )
+        legacy_resume = False
+        try:
+            restored = restore_resume(
+                Path(resume_bundle),
+                output / "restored_resume",
+                expected_bindings=bindings,
+                check_deadline=lambda: _deadline(absolute_deadline),
+            )
+        except HierarchicalArtifactError as current_error:
+            declared = verified_resume_bindings(Path(resume_bundle))
+            differing = {
+                key for key in bindings if declared.get(key) != bindings[key]
+            }
+            if (
+                differing != {"code_sha256"}
+                or declared.get("code_sha256") != _PRE_METRIC_FIX_CODE_SHA256
+            ):
+                raise current_error
+            restored = restore_resume(
+                Path(resume_bundle),
+                output / "restored_resume",
+                expected_bindings=declared,
+                check_deadline=lambda: _deadline(absolute_deadline),
+            )
+            legacy_resume = True
         if restored.state.get("schema_version") != 1 or restored.state.get("bindings") != dict(bindings):
-            raise HierarchicalRunnerError("restored campaign identity differs")
+            if not legacy_resume or restored.state.get("bindings") != dict(declared):
+                raise HierarchicalRunnerError("restored campaign identity differs")
         completed = restored.state.get("completed_job_ids")
         if (
             type(completed) is not list
@@ -414,10 +441,40 @@ def run_campaign(
             or any(not isinstance(job_id, str) or job_id not in jobs_by_id for job_id in completed)
         ):
             raise HierarchicalRunnerError("restored completed job set differs")
+        if legacy_resume:
+            expected_legacy_state = {
+                "schema_version", "status", "bindings", "selected_k",
+                "completed_job_ids", "active_job_id", "decisions",
+                "delivery_candidate_ids", "final_epochs", "final_fit_completed",
+            }
+            if (
+                set(restored.state) != expected_legacy_state
+                or restored.state.get("status") != "running"
+                or completed != [job.job_id for job in jobs[:2]]
+                or restored.state.get("active_job_id") is not None
+                or restored.state.get("decisions") != {}
+                or restored.state.get("delivery_candidate_ids") != []
+                or restored.state.get("final_epochs") is not None
+                or restored.state.get("final_fit_completed") is not False
+                or restored.active_job_directory is not None
+                or (restored.root / "calibration").exists()
+                or (restored.root / "decisions").exists()
+            ):
+                raise HierarchicalRunnerError("legacy resume state is not the sealed pre-decision state")
         for job_id in completed:
             directory = restored.completed_job_directories[job_id]
-            restored_results[job_id] = _restored_result(directory, jobs_by_id[job_id])
-            restored_directories[job_id] = directory
+            _restored_result(directory, jobs_by_id[job_id])
+            adopted = output / "jobs" / job_id
+            if adopted.exists() or adopted.is_symlink():
+                raise HierarchicalRunnerError(
+                    "restored completed job destination already exists"
+                )
+            adopted.parent.mkdir(parents=True, exist_ok=True)
+            os.replace(directory, adopted)
+            restored_results[job_id] = _restored_result(
+                adopted, jobs_by_id[job_id]
+            )
+            restored_directories[job_id] = adopted
         active_value = restored.state.get("active_job_id")
         if active_value is not None:
             if (
@@ -437,7 +494,15 @@ def run_campaign(
         if not selection_path.is_file():
             raise HierarchicalRunnerError("restored K selection is missing")
         selection = _restored_selection(selection_path, restored.state.get("selected_k"))
-        on_verified_resume(Path(resume_bundle))
+        if legacy_resume:
+            with log_path.open("a", encoding="utf-8") as stream:
+                stream.write(
+                    "LEGACY_RESUME_ACCEPTED "
+                    f"source_code_sha256={_PRE_METRIC_FIX_CODE_SHA256} "
+                    f"source_resume_sha256={_file_sha256(Path(resume_bundle))}\n"
+                )
+        else:
+            on_verified_resume(Path(resume_bundle))
     else:
         _deadline(absolute_deadline)
         selection = runtime.select_k(

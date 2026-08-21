@@ -15,6 +15,7 @@ import threading
 import time
 from types import MappingProxyType
 from typing import Callable, Mapping, Protocol
+from zipfile import ZipFile
 
 import pandas as pd
 
@@ -42,6 +43,7 @@ class SnapshotCadence:
     started_at: float
     last_snapshot_at: float | None = None
     last_download_at: float | None = None
+    active_downloaded: bool = False
 
     def __post_init__(self) -> None:
         values = (
@@ -70,6 +72,16 @@ class SnapshotCadence:
 
     def mark_download(self, now: float) -> None:
         self.last_download_at = float(now)
+
+    def active_download_due(self, now: float) -> bool:
+        return not self.active_downloaded or self.download_due(now)
+
+    def active_snapshot_due(self, now: float, *, new_job: bool) -> bool:
+        return bool(new_job) or self.snapshot_due(now)
+
+    def mark_active_download(self, now: float) -> None:
+        self.active_downloaded = True
+        self.mark_download(now)
 
 
 @dataclass(frozen=True)
@@ -597,6 +609,7 @@ def run_supervised_campaign(
     latest: Path | None = None
     sequence = 0
     observed_checkpoint: tuple[str, int] | None = None
+    observed_completed: tuple[str, ...] = ()
     monitor_error: BaseException | None = None
     stop = threading.Event()
 
@@ -604,15 +617,22 @@ def run_supervised_campaign(
         if clock.time() >= wall_deadline:
             raise HierarchicalColabError("campaign wall deadline reached")
 
-    def deliver(path: Path) -> None:
+    def register_verified(
+        path: Path, *, request_download: bool, active: bool = False
+    ) -> None:
         nonlocal latest
         verify_resume_bundle(path, expected_bindings=runtime.bindings)
-        on_verified_resume(path)
         latest = path
-        cadence.mark_download(clock.time())
+        if request_download:
+            on_verified_resume(path)
+            now = clock.time()
+            if active:
+                cadence.mark_active_download(now)
+            else:
+                cadence.mark_download(now)
 
     def publish_stable(_: Path | None = None) -> Path:
-        nonlocal latest, sequence
+        nonlocal latest, observed_completed, sequence
         with lock:
             check_deadline()
             evidence = _campaign_evidence(output, runtime.bindings)
@@ -630,17 +650,40 @@ def run_supervised_campaign(
                 bundles.resume,
                 expected_bindings=runtime.bindings,
             )
-            deliver(bundles.resume)
+            completed = state.get("completed_job_ids")
+            if type(completed) is not list or any(
+                not isinstance(job_id, str) for job_id in completed
+            ):
+                raise HierarchicalColabError("campaign completed job state is invalid")
+            completed_ids = tuple(completed)
+            request_download = (
+                state.get("status") == "running"
+                and bool(completed_ids)
+                and completed_ids != observed_completed
+            )
+            register_verified(
+                bundles.resume, request_download=request_download
+            )
+            observed_completed = completed_ids
             cadence.mark_snapshot(clock.time())
             return bundles.resume
 
     def accept_uploaded(path: Path) -> None:
+        nonlocal latest, observed_completed
         check_deadline()
         verify_resume_bundle(
             Path(path),
             expected_bindings=runtime.bindings,
         )
-        on_verified_resume(Path(path))
+        with ZipFile(path) as archive:
+            state = json.loads(archive.read("stage_state.json"))
+        completed = state.get("completed_job_ids") if type(state) is dict else None
+        if type(completed) is not list or any(
+            not isinstance(job_id, str) for job_id in completed
+        ):
+            raise HierarchicalColabError("uploaded resume completed job state is invalid")
+        latest = Path(path)
+        observed_completed = tuple(completed)
 
     def monitor() -> None:
         nonlocal latest, observed_checkpoint, monitor_error, sequence
@@ -651,7 +694,15 @@ def run_supervised_campaign(
                 active = active_method() if callable(active_method) else None
                 if active is not None:
                     identity = (active.job_id, active.completed_epochs)
-                    if identity != observed_checkpoint:
+                    now = clock.time()
+                    new_job = (
+                        observed_checkpoint is None
+                        or observed_checkpoint[0] != active.job_id
+                    )
+                    if (
+                        identity != observed_checkpoint
+                        and cadence.active_snapshot_due(now, new_job=new_job)
+                    ):
                         with lock:
                             evidence = _campaign_evidence(output, runtime.bindings)
                             target = snapshots / f"active_{sequence:04d}"
@@ -660,18 +711,21 @@ def run_supervised_campaign(
                                 active, evidence, target,
                                 check_deadline=check_deadline,
                             )
-                            deliver(resume)
+                            register_verified(
+                                resume,
+                                request_download=cadence.active_download_due(now),
+                                active=True,
+                            )
                             cadence.mark_snapshot(clock.time())
                             observed_checkpoint = identity
                 now = clock.time()
-                if cadence.snapshot_due(now) or cadence.download_due(now):
+                if cadence.download_due(now):
                     with lock:
                         if latest is not None:
                             verify_resume_bundle(
                                 latest, expected_bindings=runtime.bindings
                             )
                             on_verified_resume(latest)
-                            cadence.mark_snapshot(now)
                             cadence.mark_download(now)
                 delay = min(5.0, max(0.05, wall_deadline - clock.time()))
                 if clock is SYSTEM_CLOCK:
