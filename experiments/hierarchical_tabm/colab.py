@@ -331,7 +331,7 @@ def _checkpoint_child(connection, checkpoint: str, job_id: str, epoch: int) -> N
             or set(payload) != expected
             or payload["candidate_id"] != job_id
             or payload["epoch"] != epoch
-            or type(payload["model"]) is not dict
+            or not isinstance(payload["model"], Mapping)
             or not payload["model"]
             or "model.output.weight" not in payload["model"]
         ):

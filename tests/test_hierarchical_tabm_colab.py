@@ -4,6 +4,7 @@ from hashlib import sha256
 import json
 from pathlib import Path
 import random
+from collections import OrderedDict
 from types import MappingProxyType
 
 import numpy as np
@@ -155,6 +156,21 @@ def test_active_checkpoint_invalid_optimizer_is_rejected(tmp_path: Path) -> None
             active, _evidence(tmp_path, job_id), tmp_path / "snapshots",
             check_deadline=lambda: None,
         )
+
+
+def test_active_checkpoint_accepts_torch_ordered_model_state(tmp_path: Path) -> None:
+    torch = __import__("torch")
+    job_id = "h1__tr2022__va2023__s3407"
+    active = _active_checkpoint(tmp_path, job_id)
+    payload = torch.load(active.checkpoint, map_location="cpu", weights_only=False)
+    payload["model"] = OrderedDict(payload["model"])
+    torch.save(payload, active.checkpoint)
+
+    resume = promote_active_checkpoint(
+        active, _evidence(tmp_path, job_id), tmp_path / "snapshots",
+        check_deadline=lambda: None,
+    )
+    assert resume.is_file()
 
 
 def test_subprocess_runtime_uses_argv_no_shell_and_explicit_pythonpath(
