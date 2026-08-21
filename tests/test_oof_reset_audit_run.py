@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import subprocess
+import sys
 from zipfile import ZipFile
 
 import pandas as pd
@@ -16,6 +18,8 @@ REPORTS = {
     "correlation_matrix.csv", "model_comparison.csv", "next_experiment.json",
     "paired_comparison.csv", "segment_diagnostics.csv",
 }
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+CLI = PROJECT_ROOT / "tools/run_oof_reset_audit.py"
 
 
 def _prediction(model: str, fold: str, shift: float, trust: TrustClass = TrustClass.RULE_SAFE) -> PredictionSet:
@@ -124,3 +128,35 @@ def test_no_repeatable_safe_improvement_supports_stop_and_reframe(tmp_path: Path
     result = run_audit(predictions=values, inventory=_inventory(), output_root=tmp_path)
     decision = json.loads((result.output_dir / "next_experiment.json").read_text())
     assert decision["supported_directions"] == ["STOP_AND_REFRAME"]
+
+
+def test_cli_help_works_outside_project_root(tmp_path: Path) -> None:
+    completed = subprocess.run(
+        [sys.executable, str(CLI), "--help"], cwd=tmp_path, text=True,
+        capture_output=True, check=False,
+    )
+    assert completed.returncode == 0
+    assert "--artifact" in completed.stdout
+
+
+def test_cli_success_and_error_markers_are_exact(tmp_path: Path) -> None:
+    from test_oof_reset_audit_artifacts import _quarantined
+
+    source = _quarantined(tmp_path / "xgb.zip")
+    completed = subprocess.run(
+        [sys.executable, str(CLI), "--artifact", str(source), "--output-root", str(tmp_path / "runs")],
+        cwd=tmp_path, text=True, capture_output=True, check=False,
+    )
+    assert completed.returncode == 0
+    assert completed.stdout.startswith("OOF_RESET_AUDIT_INPUTS_VERIFIED")
+    assert "OOF_RESET_AUDIT_SUCCESS output_dir=" in completed.stdout
+
+    broken = tmp_path / "broken.zip"
+    broken.write_bytes(b"not a zip")
+    failed = subprocess.run(
+        [sys.executable, str(CLI), "--artifact", str(broken), "--output-root", str(tmp_path / "failed")],
+        cwd=tmp_path, text=True, capture_output=True, check=False,
+    )
+    assert failed.returncode == 1
+    assert failed.stdout.startswith("OOF_RESET_AUDIT_ERROR stage=inputs type=AuditArtifactError message=")
+    assert not list((tmp_path / "failed").rglob("*.zip")) if (tmp_path / "failed").exists() else True
