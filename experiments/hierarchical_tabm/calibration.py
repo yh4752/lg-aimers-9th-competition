@@ -412,7 +412,10 @@ def calibration_state_from_payload(payload: Mapping[str, object]) -> Calibration
         raise CalibrationError("fit row digest is invalid")
     effects_payload = payload["effects"]
     expected_effects = CALIBRATION_EFFECTS if payload["kind"] == "H3" else ()
-    if not isinstance(effects_payload, Mapping) or tuple(effects_payload) != expected_effects:
+    if (
+        not isinstance(effects_payload, Mapping)
+        or set(effects_payload) != set(expected_effects)
+    ):
         raise CalibrationError("calibration effects differ")
     effects: dict[str, Mapping[str, float]] = {}
     for column in expected_effects:

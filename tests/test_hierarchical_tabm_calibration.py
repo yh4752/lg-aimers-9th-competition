@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+import json
 from types import SimpleNamespace
 
 import numpy as np
@@ -201,6 +202,19 @@ def test_calibration_state_round_trip_and_corruption_rejection() -> None:
     corrupt["slope"] += 0.1
     with pytest.raises(CalibrationError, match="digest"):
         calibration_state_from_payload(corrupt)
+
+
+def test_h3_calibration_survives_canonical_json_round_trip() -> None:
+    probability, target = _signal()
+    state = fit_h3(
+        probability, target, _segments(len(target)), regularization=0.01, clip=1e-6
+    )
+    persisted = json.loads(canonical_state_json(state))
+
+    restored = calibration_state_from_payload(persisted)
+
+    assert calibration_state_payload(restored) == calibration_state_payload(state)
+    assert tuple(restored.effects) == CALIBRATION_EFFECTS
 
 
 @pytest.mark.parametrize(
