@@ -225,7 +225,11 @@ def _bundle_identity(
     state = _state_from_member(members)
     if state.bindings != bindings or state.status != source.status:
         raise RealignArtifactError("stage state bindings or status differ")
-    if state.status == "completed" and "jobs/catboost_full_2024/model.cbm" not in members:
+    if (
+        kind == "realign_resume_v1"
+        and state.status == "completed"
+        and "jobs/catboost_full_2024/model.cbm" not in members
+    ):
         raise RealignArtifactError("completed resume requires the full model")
     return state.status, state.selected_tree_count
 
@@ -431,6 +435,8 @@ def _verify_bundle(
                     or state.status != manifest["status"]
                     or state.selected_tree_count != manifest["selected_tree_count"]
                     or (
+                        kind == "realign_resume_v1"
+                        and
                         state.status == "completed"
                         and "jobs/catboost_full_2024/model.cbm" not in manifest["members"]
                     )
