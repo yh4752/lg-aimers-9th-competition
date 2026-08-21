@@ -220,12 +220,11 @@ def block_bootstrap_interval(
     )
     if len(grouped) < 6:
         return {"status": "insufficient_blocks", "block_count": len(grouped)}
+    block_sums = np.asarray([group.sum(dtype=np.float64) for group in grouped])
+    block_counts = np.asarray([len(group) for group in grouped], dtype="int64")
     rng = np.random.default_rng(seed)
-    samples = np.empty(repeats, dtype="float64")
-    for index in range(repeats):
-        selected = rng.integers(0, len(grouped), size=len(grouped))
-        sample = np.concatenate([grouped[position] for position in selected])
-        samples[index] = float(sample.mean())
+    selected = rng.integers(0, len(grouped), size=(repeats, len(grouped)))
+    samples = block_sums[selected].sum(axis=1) / block_counts[selected].sum(axis=1)
     lower, upper = np.quantile(samples, (0.025, 0.975))
     return {
         "status": "completed",

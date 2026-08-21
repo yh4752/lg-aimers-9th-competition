@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+from dataclasses import replace
 import json
+import math
 from pathlib import Path
 import subprocess
 import sys
@@ -8,7 +10,7 @@ from zipfile import ZipFile
 
 import pandas as pd
 
-from experiments.oof_reset_audit.run import run_audit
+from experiments.oof_reset_audit.run import _diagnose, run_audit
 from experiments.oof_reset_audit.types import ArtifactRecord, ArtifactRole, PredictionSet, TrustClass
 
 
@@ -45,6 +47,12 @@ def _prediction(model: str, fold: str, shift: float, trust: TrustClass = TrustCl
 def _inventory() -> tuple[ArtifactRecord, ...]:
     return (ArtifactRecord(Path("stage.zip"), "a" * 64, ArtifactRole.STAGE_C_TABM,
                            "tabm_colab_stage_C_delivery", "verified", None),)
+
+
+def _with_eligible_segments(value: PredictionSet) -> PredictionSet:
+    frame = pd.concat([value.frame] * 500, ignore_index=True)
+    frame["row_id"] = [f"{value.fold}-expanded-{index}" for index in range(len(frame))]
+    return replace(value, frame=frame)
 
 
 def test_audit_uses_fixed_anchor_and_never_makes_quarantine_eligible(tmp_path: Path) -> None:
@@ -98,13 +106,98 @@ def test_reports_have_exact_allowlist_and_zip_is_small_review_only(tmp_path: Pat
 def test_stable_safe_fixed_blend_supports_diverse_blend_but_never_accepts_it(tmp_path: Path) -> None:
     values = []
     for fold in FOLDS:
-        values.extend((_prediction("tabm_stage_c_seed_3407", fold, 0.0),
-                       _prediction("safe_model", fold, 0.05)))
+        values.extend((
+            _with_eligible_segments(_prediction("tabm_stage_c_seed_3407", fold, 0.0)),
+            _with_eligible_segments(_prediction("safe_model", fold, 0.05)),
+        ))
     result = run_audit(predictions=values, inventory=_inventory(), output_root=tmp_path)
+    paired = pd.read_csv(result.output_dir / "paired_comparison.csv")
+    blend = paired[(paired["comparison"] == "fixed_blend") & (paired["candidate_weight"] == 0.25)]
+    assert set(blend["interval_status"]) == {"completed"}
+    assert bool((blend["interval_lower"] > 0).all())
+    segments = pd.read_csv(result.output_dir / "segment_diagnostics.csv")
+    assert {"comparison", "candidate_weight"} <= set(segments)
+    assert "fixed_blend" in set(segments["comparison"])
     decision = json.loads((result.output_dir / "next_experiment.json").read_text())
     assert decision["automatic_acceptance"] is False
     assert "DIVERSE_BLEND" in decision["supported_directions"]
+    assert any(
+        row["candidate_model_id"] == "safe_model" and row["candidate_weight"] == 0.25
+        for row in decision["evidence"]["diverse_blend"]["stable_blends"]
+    )
     assert set(decision["evidence"]) == {"recency_weighting", "diverse_blend", "stop_and_reframe"}
+
+
+def test_diverse_blend_requires_nonnegative_latest_block_interval() -> None:
+    predictions = tuple(
+        item
+        for fold in FOLDS
+        for item in (
+            _prediction("tabm_stage_c_seed_3407", fold, 0.0),
+            _prediction("safe_model", fold, 0.05),
+        )
+    )
+    model = pd.DataFrame([
+        {"model_id": item.model_id, "fold": item.fold, "trust": item.trust.value,
+         "comparison_class": "descriptive_only" if "3407" in item.model_id else "paired",
+         "brier": 0.2, "prediction_mean": 0.5, "target_mean": 0.5}
+        for item in predictions
+    ])
+    paired = pd.DataFrame([
+        {"candidate_model_id": "safe_model", "fold": fold, "comparison": "fixed_blend",
+         "candidate_weight": 0.25, "gain_vs_anchor": 0.001,
+         "interval_status": "completed", "interval_lower": -0.00001 if fold == FOLDS[1] else 0.0001}
+        for fold in FOLDS
+    ])
+    segments = pd.DataFrame([
+        {"candidate_model_id": "safe_model", "fold": fold, "comparison": "fixed_blend",
+         "candidate_weight": 0.25, "eligible": True, "regression": 0.0001}
+        for fold in FOLDS
+    ])
+    correlations = pd.DataFrame(columns=["trust", "residual_correlation"])
+
+    decision = _diagnose(predictions, _inventory(), model, paired, segments, correlations)
+
+    assert decision["evidence"]["diverse_blend"]["stable_blends"] == []
+    assert decision["supported_directions"] == ["STOP_AND_REFRAME"]
+
+    paired.loc[paired["fold"] == FOLDS[1], "interval_lower"] = 0.00001
+    segments.loc[segments["fold"] == FOLDS[1], "regression"] = 0.0008
+    segment_rejected = _diagnose(
+        predictions, _inventory(), model, paired, segments, correlations
+    )
+    assert segment_rejected["evidence"]["diverse_blend"]["stable_blends"] == []
+
+    segments["regression"] = 0.0007
+    accepted_for_manual_review = _diagnose(
+        predictions, _inventory(), model, paired, segments, correlations
+    )
+    assert accepted_for_manual_review["supported_directions"] == ["DIVERSE_BLEND"]
+    assert accepted_for_manual_review["automatic_acceptance"] is False
+
+
+def test_fixed_blend_rows_report_blended_correlations(tmp_path: Path) -> None:
+    anchor = _prediction("tabm_stage_c_seed_3407", FOLDS[1], 0.0)
+    candidate = _prediction("safe_model", FOLDS[1], 0.0)
+    candidate.frame["probability"] += pd.Series(
+        [-0.10, 0.03, 0.08, -0.02, -0.04, 0.09, 0.02, -0.08, 0.06, -0.01, -0.07, 0.04]
+    )
+    result = run_audit(
+        predictions=[anchor, candidate], inventory=_inventory(), output_root=tmp_path
+    )
+    paired = pd.read_csv(result.output_dir / "paired_comparison.csv")
+    raw = paired[paired["comparison"] == "candidate"].iloc[0]
+    blend = paired[
+        (paired["comparison"] == "fixed_blend")
+        & (paired["candidate_weight"] == 0.25)
+    ].iloc[0]
+
+    expected_probability = 0.75 * anchor.frame["probability"] + 0.25 * candidate.frame["probability"]
+    expected = float(anchor.frame["probability"].corr(expected_probability))
+    assert math.isclose(blend["prediction_correlation"], expected, abs_tol=1e-12)
+    assert not math.isclose(
+        blend["prediction_correlation"], raw["prediction_correlation"], abs_tol=1e-8
+    )
 
 
 def test_shared_fold_drift_with_high_residual_correlation_supports_recency(tmp_path: Path) -> None:

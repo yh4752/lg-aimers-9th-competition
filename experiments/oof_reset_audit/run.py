@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from hashlib import sha256
 import json
@@ -135,19 +135,39 @@ def _tables(predictions: tuple[PredictionSet, ...]) -> tuple[pd.DataFrame, pd.Da
             "interval_status": interval["status"],
             "interval_lower": interval.get("lower"), "interval_upper": interval.get("upper"),
         })
-        segment_rows.append(segment_metrics(anchor, item))
+        candidate_segments = segment_metrics(anchor, item)
+        candidate_segments["comparison"] = "candidate"
+        candidate_segments["candidate_weight"] = 1.0
+        segment_rows.append(candidate_segments)
         for weight in (0.25, 0.5, 0.75):
             blended = (1.0 - weight) * anchor_p + weight * candidate_p
+            blend_loss = np.square(blended - target)
+            blend_interval = block_bootstrap_interval(pd.DataFrame({
+                "block": [f"{item.fold}:{value}" for value in blocks],
+                "loss_delta": anchor_loss - blend_loss,
+            }))
+            blend_frame = aligned.drop(
+                columns=["anchor_probability", "candidate_probability"]
+            ).copy()
+            blend_frame["probability"] = blended
+            blend_evidence = replace(item, frame=blend_frame)
+            blend_base = paired_metrics(anchor, blend_evidence)
+            blend_segments = segment_metrics(anchor, blend_evidence)
+            blend_segments["comparison"] = "fixed_blend"
+            blend_segments["candidate_weight"] = weight
+            segment_rows.append(blend_segments)
             paired_rows.append({
                 "anchor_model_id": anchor.model_id, "candidate_model_id": item.model_id,
                 "fold": item.fold, "rows": len(aligned), "anchor_brier": float(anchor_loss.mean()),
-                "candidate_brier": float(np.square(blended - target).mean()),
-                "gain_vs_anchor": float((anchor_loss - np.square(blended - target)).mean()),
-                "prediction_correlation": base["prediction_correlation"],
-                "loss_correlation": base["loss_correlation"],
-                "residual_correlation": base["residual_correlation"],
+                "candidate_brier": float(blend_loss.mean()),
+                "gain_vs_anchor": float((anchor_loss - blend_loss).mean()),
+                "prediction_correlation": blend_base["prediction_correlation"],
+                "loss_correlation": blend_base["loss_correlation"],
+                "residual_correlation": blend_base["residual_correlation"],
                 "comparison": "fixed_blend", "candidate_weight": weight,
-                "interval_status": "not_computed", "interval_lower": None, "interval_upper": None,
+                "interval_status": blend_interval["status"],
+                "interval_lower": blend_interval.get("lower"),
+                "interval_upper": blend_interval.get("upper"),
             })
     model_columns = [
         "model_id", "fold", "trust", "rows", "target_mean", "prediction_mean",
@@ -166,7 +186,8 @@ def _tables(predictions: tuple[PredictionSet, ...]) -> tuple[pd.DataFrame, pd.Da
     ]
     segment_columns = [
         "anchor_model_id", "candidate_model_id", "fold", "segment", "level", "rows",
-        "anchor_brier", "candidate_brier", "regression", "eligible",
+        "anchor_brier", "candidate_brier", "regression", "eligible", "comparison",
+        "candidate_weight",
     ]
     calibration_columns = ["model_id", "fold", "decile", "rows", "target_mean", "prediction_mean"]
     return (
@@ -187,13 +208,49 @@ def _diagnose(
     missing = sorted({row.role.value for row in inventory if row.status == "missing_evidence" and row.role.value != "unknown"})
 
     blend_rows = paired[paired["comparison"] == "fixed_blend"] if not paired.empty else paired
-    blend_candidates: list[str] = []
-    for candidate, group in blend_rows.groupby("candidate_model_id"):
-        by_fold = group.groupby("fold")["gain_vs_anchor"].max()
-        candidate_segments = segments[segments["candidate_model_id"] == candidate]
-        maximum_regression = float(candidate_segments["regression"].max()) if not candidate_segments.empty else 0.0
-        if len(by_fold) >= 2 and bool((by_fold > 0).all()) and maximum_regression <= 0.00075:
-            blend_candidates.append(str(candidate))
+    stable_blends: list[dict[str, object]] = []
+    required_folds = set(_anchors(predictions))
+    for (candidate, weight), group in blend_rows.groupby(
+        ["candidate_model_id", "candidate_weight"]
+    ):
+        by_fold = group.set_index("fold")
+        if set(by_fold.index) != required_folds or len(required_folds) < 2:
+            continue
+        latest = by_fold.loc["2023->2024"] if "2023->2024" in by_fold.index else None
+        if latest is None:
+            continue
+        blend_segments = segments[
+            (segments["candidate_model_id"] == candidate)
+            & (segments["comparison"] == "fixed_blend")
+            & (segments["candidate_weight"] == weight)
+            & segments["eligible"]
+        ]
+        maximum_regression = (
+            float(blend_segments["regression"].max())
+            if not blend_segments.empty else 0.0
+        )
+        interval_passed = (
+            latest["interval_status"] == "completed"
+            and pd.notna(latest["interval_lower"])
+            and float(latest["interval_lower"]) >= 0.0
+        )
+        if (
+            bool((by_fold["gain_vs_anchor"] > 0.0).all())
+            and interval_passed
+            and not blend_segments.empty
+            and maximum_regression <= 0.00075
+        ):
+            stable_blends.append({
+                "candidate_model_id": str(candidate),
+                "candidate_weight": float(weight),
+                "fold_gains": {
+                    str(fold): float(by_fold.loc[fold, "gain_vs_anchor"])
+                    for fold in sorted(required_folds)
+                },
+                "latest_interval_lower": float(latest["interval_lower"]),
+                "maximum_eligible_segment_regression": maximum_regression,
+                "eligible_segment_count": int(len(blend_segments)),
+            })
 
     common_direction = False
     fold_order = ["2022->2023", "2023->2024"]
@@ -213,7 +270,7 @@ def _diagnose(
         or all(value < -1e-12 for value in calibration_changes)
     )
     recency = common_direction and common_calibration and high_residual
-    diverse = bool(blend_candidates)
+    diverse = bool(stable_blends)
     stop = not recency and not diverse
     supported = [name for name, value in (
         ("RECENCY_WEIGHTING", recency), ("DIVERSE_BLEND", diverse), ("STOP_AND_REFRAME", stop)
@@ -233,7 +290,13 @@ def _diagnose(
                 "common_calibration_shift": common_calibration,
                 "high_residual_correlation": high_residual,
             },
-            "diverse_blend": {"supported": diverse, "stable_candidates": blend_candidates},
+            "diverse_blend": {
+                "supported": diverse,
+                "stable_candidates": sorted({
+                    str(row["candidate_model_id"]) for row in stable_blends
+                }),
+                "stable_blends": stable_blends,
+            },
             "stop_and_reframe": {"supported": stop, "reason": "no stable safe improvement" if stop else "other evidence exists"},
         },
     }
