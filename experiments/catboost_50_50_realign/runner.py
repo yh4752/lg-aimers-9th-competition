@@ -69,20 +69,9 @@ def _file_sha(path: Path) -> str:
 
 
 def _code_sha256() -> str:
-    digest = sha256()
-    root = Path(__file__).parent
-    for name in (
-        "contracts.py",
-        "metrics.py",
-        "tabm_fold.py",
-        "training.py",
-        "state.py",
-        "artifacts.py",
-        "runner.py",
-    ):
-        digest.update(name.encode())
-        digest.update((root / name).read_bytes())
-    return digest.hexdigest()
+    from .runtime_inventory import code_identity_sha256
+
+    return code_identity_sha256(Path(__file__).resolve().parents[2])
 
 
 def _bindings(verified: VerifiedRealignInput) -> Bindings:
