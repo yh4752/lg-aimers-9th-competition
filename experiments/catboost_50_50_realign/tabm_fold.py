@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
 import math
 import os
 from pathlib import Path
@@ -184,6 +185,41 @@ def run_tabm_f1(
     contract = load_contract()
     job = build_tabm_f1_job(contract)
     output = Path(output_dir)
+    checkpoint = output / "checkpoint.pt"
+    checkpoint_meta = output / "checkpoint_meta.json"
+    checkpoint_present = checkpoint.exists() or checkpoint.is_symlink()
+    metadata_present = checkpoint_meta.exists() or checkpoint_meta.is_symlink()
+    if checkpoint_present != metadata_present:
+        raise RealignTabMFoldError("existing checkpoint pair is incomplete")
+    if checkpoint_present:
+        try:
+            if (
+                checkpoint.is_symlink()
+                or checkpoint_meta.is_symlink()
+                or not checkpoint.is_file()
+                or not checkpoint_meta.is_file()
+            ):
+                raise ValueError("checkpoint pair is not regular files")
+            metadata = json.loads(checkpoint_meta.read_text(encoding="utf-8"))
+            epoch = metadata["epoch"]
+            if type(metadata) is not dict or type(epoch) is not int or epoch < 0:
+                raise ValueError("checkpoint epoch is invalid")
+            resume_result = CampaignJobResult(
+                candidate_id=job.candidate_id,
+                status="inconclusive",
+                brier=None,
+                best_epoch=None,
+                completed_epochs=epoch + 1,
+                checkpoint=checkpoint,
+                predictions_path=None,
+                resource_evidence={},
+                failure="worker_exceeded_deadline_grace",
+            )
+            _validate_checkpoint_meta(job, resume_result, output)
+        except Exception as error:
+            raise RealignTabMFoldError(
+                f"existing checkpoint is invalid: {error}"
+            ) from error
     raw = worker(job, Path(data_dir), output, Path(cache_root), absolute_deadline)
     if type(raw) is not CampaignJobResult:
         raise RealignTabMFoldError("worker result type differs")

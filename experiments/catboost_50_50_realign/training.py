@@ -23,6 +23,7 @@ from .contracts import contract_sha256, load_contract
 from .metrics import (
     CATBOOST_COLUMNS,
     RealignDecision,
+    decision_from_payload,
     decision_to_payload,
     passes_gates,
     select_candidate,
@@ -191,33 +192,41 @@ def _run(
     selected_tree_count: int | None = None
     decision_sha: str | None = None
     if kind == "full_fit":
+        try:
+            sealed_decision = decision_from_payload(
+                decision_to_payload(decision), contract
+            ) if decision is not None else None
+        except Exception as error:
+            raise RealignTrainingError("promoted decision is required for full fit") from error
         selected_evidence = (
             ()
-            if decision is None
+            if sealed_decision is None
             else tuple(
                 item
-                for item in decision.candidates
-                if item.tree_count == decision.selected_tree_count
+                for item in sealed_decision.candidates
+                if item.tree_count == sealed_decision.selected_tree_count
             )
         )
         if (
-            decision is None
-            or decision.status != "promoted"
-            or decision.selected_tree_count not in contract.tree_prefixes
-            or decision.reason != "selected_by_preregistered_order"
+            sealed_decision is None
+            or sealed_decision.status != "promoted"
+            or sealed_decision.selected_tree_count not in contract.tree_prefixes
+            or sealed_decision.reason != "selected_by_preregistered_order"
             or len(selected_evidence) != 1
             or not selected_evidence[0].passed
             or not passes_gates(selected_evidence[0], contract)
         ):
             raise RealignTrainingError("promoted decision is required for full fit")
         try:
-            selected = select_candidate(decision.candidates, contract)
+            selected = select_candidate(sealed_decision.candidates, contract)
         except Exception as error:
             raise RealignTrainingError("promoted decision is required for full fit") from error
-        if selected.tree_count != decision.selected_tree_count:
+        if selected.tree_count != sealed_decision.selected_tree_count:
             raise RealignTrainingError("promoted decision is required for full fit")
-        selected_tree_count = decision.selected_tree_count
-        decision_sha = sha256(_canonical_json(decision_to_payload(decision))).hexdigest()
+        selected_tree_count = sealed_decision.selected_tree_count
+        decision_sha = sha256(
+            _canonical_json(decision_to_payload(sealed_decision))
+        ).hexdigest()
     elif kind != "alignment":
         raise RealignTrainingError("unknown CatBoost job kind")
 

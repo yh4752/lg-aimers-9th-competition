@@ -46,6 +46,7 @@ def test_checked_in_cell_matches_deterministic_renderer() -> None:
     assert "http://" not in text and "https://" not in text
     assert "REALIGN_CAMPAIGN_SUCCESS" in text
     assert "REALIGN_ERROR" in text
+    assert "REALIGN_RESUME_CACHE_READY" in text
     assert sha256(first).hexdigest()
 
 

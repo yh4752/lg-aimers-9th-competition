@@ -120,7 +120,7 @@ try:
         raise RuntimeError(f"Tesla T4 is required: {{gpu_name}}")
     print(f"REALIGN_GPU_READY name={{gpu_name}}", flush=True)
 
-    from experiments.catboost_50_50_realign.colab import classify_and_verify_uploads, run_supervised_campaign
+    from experiments.catboost_50_50_realign.colab import _artifact_kind, classify_and_verify_uploads, run_supervised_campaign
     verified, resume = classify_and_verify_uploads(upload_paths, run_root=RUN_ROOT / "inputs")
     latest = {{"path": resume}}
     def download_event(event):
@@ -128,6 +128,9 @@ try:
         files.download(str(event.path))
         if "resume" in event.phase or event.phase == "f1_complete":
             latest["path"] = event.path
+            input_paths = [path for path in upload_paths if _artifact_kind(path) == "catboost_50_50_realign_input_v1"]
+            globals()["_REALIGN_UPLOAD_CACHE"] = [str(input_paths[0]), str(event.path)]
+            print(f"REALIGN_RESUME_CACHE_READY path={{event.path}}", flush=True)
     result = run_supervised_campaign(
         campaign_kwargs={{
             "verified": verified,

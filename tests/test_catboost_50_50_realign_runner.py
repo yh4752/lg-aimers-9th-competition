@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from hashlib import sha256
+import json
 from pathlib import Path
 import time
 
@@ -8,7 +10,12 @@ import numpy as np
 import pandas as pd
 
 from experiments.catboost_50_50_realign.inputs import VerifiedRealignInput
-from experiments.catboost_50_50_realign.metrics import PrefixEvidence, RealignDecision
+from experiments.catboost_50_50_realign.contracts import contract_sha256
+from experiments.catboost_50_50_realign.metrics import (
+    PrefixEvidence,
+    RealignDecision,
+    decision_to_payload,
+)
 from experiments.catboost_50_50_realign.runner import run_campaign
 from experiments.catboost_50_50_realign.runner import (
     RealignRunnerError,
@@ -124,7 +131,49 @@ class Runtime:
 
     def full(self, **kwargs):
         self.calls.append("catboost_full_2024")
-        return self._catboost_result(Path(kwargs["output_dir"]), "catboost_full_2024", False)
+        output = Path(kwargs["output_dir"])
+        result = self._catboost_result(output, "catboost_full_2024", False)
+        decision_sha = sha256(
+            json.dumps(
+                decision_to_payload(kwargs["decision"]),
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode()
+        ).hexdigest()
+        identity = {
+            "schema_version": 1,
+            "campaign_id": "catboost_50_50_realign_v2",
+            "job_id": "catboost_full_2024",
+            "kind": "full_fit",
+            "contract_sha256": contract_sha256(),
+            "input_manifest_sha256": kwargs["input_manifest_sha256"],
+            "code_sha256": kwargs["code_sha256"],
+            "decision_sha256": decision_sha,
+            "selected_tree_count": 16,
+        }
+        (output / "job.json").write_text(
+            json.dumps(identity, sort_keys=True, separators=(",", ":")),
+            encoding="utf-8",
+        )
+        metrics = {
+            "schema_version": 1,
+            "job_id": "catboost_full_2024",
+            "kind": "full_fit",
+            "train_rows": 3,
+            "valid_rows": None,
+            "selected_tree_count": 16,
+            "model_sha256": sha256(result.model_path.read_bytes()).hexdigest(),
+            "preprocessing_sha256": sha256(
+                result.preprocessing_path.read_bytes()
+            ).hexdigest(),
+            "snapshot_sha256": None,
+            "decision_sha256": decision_sha,
+        }
+        (output / "metrics.json").write_text(
+            json.dumps(metrics, sort_keys=True, separators=(",", ":")),
+            encoding="utf-8",
+        )
+        return result
 
     @staticmethod
     def _catboost_result(output: Path, job_id: str, predictions: bool) -> CatBoostJobResult:
@@ -175,6 +224,8 @@ def test_promoted_path_is_strictly_sequential_and_writes_delivery(tmp_path: Path
     assert result.review_bundle.is_file()
     assert result.resume_bundle.is_file()
     assert result.delivery_bundle.is_file()
+    assert result.review_bundle.name == "catboost_50_50_realign_review.zip"
+    assert result.resume_bundle.name == "catboost_50_50_realign_resume.zip"
 
 
 def test_rejected_path_never_calls_full_fit_or_writes_delivery(tmp_path: Path) -> None:
@@ -261,7 +312,28 @@ def test_existing_models_generate_new_prefixes_and_check_old_prefix_parity(
         state_path = root / f"state-{year}.json"
         state_path.write_bytes(serialize_feature_state(state))
         prior_path = root / f"prior-{year}.csv"
-        pd.DataFrame({"p_4": [0.404], "p_32": [0.432]}).to_csv(prior_path, index=False)
+        pitcher_known = np.where(
+            valid["pitcher_id"].astype(str).isin(state.category_values["pitcher_id"]),
+            "known",
+            "oov",
+        )
+        batter_known = np.where(
+            valid["batter_id"].astype(str).isin(state.category_values["batter_id"]),
+            "known",
+            "oov",
+        )
+        pd.DataFrame(
+            {
+                "row_id": valid["row_id"],
+                "target": valid["control_success"],
+                "p_4": [0.404],
+                "p_32": [0.432],
+                "game_type": valid["game_type"],
+                "game_month": valid["game_month"],
+                "pitcher_id_known": pitcher_known,
+                "batter_id_known": batter_known,
+            }
+        ).to_csv(prior_path, index=False)
         tabm_paths[fold] = tabm_path
         model_paths[fold] = model_path
         state_paths[fold] = state_path
@@ -297,8 +369,24 @@ def test_existing_models_generate_new_prefixes_and_check_old_prefix_parity(
         "pitcher_id_known",
         "batter_id_known",
     )
-    pd.DataFrame({"p_4": [0.9], "p_32": [0.432]}).to_csv(
-        prior_paths["2022->2023"], index=False
-    )
+    changed = pd.read_csv(prior_paths["2022->2023"])
+    changed["p_4"] = 0.9
+    changed.to_csv(prior_paths["2022->2023"], index=False)
     with pytest.raises(RealignRunnerError, match="parity differs"):
         build_existing_fold_predictions(verified, model_loader=lambda path: ExistingModel())
+
+
+def test_completed_resume_republishes_without_any_training_or_evaluation(
+    tmp_path: Path,
+) -> None:
+    first_runtime = Runtime(tmp_path / "first")
+    first = _run(tmp_path / "first", first_runtime)
+    second_runtime = Runtime(tmp_path / "second")
+
+    second = _run(
+        tmp_path / "second", second_runtime, resume=first.resume_bundle
+    )
+
+    assert second.status == "completed"
+    assert second_runtime.calls == ["existing_folds_reused", "evaluate_prefixes"]
+    assert second.delivery_bundle is not None and second.delivery_bundle.is_file()

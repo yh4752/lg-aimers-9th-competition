@@ -62,7 +62,7 @@ def _completed_state() -> CampaignState:
         status="completed",
         completed_job_ids=("tabm_f1_2022", "catboost_f1_2022", "catboost_full_2024"),
         active_job_id=None,
-        decision_sha256="f" * 64,
+        decision_sha256=sha256(b"{}").hexdigest(),
         selected_tree_count=16,
         bindings=_bindings(),
     )
@@ -72,18 +72,64 @@ def _files(tmp_path: Path, *, status: str = "completed") -> CampaignFiles:
     source = tmp_path / "source"
     state = _completed_state()
     state_file = _trusted(source, "state/stage_state.json", serialize_state(state))
+    state_decision = _trusted(
+        source / "resume_source", "decision/alignment_decision.json", b"{}"
+    )
     resume = {
         "state/stage_state.json": state_file,
+        "decision/alignment_decision.json": state_decision,
         "jobs/catboost_full_2024/model.cbm": _trusted(
             source, "jobs/catboost_full_2024/model.cbm", b"model"
         ),
+        "jobs/catboost_full_2024/preprocessing_state.json": _trusted(
+            source, "jobs/catboost_full_2024/preprocessing_state.json", b"preprocessing"
+        ),
         "logs/campaign.log": _trusted(source, "logs/campaign.log", b"done\n"),
     }
+    resume["jobs/catboost_full_2024/job.json"] = _trusted(
+        source,
+        "jobs/catboost_full_2024/job.json",
+        json.dumps(
+            {
+                "schema_version": 1,
+                "campaign_id": "catboost_50_50_realign_v2",
+                "job_id": "catboost_full_2024",
+                "kind": "full_fit",
+                "contract_sha256": _bindings().contract_sha256,
+                "input_manifest_sha256": _bindings().input_manifest_sha256,
+                "code_sha256": _bindings().code_sha256,
+                "decision_sha256": state.decision_sha256,
+                "selected_tree_count": 16,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode(),
+    )
+    resume["jobs/catboost_full_2024/metrics.json"] = _trusted(
+        source,
+        "jobs/catboost_full_2024/metrics.json",
+        json.dumps(
+            {
+                "schema_version": 1,
+                "job_id": "catboost_full_2024",
+                "kind": "full_fit",
+                "train_rows": 100,
+                "valid_rows": None,
+                "selected_tree_count": 16,
+                "model_sha256": resume["jobs/catboost_full_2024/model.cbm"].sha256,
+                "preprocessing_sha256": resume[
+                    "jobs/catboost_full_2024/preprocessing_state.json"
+                ].sha256,
+                "snapshot_sha256": None,
+                "decision_sha256": state.decision_sha256,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode(),
+    )
     review = {
         "state/stage_state.json": state_file,
-        "decision/alignment_decision.json": _trusted(
-            source, "decision/alignment_decision.json", b"{}"
-        ),
+        "decision/alignment_decision.json": state_decision,
     }
     delivery = {
         name: _trusted(
@@ -244,3 +290,26 @@ def test_delivery_inference_manifest_must_bind_frozen_files(tmp_path: Path) -> N
         write_delivery_bundle(
             replace(files, delivery=members), tmp_path / "delivery.zip", _bindings()
         )
+
+
+def test_completed_resume_rejects_consistently_rehashed_forged_model(
+    tmp_path: Path,
+) -> None:
+    original = write_resume_bundle(_files(tmp_path), tmp_path / "resume.zip", _bindings())
+    forged = tmp_path / "forged.zip"
+    with ZipFile(original) as source:
+        payloads = {info.filename: source.read(info.filename) for info in source.infolist()}
+    payloads["jobs/catboost_full_2024/model.cbm"] = b"forged-model"
+    manifest = json.loads(payloads["manifest.json"])
+    manifest["members"]["jobs/catboost_full_2024/model.cbm"] = {
+        "size": len(payloads["jobs/catboost_full_2024/model.cbm"]),
+        "sha256": sha256(payloads["jobs/catboost_full_2024/model.cbm"]).hexdigest(),
+    }
+    payloads["manifest.json"] = json.dumps(
+        manifest, sort_keys=True, separators=(",", ":")
+    ).encode()
+    with ZipFile(forged, "w", compression=ZIP_DEFLATED) as archive:
+        for name, payload in payloads.items():
+            archive.writestr(name, payload)
+    with pytest.raises(RealignArtifactError, match="full model evidence differs"):
+        verify_resume_bundle(forged, expected_bindings=_bindings())

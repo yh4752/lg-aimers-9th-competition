@@ -210,6 +210,74 @@ def _validate_member_allowlist(kind: str, members: Mapping[str, TrustedFile]) ->
             raise RealignArtifactError("review contains restart or model bytes")
 
 
+_FULL_MODEL_MEMBERS = {
+    "jobs/catboost_full_2024/job.json",
+    "jobs/catboost_full_2024/metrics.json",
+    "jobs/catboost_full_2024/model.cbm",
+    "jobs/catboost_full_2024/preprocessing_state.json",
+}
+
+
+def _validate_completed_resume_semantics(
+    state: CampaignState,
+    member_names: set[str],
+    member_sha256: Callable[[str], str],
+    read_json: Callable[[str], object],
+) -> None:
+    if not _FULL_MODEL_MEMBERS.issubset(member_names):
+        raise RealignArtifactError("completed resume requires full model evidence")
+    try:
+        job = read_json("jobs/catboost_full_2024/job.json")
+        metrics = read_json("jobs/catboost_full_2024/metrics.json")
+    except (OSError, UnicodeError, json.JSONDecodeError) as error:
+        raise RealignArtifactError("full model evidence is unreadable") from error
+    expected_job = {
+        "schema_version": 1,
+        "campaign_id": "catboost_50_50_realign_v2",
+        "job_id": "catboost_full_2024",
+        "kind": "full_fit",
+        "contract_sha256": state.bindings.contract_sha256,
+        "input_manifest_sha256": state.bindings.input_manifest_sha256,
+        "code_sha256": state.bindings.code_sha256,
+        "decision_sha256": state.decision_sha256,
+        "selected_tree_count": state.selected_tree_count,
+    }
+    metric_keys = {
+        "schema_version",
+        "job_id",
+        "kind",
+        "train_rows",
+        "valid_rows",
+        "selected_tree_count",
+        "model_sha256",
+        "preprocessing_sha256",
+        "snapshot_sha256",
+        "decision_sha256",
+    }
+    valid_metrics = (
+        type(metrics) is dict
+        and set(metrics) == metric_keys
+        and metrics["schema_version"] == 1
+        and metrics["job_id"] == "catboost_full_2024"
+        and metrics["kind"] == "full_fit"
+        and type(metrics["train_rows"]) is int
+        and metrics["train_rows"] > 0
+        and metrics["valid_rows"] is None
+        and metrics["selected_tree_count"] == state.selected_tree_count
+        and metrics["decision_sha256"] == state.decision_sha256
+        and metrics["model_sha256"]
+        == member_sha256("jobs/catboost_full_2024/model.cbm")
+        and metrics["preprocessing_sha256"]
+        == member_sha256("jobs/catboost_full_2024/preprocessing_state.json")
+        and (
+            metrics["snapshot_sha256"] is None
+            or _valid_sha(metrics["snapshot_sha256"])
+        )
+    )
+    if job != expected_job or not valid_metrics:
+        raise RealignArtifactError("full model evidence differs")
+
+
 def _bundle_identity(
     kind: str, source: CampaignFiles, members: Mapping[str, TrustedFile], bindings: Bindings
 ) -> tuple[str, int | None]:
@@ -225,12 +293,21 @@ def _bundle_identity(
     state = _state_from_member(members)
     if state.bindings != bindings or state.status != source.status:
         raise RealignArtifactError("stage state bindings or status differ")
+    decision_member = members.get("decision/alignment_decision.json")
+    if state.decision_sha256 is not None and (
+        decision_member is None or decision_member.sha256 != state.decision_sha256
+    ):
+        raise RealignArtifactError("stage decision SHA-256 differs")
     if (
         kind == "realign_resume_v1"
         and state.status == "completed"
-        and "jobs/catboost_full_2024/model.cbm" not in members
     ):
-        raise RealignArtifactError("completed resume requires the full model")
+        _validate_completed_resume_semantics(
+            state,
+            set(members),
+            lambda name: members[name].sha256,
+            lambda name: json.loads(members[name].path.read_text(encoding="utf-8")),
+        )
     return state.status, state.selected_tree_count
 
 
@@ -435,13 +512,25 @@ def _verify_bundle(
                     or state.status != manifest["status"]
                     or state.selected_tree_count != manifest["selected_tree_count"]
                     or (
-                        kind == "realign_resume_v1"
-                        and
-                        state.status == "completed"
-                        and "jobs/catboost_full_2024/model.cbm" not in manifest["members"]
+                        state.decision_sha256 is not None
+                        and (
+                            "decision/alignment_decision.json"
+                            not in manifest["members"]
+                            or manifest["members"][
+                                "decision/alignment_decision.json"
+                            ]["sha256"]
+                            != state.decision_sha256
+                        )
                     )
                 ):
                     raise RealignArtifactError("artifact state differs")
+                if kind == "realign_resume_v1" and state.status == "completed":
+                    _validate_completed_resume_semantics(
+                        state,
+                        set(manifest["members"]),
+                        lambda name: manifest["members"][name]["sha256"],
+                        lambda name: json.loads(archive.read(name)),
+                    )
     except RealignArtifactError:
         raise
     except (BadZipFile, OSError, UnicodeError, json.JSONDecodeError) as error:

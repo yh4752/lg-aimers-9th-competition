@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, replace
+import json
 from pathlib import Path
 
 import pandas as pd
@@ -236,3 +237,37 @@ def test_checkpoint_semantic_validator_failure_is_preserved(
             absolute_deadline=1234.0,
             worker=lambda job, data, output, cache, deadline: _completed(output),
         )
+
+
+def test_existing_active_checkpoint_is_validated_before_worker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import experiments.catboost_50_50_realign.tabm_fold as module
+
+    data_dir = _data(tmp_path / "data")
+    output = tmp_path / "output"
+    output.mkdir()
+    (output / "checkpoint.pt").write_bytes(b"forged")
+    (output / "checkpoint_meta.json").write_text(
+        json.dumps({"epoch": 2}), encoding="utf-8"
+    )
+    worker_called = False
+
+    def reject_checkpoint(*args, **kwargs):
+        raise ValueError("invalid model state")
+
+    def worker(*args, **kwargs):
+        nonlocal worker_called
+        worker_called = True
+        raise AssertionError("worker must not start")
+
+    monkeypatch.setattr(module, "_validate_checkpoint_meta", reject_checkpoint)
+    with pytest.raises(RealignTabMFoldError, match="existing checkpoint is invalid"):
+        run_tabm_f1(
+            data_dir=data_dir,
+            output_dir=output,
+            cache_root=tmp_path / "cache",
+            absolute_deadline=1234.0,
+            worker=worker,
+        )
+    assert worker_called is False

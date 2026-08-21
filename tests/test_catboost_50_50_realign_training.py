@@ -59,24 +59,27 @@ def _data_dir(tmp_path: Path, preprocessing_frame: pd.DataFrame) -> Path:
 
 
 def _promoted(tree_count: int = 16) -> RealignDecision:
-    evidence = PrefixEvidence(
-        tree_count=tree_count,
-        fold_gain={
-            "2021->2022": 0.001,
-            "2022->2023": 0.001,
-            "2023->2024": 0.001,
-        },
-        weighted_gain=0.001,
-        latest_bootstrap_lower=0.0001,
-        maximum_segment_regression=0.0,
-        eligible_segment_count=3,
-        bootstrap_status="completed",
-        passed=True,
+    candidates = tuple(
+        PrefixEvidence(
+            tree_count=prefix,
+            fold_gain={
+                "2021->2022": 0.002 if prefix == tree_count else 0.001,
+                "2022->2023": 0.002 if prefix == tree_count else 0.001,
+                "2023->2024": 0.002 if prefix == tree_count else 0.001,
+            },
+            weighted_gain=0.002 if prefix == tree_count else 0.001,
+            latest_bootstrap_lower=0.0001,
+            maximum_segment_regression=0.0,
+            eligible_segment_count=3,
+            bootstrap_status="completed",
+            passed=True,
+        )
+        for prefix in (4, 8, 12, 16, 20, 24, 28, 32)
     )
     return RealignDecision(
         status="promoted",
         selected_tree_count=tree_count,
-        candidates=(evidence,),
+        candidates=candidates,
         reason="selected_by_preregistered_order",
     )
 
@@ -133,7 +136,7 @@ def test_full_fit_rejects_promoted_label_without_passing_selected_evidence(
         candidates=(
             PrefixEvidence(
                 **{
-                    **promoted.candidates[0].__dict__,
+                    **promoted.candidates[3].__dict__,
                     "passed": False,
                 }
             ),

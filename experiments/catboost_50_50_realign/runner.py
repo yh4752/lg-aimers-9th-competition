@@ -143,7 +143,12 @@ def _write_decision_files(root: Path, decision: RealignDecision) -> str:
     directory.mkdir(parents=True, exist_ok=True)
     payload = decision_to_payload(decision)
     encoded = _canonical_json(payload)
-    _atomic_bytes(directory / "alignment_decision.json", encoded)
+    decision_path = directory / "alignment_decision.json"
+    if decision_path.exists() or decision_path.is_symlink():
+        if decision_path.is_symlink() or decision_path.read_bytes() != encoded:
+            raise RealignRunnerError("recomputed alignment decision differs")
+    else:
+        _atomic_bytes(decision_path, encoded)
     _atomic_bytes(
         directory / "fold_metrics.json",
         _canonical_json(
@@ -239,11 +244,22 @@ def _publish(
     bundles = root / "bundles"
     bundles.mkdir(exist_ok=True)
     files = _campaign_files(root, state)
+    terminal = phase in {"completed", "blocked"}
+    resume_name = (
+        "catboost_50_50_realign_resume.zip"
+        if terminal
+        else f"catboost_50_50_realign_resume_{phase}.zip"
+    )
+    review_name = (
+        "catboost_50_50_realign_review.zip"
+        if terminal
+        else f"catboost_50_50_realign_review_{phase}.zip"
+    )
     resume = write_resume_bundle(
-        files, bundles / f"catboost_50_50_realign_resume_{phase}.zip", state.bindings
+        files, bundles / resume_name, state.bindings
     )
     review = write_review_bundle(
-        files, bundles / f"catboost_50_50_realign_review_{phase}.zip", state.bindings
+        files, bundles / review_name, state.bindings
     )
     delivery = None
     if state.status == "completed":
@@ -308,6 +324,32 @@ def build_existing_fold_predictions(
         )
         generated = pd.DataFrame(payload).loc[:, CATBOOST_COLUMNS]
         prior = pd.read_csv(verified.catboost_predictions[fold])
+        prior_required = {
+            "row_id",
+            "target",
+            "p_4",
+            "p_32",
+            "game_type",
+            "game_month",
+            "pitcher_id_known",
+            "batter_id_known",
+        }
+        if not prior_required.issubset(prior.columns) or len(prior) != len(generated):
+            raise RealignRunnerError(f"existing CatBoost evidence schema differs: {fold}")
+        for column in (
+            "row_id",
+            "target",
+            "game_type",
+            "game_month",
+            "pitcher_id_known",
+            "batter_id_known",
+        ):
+            left = prior[column].astype("string").reset_index(drop=True)
+            right = generated[column].astype("string").reset_index(drop=True)
+            if not bool((left.eq(right) | (left.isna() & right.isna())).all()):
+                raise RealignRunnerError(
+                    f"existing CatBoost evidence alignment differs: {fold} {column}"
+                )
         for prefix in (4, 32):
             if f"p_{prefix}" not in prior or not np.allclose(
                 generated[f"p_{prefix}"].to_numpy("float64"),
@@ -348,6 +390,7 @@ def run_campaign(
         state = _read_state(restored.root)
     logs = root / "logs/campaign.log"
     logs.parent.mkdir(parents=True, exist_ok=True)
+    terminal_state = state if state.status in {"completed", "deployment_blocked"} else None
 
     completed = list(state.completed_job_ids)
     if "tabm_f1_2022" not in completed:
@@ -381,10 +424,11 @@ def run_campaign(
             review, resume, _ = _publish(root, state, "catboost_incomplete", on_phase_resume)
             return RealignRun("budget_inconclusive", None, review, resume, None)
         completed.append("catboost_f1_2022")
-    state = CampaignState("f1_complete", tuple(completed), None, None, None, bindings)
-    _write_state(root, state)
-    logs.write_text("F1 complete\n", encoding="utf-8")
-    _publish(root, state, "f1_complete", on_phase_resume)
+    if terminal_state is None:
+        state = CampaignState("f1_complete", tuple(completed), None, None, None, bindings)
+        _write_state(root, state)
+        logs.write_text("F1 complete\n", encoding="utf-8")
+        _publish(root, state, "f1_complete", on_phase_resume)
 
     tabm_existing, catboost_existing = existing_fold_runtime(verified)
     tabm_by_fold = {
@@ -397,6 +441,31 @@ def run_campaign(
     }
     decision = evaluation_runtime(tabm_by_fold, catboost_by_fold, load_contract())
     decision_sha = _write_decision_files(root, decision)
+    if terminal_state is not None:
+        if decision_sha != terminal_state.decision_sha256:
+            raise RealignRunnerError("recomputed decision SHA-256 differs")
+        if terminal_state.status == "deployment_blocked":
+            if decision.status != "rejected" or decision.selected_tree_count is not None:
+                raise RealignRunnerError("blocked resume decision differs")
+            review, resume, _ = _publish(
+                root, terminal_state, "blocked", on_phase_resume
+            )
+            return RealignRun("deployment_blocked", None, review, resume, None)
+        if (
+            decision.status != "promoted"
+            or decision.selected_tree_count != terminal_state.selected_tree_count
+        ):
+            raise RealignRunnerError("completed resume decision differs")
+        review, resume, delivery = _publish(
+            root, terminal_state, "completed", on_phase_resume
+        )
+        return RealignRun(
+            "completed",
+            terminal_state.selected_tree_count,
+            review,
+            resume,
+            delivery,
+        )
     if decision.status != "promoted":
         state = CampaignState(
             "deployment_blocked", tuple(completed), None, decision_sha, None, bindings
