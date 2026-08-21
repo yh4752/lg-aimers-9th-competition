@@ -146,6 +146,20 @@ def test_frozen_transform_is_target_blind_and_order_independent() -> None:
     pd.testing.assert_frame_equal(baseline.sort_index(), reversed_output.sort_index())
 
 
+def test_official_base_state_notation_matches_binary_occupancy() -> None:
+    binary = _rows()
+    official = binary.copy()
+    mapping = {
+        "000": "___", "100": "1__", "010": "_2_", "001": "__3",
+        "110": "12_", "101": "1_3", "011": "_23", "111": "123",
+    }
+    official["base_state"] = official["base_state"].map(mapping)
+
+    assert context_state_payload(
+        fit_context_state(official, smoothing_k=32.0)
+    ) == context_state_payload(fit_context_state(binary, smoothing_k=32.0))
+
+
 @pytest.mark.parametrize(
     ("column", "value", "message"),
     [
@@ -217,4 +231,3 @@ def test_rejects_corrupt_serialized_state(mutation: str) -> None:
         payload["levels"] = payload["levels"][::-1]
     with pytest.raises(ContextFeatureError):
         context_state_from_payload(payload)
-

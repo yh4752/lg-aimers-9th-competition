@@ -7,7 +7,7 @@ import io
 import json
 from pathlib import Path
 import tarfile
-from typing import Mapping
+from typing import Callable, Mapping, Sequence
 
 
 RUNTIME_MEMBERS = (
@@ -91,6 +91,34 @@ def environment_identity_sha256() -> str:
     return sha256(payload).hexdigest()
 
 
+def discover_cached_uploads(
+    candidates: Sequence[Path],
+    *,
+    classifier: Callable[[Path], str],
+) -> tuple[Path, ...]:
+    latest: dict[str, Path] = {}
+    allowed = ("training_input", "stage_c_delivery", "campaign_resume")
+    for raw_path in candidates:
+        path = Path(raw_path)
+        if path.is_symlink() or not path.is_file():
+            continue
+        try:
+            kind = classifier(path)
+        except Exception:
+            continue
+        if kind not in allowed:
+            continue
+        previous = latest.get(kind)
+        if previous is None or (path.stat().st_mtime_ns, path.name) > (
+            previous.stat().st_mtime_ns, previous.name
+        ):
+            latest[kind] = path
+    required = ("training_input", "stage_c_delivery")
+    if not all(kind in latest for kind in required):
+        return ()
+    return tuple(latest[kind] for kind in (*required, "campaign_resume") if kind in latest)
+
+
 def render_cell(root: Path) -> bytes:
     root = Path(root)
     archive = runtime_archive(root)
@@ -106,10 +134,10 @@ RUN_BASE = pathlib.Path("/content/hierarchical_tabm/runs")
 RUN_ROOT = RUN_BASE / f"{{time.time_ns()}}_{{os.getpid()}}"
 RUN_ROOT.mkdir(parents=True, exist_ok=False)
 RUNTIME_ROOT = RUN_ROOT / "runtime"
-UPLOAD_ROOT = RUN_ROOT / "uploads"
+UPLOAD_ROOT = pathlib.Path("/content/hierarchical_tabm/upload_cache")
 OUTPUT_ROOT = RUN_ROOT / "campaign"
 SNAPSHOT_ROOT = RUN_ROOT / "snapshots"
-UPLOAD_ROOT.mkdir()
+UPLOAD_ROOT.mkdir(parents=True, exist_ok=True)
 RUNTIME_B64 = "{encoded}"
 EXPECTED_RUNTIME_SHA256 = "{archive_sha}"
 EXPECTED_CODE_SHA256 = "{code_sha}"
@@ -144,20 +172,6 @@ try:
         raise RuntimeError("embedded code identity differs")
     print(f"HIER_CODE_READY sha256={{EXPECTED_CODE_SHA256}} size_bytes={{len(payload)}}", flush=True)
 
-    stage = "upload"
-    from google.colab import files
-    uploaded = files.upload()
-    if len(uploaded) not in (2, 3):
-        raise RuntimeError("upload count must be two or three")
-    paths = []
-    for name, value in uploaded.items():
-        safe = pathlib.Path(name).name
-        if safe != name or not safe.lower().endswith(".zip"):
-            raise RuntimeError("every upload must be a top-level ZIP")
-        path = UPLOAD_ROOT / safe
-        path.write_bytes(value)
-        paths.append(path)
-
     stage = "dependencies"
     if time.time() >= SESSION_DEADLINE:
         raise RuntimeError("deadline expired before dependency installation")
@@ -171,10 +185,33 @@ try:
         raise RuntimeError("Tesla T4-compatible CUDA capability is required")
     print(f"HIER_GPU_READY name={{torch.cuda.get_device_name(0)}}", flush=True)
 
+    stage = "upload"
+    from google.colab import files
+    from experiments.hierarchical_tabm.inputs import classify_upload
+    from experiments.hierarchical_tabm.runtime_inventory import discover_cached_uploads
+    cached_candidates = tuple(UPLOAD_ROOT.glob("*.zip")) + tuple(pathlib.Path("/content").glob("*.zip"))
+    paths = list(discover_cached_uploads(cached_candidates, classifier=classify_upload))
+    if paths:
+        print(f"HIER_UPLOAD_CACHE_REUSED count={{len(paths)}}", flush=True)
+    else:
+        uploaded = files.upload()
+        if len(uploaded) not in (2, 3):
+            raise RuntimeError("upload count must be two or three")
+        for name, value in uploaded.items():
+            safe = pathlib.Path(name).name
+            if safe != name or not safe.lower().endswith(".zip"):
+                raise RuntimeError("every upload must be a top-level ZIP")
+            (UPLOAD_ROOT / safe).write_bytes(value)
+        paths = list(discover_cached_uploads(
+            tuple(UPLOAD_ROOT.glob("*.zip")), classifier=classify_upload
+        ))
+        if not paths:
+            raise RuntimeError("uploaded ZIP kinds are incomplete")
+        print(f"HIER_UPLOAD_CACHE_READY count={{len(paths)}}", flush=True)
+
     stage = "inputs"
     from experiments.hierarchical_tabm.contracts import contract_sha256, load_contract
     from experiments.hierarchical_tabm.inputs import classify_and_verify_uploads
-    from experiments.hierarchical_tabm.runtime_inventory import code_identity_sha256
     contract = load_contract()
     verified, resume = classify_and_verify_uploads(
         paths, run_root=RUN_ROOT / "verified", contract=contract,

@@ -46,6 +46,7 @@ _COUNT_LIMITS = {
 }
 _CATEGORY_COLUMNS = ("pitcher_hand", "batter_hand", "base_state", "game_type")
 _BASE_STATE = re.compile(r"[01]{3}")
+_OFFICIAL_BASE_STATE = re.compile(r"(?:1|_)(?:2|_)(?:3|_)")
 
 
 @dataclass(frozen=True)
@@ -104,9 +105,16 @@ def _integer_column(frame: pd.DataFrame, column: str) -> pd.Series:
 def _category_column(frame: pd.DataFrame, column: str) -> pd.Series:
     result = frame[column].astype("string").fillna(MISSING_CATEGORY).astype(str)
     if column == "base_state":
-        invalid = result.ne(MISSING_CATEGORY) & ~result.str.fullmatch(_BASE_STATE)
+        binary = result.str.fullmatch(_BASE_STATE)
+        official = result.str.fullmatch(_OFFICIAL_BASE_STATE)
+        invalid = result.ne(MISSING_CATEGORY) & ~binary & ~official
         if invalid.any():
-            raise ContextFeatureError("base_state must be a three-bit string")
+            raise ContextFeatureError("base_state notation is invalid")
+        official_rows = official.fillna(False)
+        if official_rows.any():
+            result.loc[official_rows] = result.loc[official_rows].map(
+                lambda value: "".join("0" if item == "_" else "1" for item in value)
+            )
     return result
 
 

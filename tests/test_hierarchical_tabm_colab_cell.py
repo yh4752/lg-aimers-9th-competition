@@ -7,6 +7,7 @@ from pathlib import Path
 import shutil
 import subprocess
 import tarfile
+import time
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -40,6 +41,25 @@ def test_dependency_change_changes_code_identity(tmp_path: Path) -> None:
         "tabm==0.0.4\nrtdl-num-embeddings==0.0.12\n", encoding="utf-8"
     )
     assert code_identity_sha256(copied) != before
+
+
+def test_cached_upload_discovery_keeps_latest_file_per_content_kind(
+    tmp_path: Path,
+) -> None:
+    from experiments.hierarchical_tabm.runtime_inventory import discover_cached_uploads
+
+    old = tmp_path / "old.zip"; old.write_bytes(b"training")
+    new = tmp_path / "new.zip"; new.write_bytes(b"training")
+    stage = tmp_path / "stage.zip"; stage.write_bytes(b"stage")
+    unknown = tmp_path / "unknown.zip"; unknown.write_bytes(b"unknown")
+    now = time.time()
+    os.utime(old, (now - 10, now - 10))
+
+    kinds = {b"training": "training_input", b"stage": "stage_c_delivery"}
+    result = discover_cached_uploads(
+        (unknown, old, stage, new), classifier=lambda path: kinds[path.read_bytes()]
+    )
+    assert result == (new, stage)
 
 
 def test_embedded_runtime_imports_without_repository_pythonpath(tmp_path: Path) -> None:
@@ -82,4 +102,5 @@ def test_checked_in_cell_matches_renderer_and_static_safety() -> None:
     assert "github" not in lowered
     assert "HIER_ERROR" in text
     assert "HIER_INPUTS_VERIFIED" in text
+    assert "HIER_UPLOAD_CACHE_REUSED" in text
     assert sha256(first).hexdigest()
