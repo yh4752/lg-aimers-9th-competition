@@ -61,7 +61,9 @@ def test_embedded_runtime_imports_without_repository(tmp_path: Path) -> None:
             "-c",
             "from experiments.catboost_50_50_realign.contracts import build_jobs,load_contract;"
             "from experiments.catboost_50_50_realign.colab import DownloadEvent;"
-            "assert len(build_jobs(load_contract()))==3;assert DownloadEvent",
+            "from experiments.catboost_50_50_realign.runner import _code_sha256;"
+            "assert len(build_jobs(load_contract()))==3;assert DownloadEvent;"
+            "assert len(_code_sha256())==64",
         ],
         cwd=tmp_path,
         env=environment,

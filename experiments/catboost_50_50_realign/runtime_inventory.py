@@ -17,6 +17,7 @@ RUNTIME_MEMBERS = (
     "experiments/catboost_50_50_realign/metrics.py",
     "experiments/catboost_50_50_realign/requirements-colab.txt",
     "experiments/catboost_50_50_realign/runner.py",
+    "experiments/catboost_50_50_realign/runtime_inventory.py",
     "experiments/catboost_50_50_realign/state.py",
     "experiments/catboost_50_50_realign/tabm_fold.py",
     "experiments/catboost_50_50_realign/training.py",
