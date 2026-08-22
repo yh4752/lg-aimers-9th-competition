@@ -47,6 +47,11 @@ def test_checked_in_cell_matches_deterministic_renderer() -> None:
     assert "REALIGN_CAMPAIGN_SUCCESS" in text
     assert "REALIGN_ERROR" in text
     assert "REALIGN_RESUME_CACHE_READY" in text
+    purge = 'if module_name == "experiments" or module_name.startswith("experiments.")'
+    assert purge in text
+    assert text.index(purge) < text.index(
+        "from experiments.catboost_50_50_realign.colab import"
+    )
     assert sha256(first).hexdigest()
 
 

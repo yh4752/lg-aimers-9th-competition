@@ -97,6 +97,9 @@ ARCHIVE_B64 = "{encoded}"
 with tarfile.open(fileobj=io.BytesIO(base64.b64decode(ARCHIVE_B64)), mode="r:gz") as archive:
     archive.extractall(CODE_ROOT, filter="data")
 sys.path.insert(0, str(CODE_ROOT))
+for module_name in tuple(sys.modules):
+    if module_name == "experiments" or module_name.startswith("experiments."):
+        del sys.modules[module_name]
 
 try:
     from google.colab import files
