@@ -858,7 +858,7 @@ def test_checkpoint_validator_accepts_actual_stage_p_cpu_states(tmp_path: Path) 
         categorical_cardinalities=(3,),
         train_x_num=None,
         piecewise_bin_edges=(
-            np.array((-1.0, 0.0, 1.0), dtype="float32"),
+            np.array((-1.0, 1.0), dtype="float32"),
             np.array((-2.0, -1.0, 0.0, 2.0), dtype="float32"),
         ),
     )
