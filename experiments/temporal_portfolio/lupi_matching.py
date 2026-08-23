@@ -342,6 +342,7 @@ def _candidate_games(
     )
     if any(_is_missing(value) for value in mapped):
         return []
+    inning_scope = tuple(main_game["inning"].drop_duplicates().tolist())
     candidates: list[pd.DataFrame] = []
     for game in history_games:
         metadata_matches = all(
@@ -354,6 +355,7 @@ def _candidate_games(
             game["pitcher_team"].eq(mapped[0])
             & game["batter_team"].eq(mapped[1])
             & game["top_bottom"].eq(first["top_bottom"])
+            & game["inning"].isin(inning_scope)
         ].copy(deep=True)
         if not selected.empty:
             candidates.append(selected)

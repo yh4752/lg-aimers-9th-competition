@@ -87,6 +87,64 @@ def _canonically_nonmonotonic_history() -> pd.DataFrame:
     return history
 
 
+def _alternating_two_inning_game() -> tuple[pd.DataFrame, pd.DataFrame, EntityMaps]:
+    segments = (
+        (1, "T", 20, 10, 11, 21),
+        (1, "B", 10, 20, 12, 22),
+        (2, "T", 20, 10, 11, 21),
+        (2, "B", 10, 20, 12, 22),
+    )
+    rows: list[dict[str, object]] = []
+    history_rows: list[dict[str, object]] = []
+    pitch_no = 0
+    for inning, side, pitcher_team, batter_team, pitcher, batter in segments:
+        for balls, strikes in ((0, 0), (1, 0), (1, 1)):
+            pitch_no += 1
+            rows.append(
+                {
+                    "row_id": f"main-{pitch_no}",
+                    "season": 2023,
+                    "game_month": 5,
+                    "game_dayofweek": 2,
+                    "pitcher_team_id": pitcher_team,
+                    "batter_team_id": batter_team,
+                    "inning": inning,
+                    "top_bottom": side,
+                    "balls_before": balls,
+                    "strikes_before": strikes,
+                    "outs_before": 0,
+                    "pitcher_id": pitcher,
+                    "batter_id": batter,
+                    "control_success": pitch_no % 2,
+                }
+            )
+            history_rows.append(
+                {
+                    "trackman_id": f"pitch-{pitch_no}",
+                    "trackman_game_id": "official-game",
+                    "pitch_no": pitch_no,
+                    "season": 2023,
+                    "game_month": 5,
+                    "game_dayofweek": 2,
+                    "pitcher_team": "B" if pitcher_team == 20 else "A",
+                    "batter_team": "A" if batter_team == 10 else "B",
+                    "inning": inning,
+                    "top_bottom": "Top" if side == "T" else "Bottom",
+                    "balls_before": balls,
+                    "strikes_before": strikes,
+                    "outs_before": 0,
+                    "pitcher_trackman_id": 101 if pitcher == 11 else 102,
+                    "batter_trackman_id": 201 if batter == 21 else 202,
+                }
+            )
+    maps = EntityMaps.from_mappings(
+        pitchers={11: 101, 12: 102},
+        batters={21: 201, 22: 202},
+        teams={10: "A", 20: "B"},
+    )
+    return pd.DataFrame(rows), pd.DataFrame(history_rows), maps
+
+
 def test_exact_unique_monotonic_alignment_accepts_and_preserves_source_order() -> None:
     main = _main_game()
 
@@ -101,6 +159,31 @@ def test_exact_unique_monotonic_alignment_accepts_and_preserves_source_order() -
     assert matched["lupi_match_mean_cost"].eq(0.0).all()
     assert matched["lupi_match_exact_token_agreement"].eq(1.0).all()
     assert matched["lupi_match_exact_token_evidence"].eq(6).all()
+
+
+def test_alternating_two_inning_game_matches_each_exact_half_inning_scope() -> None:
+    main, history, maps = _alternating_two_inning_game()
+    shuffled = history.iloc[[8, 0, 11, 3, 6, 1, 9, 5, 2, 10, 4, 7]]
+
+    matched = match_current_pitch_rows(main, shuffled, id_maps=maps)
+
+    assert matched["row_id"].tolist() == main["row_id"].tolist()
+    assert matched["trackman_id"].tolist() == history["trackman_id"].tolist()
+    assert matched["lupi_match_accepted"].eq(1).all()
+    assert matched["lupi_match_coverage"].eq(1.0).all()
+    assert matched["lupi_match_mean_cost"].eq(0.0).all()
+
+
+def test_wrong_inning_rows_are_not_candidate_evidence() -> None:
+    main = _main_game()
+    wrong_inning = _trackman_game().assign(inning=2)
+
+    matched = match_current_pitch_rows(main, wrong_inning, id_maps=_id_maps())
+
+    assert matched["lupi_match_accepted"].eq(0).all()
+    assert matched["trackman_id"].isna().all()
+    assert matched["lupi_match_coverage"].eq(0.0).all()
+    assert matched["lupi_match_mean_cost"].isna().all()
 
 
 def test_duplicate_or_near_tied_candidate_games_reject_entire_pseudo_game() -> None:
