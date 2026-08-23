@@ -164,6 +164,19 @@ def _expected_columns() -> dict[str, tuple[str, ...]]:
     }
 
 
+def _portfolio_pitcher_frames() -> tuple[pd.DataFrame, pd.DataFrame]:
+    frame = _main().copy(deep=True)
+    frame["row_id"] = ["p0", "p1", "v0", "v1"]
+    frame["control_success"] = [1, 0, 1, 0]
+    frame["batter_id"] = [21, 22, 21, 22]
+    frame["batter_hand"] = [1, 2, 1, 2]
+    frame["batter_team_id"] = [9, 10, 9, 10]
+    return (
+        frame.loc[frame["season"].eq(2023)].copy(deep=True),
+        frame.loc[frame["season"].eq(2024)].copy(deep=True),
+    )
+
+
 def _empty_valid_result(cutoff_year: int = 2023) -> TrackmanBuildResult:
     lookup = pd.DataFrame(columns=PITCHER_LOOKUP_COLUMNS)
     return TrackmanBuildResult(
@@ -200,6 +213,43 @@ def test_pitcher_trackman_exact_partition_is_complete_and_disjoint() -> None:
     assert set().union(*non_keys) == set(PITCHER_LOOKUP_COLUMNS) - {"pitcher_id"}
     assert all(frame.columns.is_unique for frame in state.bundles.values())
     assert tuple(select_columns(state.lookup, exact=P0).columns) == expected["P0"]
+
+
+@pytest.mark.parametrize("empty_lookup", [False, True])
+def test_portfolio_trackman_cache_roundtrip_preserves_exact_state_and_batches(
+    tmp_path, monkeypatch: pytest.MonkeyPatch, empty_lookup: bool
+) -> None:
+    from experiments.temporal_portfolio.feature_cache import materialize_fold_cache
+    from experiments.temporal_portfolio.features import PortfolioFeatureSpec
+
+    if empty_lookup:
+        monkeypatch.setattr(
+            pitcher_module,
+            "build_trackman_lookup",
+            lambda *_args, **_kwargs: _empty_valid_result(),
+        )
+    train, valid = _portfolio_pitcher_frames()
+    kwargs = dict(
+        train=train,
+        valid=valid,
+        history=_history(),
+        spec=PortfolioFeatureSpec(("base", "P0", "P2"), "dl_standard"),
+        valid_year=2024,
+    )
+
+    fresh = materialize_fold_cache(tmp_path / "cache", **kwargs)
+    reused = materialize_fold_cache(tmp_path / "cache", **kwargs)
+
+    assert fresh.reused is False
+    assert reused.reused is True
+    assert fresh.state.source_hashes == reused.state.source_hashes
+    pitcher = reused.state.fitted_sources["pitcher"]
+    assert pitcher.lookup_sha256 == reused.state.source_hashes["pitcher"]
+    assert pitcher.lookup.empty is empty_lookup
+    np.testing.assert_array_equal(fresh.train.x_num, reused.train.x_num)
+    np.testing.assert_array_equal(fresh.train.x_cat, reused.train.x_cat)
+    np.testing.assert_array_equal(fresh.valid.x_num, reused.valid.x_num)
+    np.testing.assert_array_equal(fresh.valid.x_cat, reused.valid.x_cat)
 
 
 def test_pitcher_trackman_is_cutoff_bound_under_future_source_mutation() -> None:

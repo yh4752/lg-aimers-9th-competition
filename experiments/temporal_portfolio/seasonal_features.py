@@ -160,6 +160,7 @@ class S1State:
     def snapshot(self) -> SeasonalSnapshot:
         """Return a detached legacy snapshot for audit and compatibility."""
 
+        _validate_state(self)
         return SeasonalSnapshot(
             cutoff_year=self._cutoff_year,
             pitcher=pd.DataFrame.from_records(
@@ -289,6 +290,10 @@ def build_training_s1(
 
     outputs: list[pd.DataFrame] = []
     unique_years = tuple(sorted(set(seasons)))
+    if len(unique_years) < 2:
+        raise SeasonalFeatureError(
+            "S1 requires a full contiguous feature-fit prefix before expert row selection"
+        )
     positions = np.arange(len(prepared), dtype="int64")
     for season in unique_years:
         mask = prepared["season"].eq(season).to_numpy()

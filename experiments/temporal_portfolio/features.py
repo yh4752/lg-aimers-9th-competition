@@ -87,6 +87,8 @@ class PortfolioFeatureState:
         source_hashes: Mapping[str, str],
         inference_mode: bool,
     ) -> "PortfolioFeatureState":
+        if type(inference_mode) is not bool:
+            raise PortfolioFeatureError("inference_mode must be an exact bool")
         state = object.__new__(cls)
         object.__setattr__(state, "spec", spec)
         object.__setattr__(state, "valid_year", valid_year)
@@ -95,7 +97,7 @@ class PortfolioFeatureState:
         object.__setattr__(state, "numeric_columns", preprocessing_state.numeric_columns)
         object.__setattr__(state, "categorical_columns", preprocessing_state.categorical_columns)
         object.__setattr__(state, "schema", preprocessing_state.output_columns)
-        object.__setattr__(state, "inference_mode", bool(inference_mode))
+        object.__setattr__(state, "inference_mode", inference_mode)
         object.__setattr__(
             state,
             "_category_items",
@@ -157,6 +159,7 @@ def fit_portfolio_features(
     spec: PortfolioFeatureSpec,
     valid_year: int,
     inference_mode: bool = False,
+    feature_fit_rows: pd.DataFrame | None = None,
 ) -> tuple[PortfolioFeatureState, FeatureBatch]:
     """Fit all state on training rows and return their encoded FeatureBatch."""
 
@@ -164,6 +167,12 @@ def fit_portfolio_features(
     if type(inference_mode) is not bool:
         raise PortfolioFeatureError("inference_mode must be an exact bool")
     source = _validate_training_rows(train, valid_year=valid_year)
+    context = (
+        source
+        if feature_fit_rows is None
+        else _validate_training_rows(feature_fit_rows, valid_year=valid_year)
+    )
+    context_positions = _context_positions(source, context)
     if type(history) is not pd.DataFrame or history.columns.has_duplicates:
         raise PortfolioFeatureError("history must be a DataFrame with unique columns")
     sources: dict[str, object] = {}
@@ -171,7 +180,11 @@ def fit_portfolio_features(
     raw = source.copy(deep=True)
     try:
         if "S1" in normalized.bundles:
-            s1_state, training_s1 = build_training_s1(source, valid_year=valid_year)
+            s1_state, context_s1 = build_training_s1(
+                context, valid_year=valid_year
+            )
+            training_s1 = context_s1.iloc[context_positions].copy(deep=True)
+            training_s1.index = source.index
             raw = _append_new_columns(raw, training_s1, bundle="S1")
             sources["S1"] = s1_state
             hashes["S1"] = _s1_sha256(s1_state)
@@ -179,7 +192,7 @@ def fit_portfolio_features(
         pitcher_state: PitcherTrackmanState | None = None
         if _PITCHER_BUNDLES.intersection(normalized.bundles) or "M1" in normalized.bundles:
             pitcher_state = fit_pitcher_trackman(
-                source, history, cutoff_year=valid_year - 1
+                context, history, cutoff_year=valid_year - 1
             )
             sources["pitcher"] = pitcher_state
             hashes["pitcher"] = pitcher_state.lookup_sha256
@@ -190,7 +203,7 @@ def fit_portfolio_features(
         batter_state: BatterTrackmanState | None = None
         if "B1" in normalized.bundles or "M1" in normalized.bundles:
             batter_state = fit_batter_trackman(
-                source, history, cutoff_year=valid_year - 1
+                context, history, cutoff_year=valid_year - 1
             )
             if batter_state.status == "insufficient_mapping":
                 raise PortfolioFeatureError(
@@ -212,7 +225,7 @@ def fit_portfolio_features(
 
     try:
         preprocessing, prepared = fit_preprocessor(
-            raw, PreprocessingSpec(normalized.profile, ())
+            raw, PreprocessingSpec(normalized.profile, ("hand_matchup",))
         )
     except PreprocessingError as error:
         raise PortfolioFeatureError(str(error)) from error
@@ -440,6 +453,31 @@ def _validate_common_rows(frame: object, *, label: str) -> pd.DataFrame:
     return result
 
 
+def _context_positions(train: pd.DataFrame, context: pd.DataFrame) -> np.ndarray:
+    if tuple(train.columns) != tuple(context.columns):
+        raise PortfolioFeatureError(
+            "expert train schema differs from the feature-fit context"
+        )
+    context_ids = context["row_id"].astype(str).tolist()
+    positions = {row_id: position for position, row_id in enumerate(context_ids)}
+    train_ids = train["row_id"].astype(str).tolist()
+    missing = [row_id for row_id in train_ids if row_id not in positions]
+    if missing:
+        raise PortfolioFeatureError(
+            "expert train rows are not an exact subset of feature-fit context"
+        )
+    selected_positions = np.asarray(
+        [positions[row_id] for row_id in train_ids], dtype="int64"
+    )
+    if not context.iloc[selected_positions].reset_index(drop=True).equals(
+        train.reset_index(drop=True)
+    ):
+        raise PortfolioFeatureError(
+            "expert train rows differ from feature-fit context values"
+        )
+    return selected_positions
+
+
 def _s1_sha256(state: S1State) -> str:
     payload = {
         "valid_year": state.valid_year,
@@ -455,12 +493,24 @@ def _s1_sha256(state: S1State) -> str:
 def _validate_state(state: object) -> None:
     if type(state) is not PortfolioFeatureState:
         raise PortfolioFeatureError("portfolio feature state type is invalid")
+    if type(state.inference_mode) is not bool:
+        raise PortfolioFeatureError("portfolio inference_mode is invalid")
     if state.history_cutoff_year != state.valid_year - 1:
         raise PortfolioFeatureError("portfolio feature state cutoff is invalid")
     if normalize_feature_spec(state.spec) != state.spec:
         raise PortfolioFeatureError("portfolio feature state spec is not normalized")
     if state.schema != state.preprocessing_state.output_columns:
         raise PortfolioFeatureError("portfolio feature state schema differs")
+    expected_preprocessing = PreprocessingSpec(
+        state.spec.profile, ("hand_matchup",)
+    )
+    if state.preprocessing_state.spec != expected_preprocessing:
+        raise PortfolioFeatureError("portfolio preprocessing contract differs")
+    if (
+        "hand_matchup" not in state.schema
+        or "hand_matchup" not in state.categorical_columns
+    ):
+        raise PortfolioFeatureError("portfolio hand_matchup schema is missing")
     if (
         state.numeric_columns != state.preprocessing_state.numeric_columns
         or state.categorical_columns != state.preprocessing_state.categorical_columns
@@ -475,5 +525,46 @@ def _validate_state(state: object) -> None:
             range(1, len(values) + 1)
         ):
             raise PortfolioFeatureError(f"portfolio category map is invalid: {column}")
-    if any(type(name) is not str or len(digest) != 64 for name, digest in state._source_hash_items):
+    if (
+        type(state._source_items) is not tuple
+        or type(state._source_hash_items) is not tuple
+        or len(dict(state._source_items)) != len(state._source_items)
+        or len(dict(state._source_hash_items)) != len(state._source_hash_items)
+    ):
         raise PortfolioFeatureError("portfolio source hashes are invalid")
+    sources = dict(state._source_items)
+    expected_sources: set[str] = set()
+    if "S1" in state.spec.bundles:
+        expected_sources.add("S1")
+    if _PITCHER_BUNDLES.intersection(state.spec.bundles) or "M1" in state.spec.bundles:
+        expected_sources.add("pitcher")
+    if "B1" in state.spec.bundles or "M1" in state.spec.bundles:
+        expected_sources.add("batter")
+    if set(sources) != expected_sources:
+        raise PortfolioFeatureError("portfolio source state keys differ from spec")
+    try:
+        observed = _recomputed_source_hashes(sources)
+    except (SeasonalFeatureError, PitcherTrackmanError, BatterTrackmanError) as error:
+        raise PortfolioFeatureError("portfolio source states are invalid") from error
+    if dict(state._source_hash_items) != observed:
+        raise PortfolioFeatureError("portfolio source hashes differ from fitted states")
+
+
+def _recomputed_source_hashes(sources: Mapping[str, object]) -> dict[str, str]:
+    hashes: dict[str, str] = {}
+    if "S1" in sources:
+        if type(sources["S1"]) is not S1State:
+            raise PortfolioFeatureError("S1 source state is invalid")
+        hashes["S1"] = _s1_sha256(sources["S1"])
+    if "pitcher" in sources:
+        if type(sources["pitcher"]) is not PitcherTrackmanState:
+            raise PortfolioFeatureError("pitcher source state is invalid")
+        hashes["pitcher"] = sources["pitcher"].lookup_sha256
+    if "batter" in sources:
+        if type(sources["batter"]) is not BatterTrackmanState:
+            raise PortfolioFeatureError("batter source state is invalid")
+        hashes["batter_mapping"] = sources["batter"].mapping_sha256
+        hashes["batter_exposure"] = sources["batter"].exposure_sha256
+    if set(sources).difference(("S1", "pitcher", "batter")):
+        raise PortfolioFeatureError("portfolio source state keys are invalid")
+    return hashes

@@ -45,6 +45,16 @@ def test_training_s1_preserves_interleaved_rows_with_duplicate_index() -> None:
     assert result.iloc[0]["season_pitcher_n"] != result.iloc[1]["season_pitcher_n"]
 
 
+def test_training_s1_rejects_single_season_without_full_prefix() -> None:
+    from experiments.temporal_portfolio.seasonal_features import build_training_s1
+
+    train, _ = _fit_and_valid()
+    recent = train.loc[train["season"].eq(2023)]
+
+    with pytest.raises(SeasonalFeatureError, match="full contiguous feature-fit prefix"):
+        build_training_s1(recent, valid_year=2024)
+
+
 def test_portfolio_composition_and_transform_are_row_stable(tmp_path) -> None:
     from experiments.temporal_portfolio.feature_cache import materialize_fold_cache
     from experiments.temporal_portfolio.features import (
@@ -53,7 +63,7 @@ def test_portfolio_composition_and_transform_are_row_stable(tmp_path) -> None:
         transform_portfolio_features,
     )
 
-    train, valid = _fit_and_valid()
+    train, valid = _portfolio_fit_and_valid()
     valid = valid.assign(row_id=["v0", "v1", "v2"])
     spec = PortfolioFeatureSpec(("base", "S1"), "dl_standard")
     state, batch = fit_portfolio_features(
@@ -65,6 +75,9 @@ def test_portfolio_composition_and_transform_are_row_stable(tmp_path) -> None:
     assert batch.x_num.dtype == np.float32
     assert batch.x_cat.dtype == np.int64
     assert np.isfinite(batch.x_num).all()
+    assert state.preprocessing_state.spec.components == ("hand_matchup",)
+    assert "hand_matchup" in state.schema
+    assert "hand_matchup" in state.category_maps
 
     whole = transform_portfolio_features(valid, state)
     shuffled_rows = valid.iloc[[2, 0, 1]]
@@ -103,7 +116,7 @@ def test_portfolio_rejects_invalid_spec_chronology_and_inference_target() -> Non
         transform_portfolio_features,
     )
 
-    train, valid = _fit_and_valid()
+    train, valid = _portfolio_fit_and_valid()
     valid = valid.assign(row_id=["v0", "v1", "v2"])
     with pytest.raises(PortfolioFeatureError, match="base"):
         fit_portfolio_features(
@@ -164,7 +177,7 @@ def test_portfolio_evaluation_row_is_unchanged_by_other_row_mutation() -> None:
         transform_portfolio_features,
     )
 
-    train, valid = _fit_and_valid()
+    train, valid = _portfolio_fit_and_valid()
     valid = valid.assign(row_id=["v0", "v1", "v2"])
     state, _ = fit_portfolio_features(
         train,
@@ -191,7 +204,7 @@ def test_portfolio_b1_insufficient_mapping_is_explicitly_skippable(monkeypatch) 
     )
     from experiments.temporal_portfolio.trackman_batter import BatterTrackmanState
 
-    train, _ = _fit_and_valid()
+    train, _ = _portfolio_fit_and_valid()
     fake = object.__new__(BatterTrackmanState)
     object.__setattr__(fake, "status", "insufficient_mapping")
     monkeypatch.setattr(feature_module, "fit_batter_trackman", lambda *_a, **_k: fake)
@@ -205,6 +218,88 @@ def test_portfolio_b1_insufficient_mapping_is_explicitly_skippable(monkeypatch) 
         )
 
 
+def test_recent_expert_s1_requires_and_uses_full_feature_fit_prefix(tmp_path) -> None:
+    from experiments.temporal_portfolio.feature_cache import (
+        PortfolioFeatureCacheError,
+        materialize_fold_cache,
+    )
+    from experiments.temporal_portfolio.features import (
+        PortfolioFeatureError,
+        PortfolioFeatureSpec,
+        fit_portfolio_features,
+    )
+
+    context, _ = _portfolio_fit_and_valid()
+    recent = context.loc[context["season"].eq(2023)].copy(deep=True)
+    spec = PortfolioFeatureSpec(("base", "S1"), "dl_standard")
+
+    with pytest.raises(PortfolioFeatureError, match="full contiguous feature-fit prefix"):
+        fit_portfolio_features(
+            recent, pd.DataFrame(), spec=spec, valid_year=2024
+        )
+
+    state, batch = fit_portfolio_features(
+        recent,
+        pd.DataFrame(),
+        spec=spec,
+        valid_year=2024,
+        feature_fit_rows=context,
+    )
+    assert batch.row_id.tolist() == recent["row_id"].astype(str).tolist()
+    assert state.fitted_sources["S1"].snapshot.cutoff_year == 2023
+
+    _, valid = _portfolio_fit_and_valid()
+    valid = valid.assign(row_id=["v0", "v1", "v2"])
+    cache = materialize_fold_cache(
+        tmp_path / "cache",
+        train=recent,
+        valid=valid,
+        history=pd.DataFrame(),
+        spec=spec,
+        valid_year=2024,
+        feature_fit_rows=context,
+    )
+    assert cache.train.row_id.tolist() == recent["row_id"].astype(str).tolist()
+    changed_context = context.copy(deep=True)
+    changed_context.iloc[0, changed_context.columns.get_loc("control_success")] = 0
+    with pytest.raises(PortfolioFeatureCacheError, match="identity"):
+        materialize_fold_cache(
+            tmp_path / "cache",
+            train=recent,
+            valid=valid,
+            history=pd.DataFrame(),
+            spec=spec,
+            valid_year=2024,
+            feature_fit_rows=changed_context,
+        )
+
+
+def test_portfolio_state_recomputes_and_binds_source_hashes() -> None:
+    from experiments.temporal_portfolio.features import (
+        PortfolioFeatureError,
+        PortfolioFeatureSpec,
+        PortfolioFeatureState,
+        fit_portfolio_features,
+        transform_portfolio_features,
+    )
+
+    train, valid = _portfolio_fit_and_valid()
+    valid = valid.assign(row_id=["v0", "v1", "v2"])
+    state, _ = fit_portfolio_features(
+        train,
+        pd.DataFrame(),
+        spec=PortfolioFeatureSpec(("base", "S1"), "dl_standard"),
+        valid_year=2024,
+    )
+    forged = object.__new__(PortfolioFeatureState)
+    for name in PortfolioFeatureState.__dataclass_fields__:
+        object.__setattr__(forged, name, object.__getattribute__(state, name))
+    object.__setattr__(forged, "_source_hash_items", (("S1", "0" * 64),))
+
+    with pytest.raises(PortfolioFeatureError, match="source hashes"):
+        transform_portfolio_features(valid, forged)
+
+
 @pytest.mark.parametrize("bad_season", [True, "2022", 2022.5])
 def test_portfolio_rejects_non_numeric_or_non_integral_training_season(
     bad_season,
@@ -215,7 +310,7 @@ def test_portfolio_rejects_non_numeric_or_non_integral_training_season(
         fit_portfolio_features,
     )
 
-    train, _ = _fit_and_valid()
+    train, _ = _portfolio_fit_and_valid()
     train["season"] = train["season"].astype(object)
     train.iloc[0, train.columns.get_loc("season")] = bad_season
     with pytest.raises(PortfolioFeatureError, match="season"):
@@ -234,7 +329,7 @@ def test_portfolio_rejects_string_target_and_non_boolean_inference_flag() -> Non
         fit_portfolio_features,
     )
 
-    train, _ = _fit_and_valid()
+    train, _ = _portfolio_fit_and_valid()
     string_target = train.copy(deep=True)
     string_target["control_success"] = string_target["control_success"].astype(str)
     with pytest.raises(PortfolioFeatureError, match="target"):
@@ -261,7 +356,7 @@ def test_portfolio_cache_detects_tampering_and_input_mismatch(tmp_path) -> None:
     )
     from experiments.temporal_portfolio.features import PortfolioFeatureSpec
 
-    train, valid = _fit_and_valid()
+    train, valid = _portfolio_fit_and_valid()
     valid = valid.assign(row_id=["v0", "v1", "v2"])
     kwargs = dict(
         train=train,
@@ -311,7 +406,7 @@ def test_portfolio_cache_rejects_hash_consistent_invalid_batch_shape(tmp_path) -
     )
     from experiments.temporal_portfolio.features import PortfolioFeatureSpec
 
-    train, valid = _fit_and_valid()
+    train, valid = _portfolio_fit_and_valid()
     valid = valid.assign(row_id=["v0", "v1", "v2"])
     kwargs = dict(
         train=train,
@@ -377,6 +472,23 @@ def _fit_and_valid() -> tuple[pd.DataFrame, pd.DataFrame]:
     frame = _s1_frame()
     train = frame.loc[frame["season"].lt(2024)].copy(deep=True)
     valid = frame.loc[frame["season"].eq(2024)].drop(columns="control_success")
+    return train, valid
+
+
+def _portfolio_fit_and_valid() -> tuple[pd.DataFrame, pd.DataFrame]:
+    train, valid = _fit_and_valid()
+    train = train.assign(
+        pitcher_hand=[1, 1, 2],
+        batter_hand=[1, 1, 2],
+        pitcher_team_id=[7, 7, 8],
+        batter_team_id=[9, 9, 10],
+    )
+    valid = valid.assign(
+        pitcher_hand=[1, 2, 1],
+        batter_hand=[1, 1, 2],
+        pitcher_team_id=[7, 8, 99],
+        batter_team_id=[9, 10, 99],
+    )
     return train, valid
 
 

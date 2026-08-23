@@ -56,12 +56,22 @@ def materialize_fold_cache(
     spec: PortfolioFeatureSpec,
     valid_year: int,
     inference_mode: bool = False,
+    feature_fit_rows: pd.DataFrame | None = None,
 ) -> PortfolioFoldCache:
     """Create or strictly verify one train/validation portfolio cache."""
 
     normalized = normalize_feature_spec(spec)
+    if type(inference_mode) is not bool:
+        raise PortfolioFeatureCacheError("inference_mode must be an exact bool")
+    context = train if feature_fit_rows is None else feature_fit_rows
     raw_identity = _raw_identity(
-        train, valid, history, normalized, valid_year, inference_mode
+        train,
+        valid,
+        history,
+        context,
+        normalized,
+        valid_year,
+        inference_mode,
     )
     root = _safe_cache_root(cache_root)
     identifier = "__".join((str(valid_year), normalized.profile, *normalized.bundles))
@@ -78,6 +88,7 @@ def materialize_fold_cache(
             spec=normalized,
             valid_year=valid_year,
             inference_mode=inference_mode,
+            feature_fit_rows=feature_fit_rows,
         )
         valid_batch = transform_portfolio_features(valid, state)
         state_payload = _state_payload(state)
@@ -177,6 +188,7 @@ def _raw_identity(
     train: pd.DataFrame,
     valid: pd.DataFrame,
     history: pd.DataFrame,
+    feature_fit_rows: pd.DataFrame,
     spec: PortfolioFeatureSpec,
     valid_year: int,
     inference_mode: bool,
@@ -187,10 +199,12 @@ def _raw_identity(
         "train_frame_sha256": _frame_sha256(train),
         "valid_frame_sha256": _frame_sha256(valid),
         "history_frame_sha256": _frame_sha256(history),
+        "feature_fit_row_sha256": _row_sha256(feature_fit_rows),
+        "feature_fit_frame_sha256": _frame_sha256(feature_fit_rows),
         "spec": {"bundles": list(spec.bundles), "profile": spec.profile},
         "valid_year": valid_year,
         "history_cutoff_year": valid_year - 1,
-        "inference_mode": bool(inference_mode),
+        "inference_mode": inference_mode,
         "feature_code_sha256": _feature_code_sha256(),
     }
 
@@ -203,21 +217,21 @@ def _state_payload(state: PortfolioFeatureState) -> dict[str, object]:
                 "type": "S1",
                 "valid_year": source.valid_year,
                 "prior_rate": source.prior_rate,
-                "pitcher": source.snapshot.pitcher.to_dict("split"),
-                "batter": source.snapshot.batter.to_dict("split"),
+                "pitcher": _frame_payload(source.snapshot.pitcher),
+                "batter": _frame_payload(source.snapshot.batter),
             }
         elif type(source) is PitcherTrackmanState:
             sources[name] = {
                 "type": "pitcher",
                 "cutoff_year": source.cutoff_year,
-                "lookup": source.lookup.to_dict("split"),
+                "lookup": _frame_payload(source.lookup),
             }
         elif type(source) is BatterTrackmanState:
             sources[name] = {
                 "type": "batter",
                 "cutoff_year": source.cutoff_year,
-                "mapping": source.mapping.to_dict("split"),
-                "exposure": source.exposure.to_dict("split"),
+                "mapping": _frame_payload(source.mapping),
+                "exposure": _frame_payload(source.exposure),
             }
         else:
             raise PortfolioFeatureCacheError(f"unsupported source state: {name}")
@@ -315,8 +329,27 @@ def _state_from_payload(payload: Mapping[str, object]) -> PortfolioFeatureState:
     )
 
 
+def _frame_payload(frame: pd.DataFrame) -> dict[str, object]:
+    split = frame.to_dict("split")
+    return {**split, "dtypes": [str(dtype) for dtype in frame.dtypes]}
+
+
 def _frame_from_split(payload: Mapping[str, object]) -> pd.DataFrame:
-    return pd.DataFrame(payload["data"], columns=payload["columns"], index=payload["index"])
+    columns = payload["columns"]
+    dtypes = payload.get("dtypes")
+    if not isinstance(columns, list) or not isinstance(dtypes, list):
+        raise PortfolioFeatureCacheError("cached frame schema is invalid")
+    if len(columns) != len(dtypes):
+        raise PortfolioFeatureCacheError("cached frame dtypes differ from schema")
+    frame = pd.DataFrame(
+        payload["data"], columns=columns, index=payload["index"]
+    )
+    try:
+        for column, dtype in zip(columns, dtypes, strict=True):
+            frame[column] = frame[column].astype(dtype)
+    except (TypeError, ValueError, OverflowError) as error:
+        raise PortfolioFeatureCacheError("cached frame dtype is invalid") from error
+    return frame
 
 
 def _write_batch(root: Path, batch: FeatureBatch, prefix: str) -> dict[str, str]:
@@ -453,6 +486,8 @@ def _feature_code_sha256() -> str:
         root / "trackman_pitcher.py",
         root / "trackman_batter.py",
         Path(PreprocessingState.__module__.replace(".", "/") + ".py"),
+        Path("experiments/independent_dl/feature_sources/seasonal.py"),
+        Path("experiments/independent_dl/feature_sources/trackman.py"),
     )
     digest = sha256()
     project = Path(__file__).resolve().parents[2]
