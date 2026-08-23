@@ -20,9 +20,85 @@ from experiments.temporal_portfolio.metrics import (
     score_gain_from_brier_gain,
     score_tier,
 )
+from experiments.temporal_portfolio.uncertainty import (
+    SEGMENT_COLUMNS,
+    PortfolioUncertaintyError,
+    pitcher_block_bootstrap,
+    segment_regressions,
+)
 
 
 SEGMENTS = ("game_type", "pitcher_id_known")
+
+
+def _uncertainty_frame() -> pd.DataFrame:
+    rows = 12
+    return pd.DataFrame(
+        {
+            "row_id": [f"r{i}" for i in range(rows)],
+            "valid_year": [2022] * 4 + [2023] * 4 + [2024] * 4,
+            "pitcher_id": [1] * 3 + [2] * 3 + [3] * 3 + [4] * 3,
+            "target": [0, 1] * 6,
+            "baseline": np.linspace(0.25, 0.75, rows),
+            "candidate": np.linspace(0.23, 0.73, rows),
+            "game_type": ["regular"] * 10 + ["final"] * 2,
+            "hand_matchup": ["same", "opposite"] * 6,
+            "pitcher_id_known": ["known"] * 9 + ["oov"] * 3,
+            "batter_id_known": ["known", "oov"] * 6,
+            "trackman_available": ["yes"] * 8 + ["no"] * 4,
+            "history_count_bucket": ["high", "low", "medium"] * 4,
+            "runner_state": ["empty", "occupied"] * 6,
+            "leverage_bucket": ["low", "medium", "high"] * 4,
+        }
+    )
+
+
+def test_pitcher_block_bootstrap_is_deterministic_and_paired() -> None:
+    frame = _uncertainty_frame()
+    first = pitcher_block_bootstrap(frame, repeats=1000, seed=3407)
+    second = pitcher_block_bootstrap(frame, repeats=1000, seed=3407)
+    assert first == second
+    assert first.repeats == 1000
+    assert first.lower <= first.median <= first.upper
+
+
+def test_small_segments_are_diagnostic_not_eligible() -> None:
+    result = segment_regressions(_uncertainty_frame(), minimum_rows=5)
+    assert {item.segment for item in result} == set(SEGMENT_COLUMNS)
+    small = next(item for item in result if item.rows < 5)
+    assert small.eligible is False
+    assert all(item.brier_gain == pytest.approx(item.baseline_brier - item.candidate_brier) for item in result)
+
+
+def test_uncertainty_is_row_order_invariant_and_detached() -> None:
+    frame = _uncertainty_frame()
+    shuffled = frame.sample(frac=1, random_state=7).reset_index(drop=True)
+    first = pitcher_block_bootstrap(frame, repeats=100, seed=7)
+    second = pitcher_block_bootstrap(shuffled, repeats=100, seed=7)
+    assert first == second
+
+
+@pytest.mark.parametrize("column", ["row_id", "pitcher_id"])
+def test_uncertainty_rejects_invalid_ids(column: str) -> None:
+    frame = _uncertainty_frame()
+    frame.loc[0, column] = None
+    with pytest.raises(PortfolioUncertaintyError, match="IDs|row_id"):
+        pitcher_block_bootstrap(frame, repeats=10, seed=1)
+
+
+def test_uncertainty_rejects_schema_probability_and_control_errors() -> None:
+    with pytest.raises(PortfolioUncertaintyError, match="schema"):
+        pitcher_block_bootstrap(
+            _uncertainty_frame().drop(columns="runner_state"), repeats=10, seed=1
+        )
+    invalid = _uncertainty_frame()
+    invalid.loc[0, "candidate"] = np.nan
+    with pytest.raises(PortfolioUncertaintyError, match="candidate"):
+        pitcher_block_bootstrap(invalid, repeats=10, seed=1)
+    with pytest.raises(PortfolioUncertaintyError, match="repeats"):
+        pitcher_block_bootstrap(_uncertainty_frame(), repeats=True, seed=1)
+    with pytest.raises(PortfolioUncertaintyError, match="minimum_rows"):
+        segment_regressions(_uncertainty_frame(), minimum_rows=0)
 
 
 def _prediction_frame(
