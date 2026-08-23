@@ -4,6 +4,7 @@ import csv
 from hashlib import sha256
 import json
 from pathlib import Path
+import re
 import subprocess
 import sys
 from zipfile import ZipFile
@@ -225,3 +226,165 @@ def test_prepare_cli_help() -> None:
     assert completed.returncode == 0
     assert "--data-dir" in completed.stdout
     assert "--output" in completed.stdout
+
+
+def test_verify_rejects_unterminated_quoted_csv_field(tiny_official_dir: Path) -> None:
+    (tiny_official_dir / "trackman_history.csv").write_text(
+        'pitcher_id\n"unterminated', encoding="utf-8"
+    )
+
+    with pytest.raises(PortfolioInputError, match="trackman_history.csv"):
+        verify_official_data(tiny_official_dir)
+
+
+def test_prepare_binds_train_baseline_to_the_parsed_file_version(
+    tmp_path: Path, tiny_official_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import experiments.temporal_portfolio.inputs as module
+
+    original = module._read_csv
+
+    def replace_after_parse(source: object, *args: object, **kwargs: object) -> object:
+        parsed = original(source, *args, **kwargs)
+        path = getattr(source, "path", source)
+        if Path(path).name == "train.csv":
+            _write_csv(
+                Path(path),
+                [
+                    ["row_id", "feature", "control_success"],
+                    ["replacement-1", "a", "1"],
+                    ["replacement-2", "b", "0"],
+                    ["replacement-3", "c", "1"],
+                ],
+            )
+        return parsed
+
+    monkeypatch.setattr(module, "_read_csv", replace_after_parse)
+    with pytest.raises(PortfolioInputError, match="changed"):
+        prepare_input_archive(tiny_official_dir, tmp_path / "input.zip")
+
+
+def test_prepare_rejects_same_content_symlink_swap_after_copy(
+    tmp_path: Path, tiny_official_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import experiments.temporal_portfolio.inputs as module
+
+    original = module._copy_source
+    original_train = (tiny_official_dir / "train.csv").read_bytes()
+    replacement = tmp_path / "same-train.csv"
+    replacement.write_bytes(original_train)
+
+    def swap_after_copy(source: Path, destination: object) -> None:
+        original(source, destination)
+        if source.name == "train.csv":
+            source.unlink()
+            source.symlink_to(replacement)
+
+    monkeypatch.setattr(module, "_copy_source", swap_after_copy)
+    with pytest.raises(PortfolioInputError, match="symlink"):
+        prepare_input_archive(tiny_official_dir, tmp_path / "input.zip")
+
+
+def test_prepare_rejects_contract_bytes_that_fail_sealed_validation(
+    tmp_path: Path, tiny_official_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import experiments.temporal_portfolio.inputs as module
+
+    original = Path.read_bytes
+
+    def altered_contract_bytes(path: Path) -> bytes:
+        if path == Path(module.__file__).with_name("contract.json"):
+            return b"{}"
+        return original(path)
+
+    monkeypatch.setattr(Path, "read_bytes", altered_contract_bytes)
+    with pytest.raises(PortfolioInputError, match="contract"):
+        prepare_input_archive(tiny_official_dir, tmp_path / "input.zip")
+
+
+def test_prepare_wraps_mkstemp_failure(
+    tmp_path: Path, tiny_official_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import experiments.temporal_portfolio.inputs as module
+
+    def broken_mkstemp(**kwargs: object) -> tuple[int, str]:
+        raise OSError("no temporary file")
+
+    monkeypatch.setattr(module, "mkstemp", broken_mkstemp)
+    output = tmp_path / "input.zip"
+    with pytest.raises(PortfolioInputError, match="temporary"):
+        prepare_input_archive(tiny_official_dir, output)
+    assert not output.exists()
+    assert not list(tmp_path.glob(".temporal-portfolio-input-*"))
+
+
+@pytest.mark.parametrize(
+    ("name", "rows", "message"),
+    [
+        ("train.csv", [["row_id", "", "control_success"], ["a", "x", "1"]], "blank header"),
+        ("test.csv", [["row_id", "row_id"], ["test-1", "x"], ["test-2", "y"]], "duplicate headers"),
+        ("trackman_history.csv", [["pitcher_id"]], "no data rows"),
+    ],
+)
+def test_verify_rejects_csv_header_and_history_boundaries(
+    tiny_official_dir: Path, name: str, rows: list[list[str]], message: str
+) -> None:
+    _write_csv(tiny_official_dir / name, rows)
+
+    with pytest.raises(PortfolioInputError, match=message):
+        verify_official_data(tiny_official_dir)
+
+
+def test_verify_rejects_train_count_not_greater_than_test(tiny_official_dir: Path) -> None:
+    _write_csv(
+        tiny_official_dir / "train.csv",
+        [["row_id", "feature", "control_success"], ["train-1", "a", "1"], ["train-2", "b", "0"]],
+    )
+
+    with pytest.raises(PortfolioInputError, match="row count"):
+        verify_official_data(tiny_official_dir)
+
+
+def test_prepare_uses_fixed_zip_metadata_and_cleans_atomic_failure(
+    tmp_path: Path, tiny_official_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    result = prepare_input_archive(tiny_official_dir, tmp_path / "input.zip")
+    with ZipFile(result.path) as archive:
+        for info in archive.infolist():
+            assert info.date_time == (1980, 1, 1, 0, 0, 0)
+            assert info.create_system == 3
+            assert (info.external_attr >> 16) & 0o777 == 0o644
+
+    import experiments.temporal_portfolio.inputs as module
+
+    def fail_copy(source: Path, destination: object) -> None:
+        raise OSError("copy failed")
+
+    monkeypatch.setattr(module, "_copy_source", fail_copy)
+    failed = tmp_path / "failed.zip"
+    with pytest.raises(PortfolioInputError, match="copy failed"):
+        prepare_input_archive(tiny_official_dir, failed)
+    assert not failed.exists()
+    assert not list(tmp_path.glob(".temporal-portfolio-input-*"))
+
+
+def test_prepare_cli_succeeds_from_outside_repository(
+    tmp_path: Path, tiny_official_dir: Path
+) -> None:
+    script = Path(__file__).parents[1] / "tools/prepare_temporal_portfolio_input.py"
+    output = tmp_path / "input.zip"
+    completed = subprocess.run(
+        [sys.executable, str(script), "--data-dir", str(tiny_official_dir), "--output", str(output)],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode == 0
+    assert completed.stderr == ""
+    assert re.fullmatch(
+        rf"TEMPORAL_INPUT_READY path={re.escape(str(output.absolute()))} "
+        r"sha256=[0-9a-f]{64} size_bytes=[0-9]+\n",
+        completed.stdout,
+    )

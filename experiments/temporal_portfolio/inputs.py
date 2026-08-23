@@ -1,9 +1,11 @@
 """Fail-closed preparation of the temporal portfolio's official inputs."""
 from __future__ import annotations
 
-from dataclasses import dataclass
+from contextlib import contextmanager
+from dataclasses import dataclass, field
 import csv
 from hashlib import sha256
+import io
 import json
 import math
 import os
@@ -11,8 +13,10 @@ from pathlib import Path
 import stat
 from tempfile import mkstemp
 from types import MappingProxyType
-from typing import BinaryIO, Mapping
+from typing import BinaryIO, Iterator, Mapping
 from zipfile import BadZipFile, ZIP_DEFLATED, ZipFile, ZipInfo
+
+from .contracts import PortfolioContractError, _SEALED_CONTRACT_SHA256, load_contract
 
 
 class PortfolioInputError(ValueError):
@@ -29,6 +33,7 @@ class VerifiedOfficialData:
     member_sha256: Mapping[str, str]
     train_rows: int
     test_rows: int
+    member_sizes: Mapping[str, int] = field(repr=False, compare=False)
 
 
 @dataclass(frozen=True)
@@ -60,11 +65,74 @@ class _CsvData:
     header: tuple[str, ...]
     row_ids: tuple[str, ...]
     row_count: int
+    sha256: str
+    size_bytes: int
+
+
+@dataclass
+class _SafeSource:
+    path: Path
+    handle: BinaryIO
+    initial_stat: os.stat_result
+
+    def require_unchanged(self, label: str) -> None:
+        try:
+            current = os.fstat(self.handle.fileno())
+        except OSError as error:
+            raise PortfolioInputError(f"cannot inspect {label}: {error}") from error
+        if not _same_file_version(self.initial_stat, current):
+            raise PortfolioInputError(f"{label} changed while it was being read")
+
+
+class _HashingReader(io.RawIOBase):
+    """A non-closing reader that accounts for every raw byte consumed by CSV."""
+
+    def __init__(self, source: BinaryIO) -> None:
+        self._source = source
+        self.digest = sha256()
+        self.size_bytes = 0
+
+    def readable(self) -> bool:
+        return True
+
+    def readinto(self, buffer: bytearray) -> int:
+        data = self._source.read(len(buffer))
+        if not data:
+            return 0
+        size = len(data)
+        buffer[:size] = data
+        self.digest.update(data)
+        self.size_bytes += size
+        return size
+
+
+class _HashingWriter:
+    """A narrow writer used to bind ZIP bytes to a source baseline digest."""
+
+    def __init__(self, destination: BinaryIO) -> None:
+        self._destination = destination
+        self.digest = sha256()
+        self.size_bytes = 0
+
+    def write(self, data: bytes) -> int:
+        self.digest.update(data)
+        self.size_bytes += len(data)
+        return self._destination.write(data)
 
 
 def _absolute_path(path: str | Path) -> Path:
     value = Path(path)
     return value if value.is_absolute() else Path.cwd() / value
+
+
+def _same_file_version(left: os.stat_result, right: os.stat_result) -> bool:
+    return (
+        stat.S_ISREG(right.st_mode)
+        and left.st_dev == right.st_dev
+        and left.st_ino == right.st_ino
+        and left.st_size == right.st_size
+        and left.st_mtime_ns == right.st_mtime_ns
+    )
 
 
 def _require_no_symlink_ancestors(path: Path, label: str) -> None:
@@ -78,79 +146,95 @@ def _require_no_symlink_ancestors(path: Path, label: str) -> None:
         raise PortfolioInputError(f"cannot inspect {label}: {error}") from error
 
 
-def _require_regular_file(path: Path, label: str) -> None:
+@contextmanager
+def _safe_source(path: Path, label: str) -> Iterator[_SafeSource]:
+    """Open one non-symlink regular file and bind it to its opened identity."""
+    _require_no_symlink_ancestors(path.parent, label)
+    descriptor: int | None = None
+    handle: BinaryIO | None = None
     try:
-        if path.is_symlink():
-            raise PortfolioInputError(f"{label} must not be a symlink")
-        mode = path.lstat().st_mode
+        before = os.lstat(path)
+        if not stat.S_ISREG(before.st_mode):
+            raise PortfolioInputError(f"{label} must be a regular non-symlink file")
+        flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+        nofollow = getattr(os, "O_NOFOLLOW", 0)
+        if nofollow:
+            flags |= nofollow
+        descriptor = os.open(path, flags)
+        opened = os.fstat(descriptor)
+        if not _same_file_version(before, opened):
+            raise PortfolioInputError(f"{label} changed before it could be opened")
+        handle = os.fdopen(descriptor, "rb", buffering=0)
+        descriptor = None
+        yield _SafeSource(path=path, handle=handle, initial_stat=opened)
     except PortfolioInputError:
         raise
     except OSError as error:
-        raise PortfolioInputError(f"cannot inspect {label}: {error}") from error
-    if not stat.S_ISREG(mode):
-        raise PortfolioInputError(f"{label} must be a regular file")
+        raise PortfolioInputError(f"cannot safely open {label}: {error}") from error
+    finally:
+        if handle is not None:
+            try:
+                handle.close()
+            except OSError as error:
+                raise PortfolioInputError(f"cannot close {label}: {error}") from error
+        elif descriptor is not None:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
 
 
 def file_sha256(path: str | Path) -> str:
-    """Return a streaming SHA-256 for a regular file."""
-    value = Path(path)
-    try:
+    """Return a streaming SHA-256 from one safely opened file descriptor."""
+    source_path = Path(path)
+    with _safe_source(source_path, str(source_path)) as source:
         digest = sha256()
-        with value.open("rb") as handle:
-            for chunk in iter(lambda: handle.read(_CHUNK_SIZE), b""):
-                digest.update(chunk)
+        for chunk in iter(lambda: source.handle.read(_CHUNK_SIZE), b""):
+            digest.update(chunk)
+        source.require_unchanged(str(source_path))
         return digest.hexdigest()
-    except OSError as error:
-        raise PortfolioInputError(f"cannot hash {value}: {error}") from error
 
 
-def _read_csv(path: Path, label: str, *, collect_row_ids: bool) -> _CsvData:
+def _read_csv(
+    source: _SafeSource,
+    label: str,
+    *,
+    collect_row_ids: bool,
+    validate_sample_values: bool = False,
+) -> _CsvData:
+    hashing_reader = _HashingReader(source.handle)
+    text: io.TextIOWrapper | None = None
     try:
-        with path.open("r", encoding="utf-8-sig", newline="") as handle:
-            reader = csv.reader(handle)
-            try:
-                header = next(reader)
-            except StopIteration as error:
-                raise PortfolioInputError(f"{label} is empty") from error
-            if not header or any(not cell.strip() for cell in header):
-                raise PortfolioInputError(f"{label} has a blank header")
-            if len(set(header)) != len(header):
-                raise PortfolioInputError(f"{label} has duplicate headers")
-            if collect_row_ids and "row_id" not in header:
-                raise PortfolioInputError(f"{label} must contain row_id")
-            row_id_index = header.index("row_id") if collect_row_ids else None
-            row_ids: list[str] = []
-            row_count = 0
-            for row in reader:
-                if not row or len(row) != len(header):
-                    raise PortfolioInputError(f"{label} has a malformed row")
-                row_count += 1
-                if row_id_index is not None:
-                    row_id = row[row_id_index]
-                    if not row_id.strip():
-                        raise PortfolioInputError(f"{label} has a blank row_id")
-                    row_ids.append(row_id)
-            if row_count == 0:
-                raise PortfolioInputError(f"{label} has no data rows")
-            return _CsvData(tuple(header), tuple(row_ids), row_count)
-    except PortfolioInputError:
-        raise
-    except (csv.Error, UnicodeError, OSError) as error:
-        raise PortfolioInputError(f"cannot read {label}: {error}") from error
-
-
-def _require_unique_row_ids(data: _CsvData, label: str) -> None:
-    if len(set(data.row_ids)) != len(data.row_ids):
-        raise PortfolioInputError(f"{label} has a duplicate row_id")
-
-
-def _validate_sample_values(path: Path) -> None:
-    try:
-        with path.open("r", encoding="utf-8-sig", newline="") as handle:
-            reader = csv.reader(handle)
+        text = io.TextIOWrapper(
+            io.BufferedReader(hashing_reader), encoding="utf-8-sig", newline=""
+        )
+        reader = csv.reader(text, strict=True)
+        try:
             header = next(reader)
-            target_index = header.index("control_success")
-            for row in reader:
+        except StopIteration as error:
+            raise PortfolioInputError(f"{label} is empty") from error
+        if not header or any(not cell.strip() for cell in header):
+            raise PortfolioInputError(f"{label} has a blank header")
+        if len(set(header)) != len(header):
+            raise PortfolioInputError(f"{label} has duplicate headers")
+        if collect_row_ids and "row_id" not in header:
+            raise PortfolioInputError(f"{label} must contain row_id")
+        if validate_sample_values and tuple(header) != ("row_id", "control_success"):
+            raise PortfolioInputError("sample_submission.csv header differs")
+        row_id_index = header.index("row_id") if collect_row_ids else None
+        target_index = header.index("control_success") if validate_sample_values else None
+        row_ids: list[str] = []
+        row_count = 0
+        for row in reader:
+            if not row or len(row) != len(header):
+                raise PortfolioInputError(f"{label} has a malformed row")
+            row_count += 1
+            if row_id_index is not None:
+                row_id = row[row_id_index]
+                if not row_id.strip():
+                    raise PortfolioInputError(f"{label} has a blank row_id")
+                row_ids.append(row_id)
+            if target_index is not None:
                 try:
                     value = float(row[target_index])
                 except (ValueError, OverflowError) as error:
@@ -161,10 +245,52 @@ def _validate_sample_values(path: Path) -> None:
                     raise PortfolioInputError(
                         "sample_submission control_success must be finite numeric"
                     )
+        if row_count == 0:
+            raise PortfolioInputError(f"{label} has no data rows")
+        text.close()
+        text = None
+        if hashing_reader.size_bytes != source.initial_stat.st_size:
+            raise PortfolioInputError(f"{label} changed while it was being parsed")
+        return _CsvData(
+            header=tuple(header),
+            row_ids=tuple(row_ids),
+            row_count=row_count,
+            sha256=hashing_reader.digest.hexdigest(),
+            size_bytes=hashing_reader.size_bytes,
+        )
     except PortfolioInputError:
         raise
-    except (csv.Error, UnicodeError, OSError, StopIteration, ValueError) as error:
-        raise PortfolioInputError(f"cannot read sample_submission.csv: {error}") from error
+    except (csv.Error, UnicodeError, OSError, ValueError) as error:
+        raise PortfolioInputError(f"cannot read {label}: {error}") from error
+    finally:
+        if text is not None:
+            try:
+                text.close()
+            except (OSError, UnicodeError) as error:
+                raise PortfolioInputError(f"cannot close {label}: {error}") from error
+
+
+def _parse_csv_member(
+    path: Path,
+    label: str,
+    *,
+    collect_row_ids: bool,
+    validate_sample_values: bool = False,
+) -> _CsvData:
+    with _safe_source(path, label) as source:
+        data = _read_csv(
+            source,
+            label,
+            collect_row_ids=collect_row_ids,
+            validate_sample_values=validate_sample_values,
+        )
+        source.require_unchanged(label)
+        return data
+
+
+def _require_unique_row_ids(data: _CsvData, label: str) -> None:
+    if len(set(data.row_ids)) != len(data.row_ids):
+        raise PortfolioInputError(f"{label} has a duplicate row_id")
 
 
 def verify_official_data(root: str | Path) -> VerifiedOfficialData:
@@ -185,34 +311,40 @@ def verify_official_data(root: str | Path) -> VerifiedOfficialData:
         raise PortfolioInputError("official data directory top-level members differ")
 
     members = {name: data_root / name for name in _OFFICIAL_NAMES}
-    for name, path in members.items():
-        _require_regular_file(path, name)
-
-    train = _read_csv(members["train.csv"], "train.csv", collect_row_ids=True)
-    test = _read_csv(members["test.csv"], "test.csv", collect_row_ids=True)
-    history = _read_csv(
+    train = _parse_csv_member(members["train.csv"], "train.csv", collect_row_ids=True)
+    test = _parse_csv_member(members["test.csv"], "test.csv", collect_row_ids=True)
+    history = _parse_csv_member(
         members["trackman_history.csv"], "trackman_history.csv", collect_row_ids=False
     )
-    sample = _read_csv(
-        members["sample_submission.csv"], "sample_submission.csv", collect_row_ids=True
+    sample = _parse_csv_member(
+        members["sample_submission.csv"],
+        "sample_submission.csv",
+        collect_row_ids=True,
+        validate_sample_values=True,
     )
-    if "row_id" not in train.header or "control_success" not in train.header:
+    if "control_success" not in train.header:
         raise PortfolioInputError("train.csv must contain row_id and control_success")
-    if "row_id" not in test.header:
-        raise PortfolioInputError("test.csv must contain row_id")
     if "control_success" in test.header:
         raise PortfolioInputError("test.csv must not contain control_success")
-    if sample.header != ("row_id", "control_success"):
-        raise PortfolioInputError("sample_submission.csv header differs")
     for data, label in ((train, "train.csv"), (test, "test.csv"), (sample, "sample_submission.csv")):
         _require_unique_row_ids(data, label)
     if train.row_count <= test.row_count:
         raise PortfolioInputError("train.csv row count must exceed test.csv row count")
     if sample.row_count != test.row_count or sample.row_ids != test.row_ids:
         raise PortfolioInputError("sample_submission.csv row_id sequence differs from test.csv")
-    _validate_sample_values(members["sample_submission.csv"])
 
-    hashes = {name: file_sha256(path) for name, path in members.items()}
+    hashes = {
+        "train.csv": train.sha256,
+        "test.csv": test.sha256,
+        "trackman_history.csv": history.sha256,
+        "sample_submission.csv": sample.sha256,
+    }
+    sizes = {
+        "train.csv": train.size_bytes,
+        "test.csv": test.size_bytes,
+        "trackman_history.csv": history.size_bytes,
+        "sample_submission.csv": sample.size_bytes,
+    }
     return VerifiedOfficialData(
         root=data_root,
         train=members["train.csv"],
@@ -222,13 +354,16 @@ def verify_official_data(root: str | Path) -> VerifiedOfficialData:
         member_sha256=MappingProxyType(hashes),
         train_rows=train.row_count,
         test_rows=test.row_count,
+        member_sizes=MappingProxyType(sizes),
     )
 
 
 def _copy_source(source: Path, destination: BinaryIO) -> None:
-    with source.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(_CHUNK_SIZE), b""):
+    """Stream one safely opened source into a destination without path reopens."""
+    with _safe_source(source, source.name) as opened:
+        for chunk in iter(lambda: opened.handle.read(_CHUNK_SIZE), b""):
             destination.write(chunk)
+        opened.require_unchanged(source.name)
 
 
 def _zip_info(name: str) -> ZipInfo:
@@ -239,15 +374,29 @@ def _zip_info(name: str) -> ZipInfo:
     return info
 
 
-def _canonical_manifest(verified: VerifiedOfficialData, member_sizes: Mapping[str, int]) -> bytes:
-    contract_path = Path(__file__).with_name("contract.json")
+def _contract_path() -> Path:
+    return Path(__file__).with_name("contract.json")
+
+
+def _sealed_contract_bytes() -> bytes:
+    contract_path = _contract_path()
     try:
+        load_contract(contract_path)
         contract_bytes = contract_path.read_bytes()
+    except PortfolioContractError as error:
+        raise PortfolioInputError(f"temporal portfolio contract is invalid: {error}") from error
     except OSError as error:
         raise PortfolioInputError(f"cannot read contract.json: {error}") from error
+    if sha256(contract_bytes).hexdigest() != _SEALED_CONTRACT_SHA256:
+        raise PortfolioInputError("temporal portfolio contract bytes differ")
+    return contract_bytes
+
+
+def _canonical_manifest(verified: VerifiedOfficialData) -> bytes:
+    contract_bytes = _sealed_contract_bytes()
     members = {
         archive_name: {
-            "size": member_sizes[archive_name],
+            "size": verified.member_sizes[source_name],
             "sha256": verified.member_sha256[source_name],
         }
         for archive_name, source_name in _ARCHIVE_SOURCES
@@ -267,7 +416,7 @@ def _canonical_manifest(verified: VerifiedOfficialData, member_sizes: Mapping[st
     )
 
 
-def _verify_archive(path: Path, manifest_bytes: bytes, member_sizes: Mapping[str, int]) -> None:
+def _verify_archive(path: Path, manifest_bytes: bytes, verified: VerifiedOfficialData) -> None:
     try:
         with ZipFile(path) as archive:
             if archive.namelist() != list(_ARCHIVE_NAMES):
@@ -288,17 +437,17 @@ def _verify_archive(path: Path, manifest_bytes: bytes, member_sizes: Mapping[str
                 raise PortfolioInputError("prepared ZIP manifest schema differs")
             for archive_name, source_name in _ARCHIVE_SOURCES:
                 info = archive.getinfo(archive_name)
-                if info.file_size != member_sizes[archive_name]:
-                    raise PortfolioInputError("prepared ZIP member size differs")
                 digest = sha256()
                 with archive.open(info) as handle:
                     for chunk in iter(lambda: handle.read(_CHUNK_SIZE), b""):
                         digest.update(chunk)
                 evidence = manifest["members"].get(archive_name)
                 if (
-                    type(evidence) is not dict
+                    info.file_size != verified.member_sizes[source_name]
+                    or type(evidence) is not dict
                     or evidence.get("size") != info.file_size
                     or evidence.get("sha256") != digest.hexdigest()
+                    or digest.hexdigest() != verified.member_sha256[source_name]
                 ):
                     raise PortfolioInputError("prepared ZIP member evidence differs")
     except PortfolioInputError:
@@ -336,40 +485,54 @@ def prepare_input_archive(
         "trackman_history.csv": verified.history,
         "sample_submission.csv": verified.sample_submission,
     }
+    manifest_bytes = _canonical_manifest(verified)
+    descriptor: int | None = None
+    temporary: Path | None = None
     try:
-        member_sizes = {
-            archive_name: sources[source_name].stat().st_size
-            for archive_name, source_name in _ARCHIVE_SOURCES
-        }
-    except OSError as error:
-        raise PortfolioInputError(f"cannot stat official data member: {error}") from error
-    manifest_bytes = _canonical_manifest(verified, member_sizes)
-    descriptor, temporary_name = mkstemp(
-        prefix=".temporal-portfolio-input-", suffix=".zip", dir=destination.parent
-    )
-    os.close(descriptor)
-    temporary = Path(temporary_name)
-    try:
+        descriptor, temporary_name = mkstemp(
+            prefix=".temporal-portfolio-input-", suffix=".zip", dir=destination.parent
+        )
+        temporary = Path(temporary_name)
+        os.close(descriptor)
+        descriptor = None
         with ZipFile(temporary, "w", compression=ZIP_DEFLATED, compresslevel=9) as archive:
             with archive.open(_zip_info("manifest.json"), "w") as target:
                 target.write(manifest_bytes)
             for archive_name, source_name in _ARCHIVE_SOURCES:
                 with archive.open(_zip_info(archive_name), "w") as target:
-                    _copy_source(sources[source_name], target)
-        _verify_archive(temporary, manifest_bytes, member_sizes)
+                    writer = _HashingWriter(target)
+                    _copy_source(sources[source_name], writer)
+                    expected_sha256 = verified.member_sha256[source_name]
+                    expected_size = verified.member_sizes[source_name]
+                    if (
+                        writer.size_bytes != expected_size
+                        or writer.digest.hexdigest() != expected_sha256
+                    ):
+                        raise PortfolioInputError(
+                            f"official data source changed before ZIP copy: {source_name}"
+                        )
+        _verify_archive(temporary, manifest_bytes, verified)
         for source_name, source in sources.items():
             if file_sha256(source) != verified.member_sha256[source_name]:
                 raise PortfolioInputError("official data source changed during archive preparation")
+        archive_sha256 = file_sha256(temporary)
+        archive_size = temporary.stat().st_size
         os.replace(temporary, destination)
-        final_size = destination.stat().st_size
-        return PreparedInputArchive(destination, file_sha256(destination), final_size)
+        temporary = None
+        return PreparedInputArchive(destination, archive_sha256, archive_size)
     except PortfolioInputError:
         raise
     except (BadZipFile, OSError) as error:
-        raise PortfolioInputError(f"cannot prepare input archive: {error}") from error
+        raise PortfolioInputError(f"cannot prepare temporary input archive: {error}") from error
     finally:
-        try:
-            if os.path.lexists(temporary):
-                temporary.unlink()
-        except OSError:
-            pass
+        if descriptor is not None:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+        if temporary is not None:
+            try:
+                if os.path.lexists(temporary):
+                    temporary.unlink()
+            except OSError:
+                pass
