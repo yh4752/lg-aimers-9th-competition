@@ -6,7 +6,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from experiments.temporal_portfolio.contracts import TemporalFold
+from experiments.temporal_portfolio.contracts import TemporalFold, load_contract
 from experiments.temporal_portfolio.folds import (
     FoldError,
     WeightedRows,
@@ -177,7 +177,7 @@ def test_prefiltered_accepts_only_the_complete_chosen_season_set() -> None:
         _frame([2020, 2019, 2021]),
         FOLD,
         expert="multi",
-        decay=Decimal("1"),
+        decay=Decimal("1.00"),
         prefiltered=True,
     )
 
@@ -260,7 +260,7 @@ def test_selection_preserves_input_order_and_index_without_aliasing_caller() -> 
         {
             "season": [2020, 2018, 2021, 2019],
             "row_id": [20, 18, 21, 19],
-            "value": [[1], [2], [3], [4]],
+            "value": [1, 2, 3, 4],
         },
         index=[8, 6, 4, 2],
     )
@@ -299,6 +299,92 @@ def test_weighted_rows_defensively_copies_frame_and_freezes_weights() -> None:
         rows.row_sha256 = "0" * 64
 
 
+def test_public_frame_mutation_and_reordering_cannot_change_stored_rows() -> None:
+    rows = select_training_rows(
+        _frame([2019, 2020, 2021], ["a", "b", "c"]),
+        FOLD,
+        expert="multi",
+        decay=Decimal("0.55"),
+    )
+
+    exposed = rows.frame
+    exposed.loc[:, "row_id"] = ["changed-c", "changed-b", "changed-a"]
+    exposed.sort_values("season", ascending=False, inplace=True)
+
+    replay = rows.frame
+    assert replay["row_id"].tolist() == ["a", "b", "c"]
+    assert replay["season"].tolist() == [2019, 2020, 2021]
+    assert rows.row_sha256 == row_id_sha256(replay["row_id"])
+    assert replay is not rows.frame
+
+
+def test_weight_views_cannot_be_made_writeable_or_used_to_mutate_storage() -> None:
+    rows = select_training_rows(
+        _frame([2019, 2020, 2021]),
+        FOLD,
+        expert="multi",
+        decay=Decimal("0.55"),
+    )
+
+    weights = rows.sample_weight
+    view = weights[::-1]
+
+    with pytest.raises(ValueError):
+        weights.setflags(write=True)
+    with pytest.raises(ValueError):
+        view.setflags(write=True)
+    with pytest.raises(ValueError):
+        view[0] = 9.0
+    np.testing.assert_allclose(
+        rows.sample_weight,
+        np.asarray([0.55**2, 0.55, 1.0], dtype="float32"),
+    )
+
+
+@pytest.mark.parametrize(
+    "mutable_value",
+    ([1], {"a": 1}, {1}, np.asarray([1])),
+)
+def test_object_columns_reject_non_scalar_mutable_cells(
+    mutable_value: object,
+) -> None:
+    frame = _frame([2021], ["a"])
+    frame["payload"] = pd.Series([mutable_value], dtype=object)
+
+    with pytest.raises(FoldError, match="scalar"):
+        select_training_rows(frame, FOLD, expert="recent", decay=None)
+
+
+def test_scalar_object_columns_remain_supported() -> None:
+    frame = _frame([2019, 2020, 2021])
+    frame["payload"] = pd.Series(["x", Decimal("1.5"), None], dtype=object)
+
+    rows = select_training_rows(
+        frame, FOLD, expert="multi", decay=Decimal("0.55")
+    )
+
+    assert rows.frame["payload"].tolist() == ["x", Decimal("1.5"), None]
+
+
+def test_direct_weighted_rows_construction_rejects_empty_frames() -> None:
+    frame = _frame([], [])
+
+    with pytest.raises(FoldError, match="empty"):
+        WeightedRows(frame, np.empty(0, dtype="float32"), row_id_sha256([]))
+
+
+def test_weighted_rows_equality_uses_identity_without_dataframe_comparison() -> None:
+    first = select_training_rows(
+        _frame([2021], ["a"]), FOLD, expert="recent", decay=None
+    )
+    second = select_training_rows(
+        _frame([2021], ["a"]), FOLD, expert="recent", decay=None
+    )
+
+    assert first == first
+    assert first != second
+
+
 @pytest.mark.parametrize(
     ("weights", "digest", "message"),
     (
@@ -317,3 +403,49 @@ def test_weighted_rows_validates_weight_shape_values_length_and_digest(
 
     with pytest.raises(FoldError, match=message):
         WeightedRows(frame, weights, digest or row_id_sha256(["a"]))
+
+
+@pytest.mark.parametrize(
+    "fold",
+    (
+        TemporalFold(2020, 2019, 2020, 2021),
+        TemporalFold(2021, 2000, 2021, 2022),
+        TemporalFold(2021, 2019, 2021, 2023),
+    ),
+)
+def test_ordered_but_unauthorized_fold_windows_are_rejected(
+    fold: TemporalFold,
+) -> None:
+    with pytest.raises(FoldError, match="authorized"):
+        select_training_rows(
+            _frame([fold.recent_year]), fold, expert="recent", decay=None
+        )
+
+
+@pytest.mark.parametrize(
+    "decay",
+    (Decimal("0.5"), Decimal("0.4"), Decimal("1")),
+)
+def test_numerically_valid_but_unsealed_decay_values_are_rejected(
+    decay: Decimal,
+) -> None:
+    with pytest.raises(FoldError, match="authorized decay"):
+        select_training_rows(
+            _frame([2019, 2020, 2021]), FOLD, expert="multi", decay=decay
+        )
+
+
+def test_every_sealed_fold_and_decimal_representation_is_authorized() -> None:
+    contract = load_contract()
+
+    for fold in contract.folds:
+        recent = select_training_rows(
+            _frame([fold.recent_year]), fold, expert="recent", decay=None
+        )
+        assert recent.frame["season"].tolist() == [fold.recent_year]
+        for decay in contract.decays:
+            years = list(range(fold.multi_start, fold.multi_end + 1))
+            multi = select_training_rows(
+                _frame(years), fold, expert="multi", decay=decay
+            )
+            assert multi.frame["season"].tolist() == years

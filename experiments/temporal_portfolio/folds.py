@@ -1,7 +1,7 @@
 """Cutoff-safe temporal expert row selection and sample weights."""
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from decimal import Decimal
 from hashlib import sha256
 import math
@@ -10,23 +10,50 @@ from typing import Iterable
 
 import numpy as np
 import pandas as pd
+from pandas.api.types import is_scalar
 
-from .contracts import TemporalFold
+from .contracts import TemporalFold, _contract_values_match_exactly, load_contract
 
 
 class FoldError(ValueError):
     """Raised when temporal training rows cannot be selected safely."""
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, eq=False, init=False)
 class WeightedRows:
-    frame: pd.DataFrame
-    sample_weight: np.ndarray
+    _frame: pd.DataFrame = field(repr=False)
+    _sample_weight_bytes: bytes = field(repr=False)
     row_sha256: str
 
-    def __post_init__(self) -> None:
-        frame = _validated_frame_copy(self.frame)
-        weights = self.sample_weight
+    def __init__(
+        self,
+        frame: pd.DataFrame,
+        sample_weight: np.ndarray,
+        row_sha256: str,
+    ) -> None:
+        frame = _validated_frame_copy(frame)
+        self._initialize(frame, sample_weight, row_sha256)
+
+    @classmethod
+    def _from_validated(
+        cls,
+        frame: pd.DataFrame,
+        sample_weight: np.ndarray,
+        row_sha256: str,
+    ) -> WeightedRows:
+        instance = object.__new__(cls)
+        instance._initialize(frame, sample_weight, row_sha256)
+        return instance
+
+    def _initialize(
+        self,
+        frame: pd.DataFrame,
+        sample_weight: np.ndarray,
+        row_sha256: str,
+    ) -> None:
+        if frame.empty:
+            raise FoldError("weighted rows frame must not be empty")
+        weights = sample_weight
         if type(weights) is not np.ndarray:
             raise FoldError("sample weights must be a NumPy array")
         if weights.ndim != 1:
@@ -42,11 +69,23 @@ class WeightedRows:
         if not np.greater(copied_weights, 0).all():
             raise FoldError("sample weights must be positive")
         expected_digest = row_id_sha256(frame["row_id"])
-        if type(self.row_sha256) is not str or self.row_sha256 != expected_digest:
+        if type(row_sha256) is not str or row_sha256 != expected_digest:
             raise FoldError("row digest differs from the weighted frame")
-        copied_weights.flags.writeable = False
-        object.__setattr__(self, "frame", frame)
-        object.__setattr__(self, "sample_weight", copied_weights)
+        object.__setattr__(self, "_frame", frame)
+        object.__setattr__(
+            self,
+            "_sample_weight_bytes",
+            copied_weights.tobytes(order="C"),
+        )
+        object.__setattr__(self, "row_sha256", row_sha256)
+
+    @property
+    def frame(self) -> pd.DataFrame:
+        return self._frame.copy(deep=True)
+
+    @property
+    def sample_weight(self) -> np.ndarray:
+        return np.frombuffer(self._sample_weight_bytes, dtype="float32")
 
 
 def row_id_sha256(row_ids: Iterable[str]) -> str:
@@ -80,12 +119,17 @@ def select_training_rows(
 ) -> WeightedRows:
     """Select one expert's complete training seasons without crossing its cutoff."""
 
-    _validate_fold(fold)
+    authorized_decays = _validate_fold(fold)
     if type(prefiltered) is not bool:
         raise FoldError("prefiltered must be an exact bool")
     if type(allow_extra) is not bool:
         raise FoldError("allow_extra must be an exact bool")
-    years, approved_decay = _expert_contract(fold, expert, decay)
+    years, approved_decay = _expert_contract(
+        fold,
+        expert,
+        decay,
+        authorized_decays=authorized_decays,
+    )
     prepared = _validated_frame_copy(frame)
     season = prepared["season"]
 
@@ -115,14 +159,14 @@ def select_training_rows(
         if not np.isfinite(weights).all() or not np.greater(weights, 0).all():
             raise FoldError("decay produced non-finite or non-positive sample weights")
 
-    return WeightedRows(
+    return WeightedRows._from_validated(
         selected,
         weights,
         row_id_sha256(selected["row_id"]),
     )
 
 
-def _validate_fold(fold: object) -> None:
+def _validate_fold(fold: object) -> tuple[Decimal, ...]:
     if type(fold) is not TemporalFold:
         raise FoldError("fold type must be exactly TemporalFold")
     years = (fold.recent_year, fold.multi_start, fold.multi_end, fold.valid_year)
@@ -132,10 +176,21 @@ def _validate_fold(fold: object) -> None:
         fold.multi_start <= fold.recent_year == fold.multi_end < fold.valid_year
     ):
         raise FoldError("fold years have invalid temporal ordering")
+    contract = load_contract()
+    if not any(
+        _contract_values_match_exactly(fold, authorized_fold)
+        for authorized_fold in contract.folds
+    ):
+        raise FoldError("fold is not an authorized temporal campaign fold")
+    return contract.decays
 
 
 def _expert_contract(
-    fold: TemporalFold, expert: object, decay: object
+    fold: TemporalFold,
+    expert: object,
+    decay: object,
+    *,
+    authorized_decays: tuple[Decimal, ...],
 ) -> tuple[tuple[int, ...], Decimal | None]:
     if type(expert) is not str:
         raise FoldError("expert and decay differ from the approved contract")
@@ -147,6 +202,11 @@ def _expert_contract(
         raise FoldError("expert and decay differ from the approved contract")
     if not decay.is_finite() or decay <= Decimal(0) or decay > Decimal(1):
         raise FoldError("multi decay must be finite and satisfy 0 < decay <= 1")
+    if not any(
+        _contract_values_match_exactly(decay, authorized_decay)
+        for authorized_decay in authorized_decays
+    ):
+        raise FoldError("multi decay is not an exact authorized decay")
     return tuple(range(fold.multi_start, fold.multi_end + 1)), decay
 
 
@@ -159,9 +219,20 @@ def _validated_frame_copy(frame: object) -> pd.DataFrame:
         raise FoldError("training frame is missing exact required columns")
 
     copied = frame.copy(deep=True)
+    _validate_scalar_object_cells(copied)
     copied["season"] = _canonical_seasons(copied["season"])
     copied["row_id"] = _canonical_row_ids(copied["row_id"])
     return copied
+
+
+def _validate_scalar_object_cells(frame: pd.DataFrame) -> None:
+    for column in frame.select_dtypes(include=["object"]).columns:
+        if column in {"season", "row_id"}:
+            continue
+        if not all(is_scalar(value) for value in frame[column].array):
+            raise FoldError(
+                f"object column {column!r} must contain only scalar values"
+            )
 
 
 def _canonical_seasons(values: pd.Series) -> np.ndarray:
