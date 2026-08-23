@@ -17,6 +17,7 @@ from experiments.temporal_portfolio.catboost_training import (
     CATBOOST_PREFIXES,
     TemporalTrainingJob,
     run_catboost_job,
+    temporal_train_request_sha256,
     validate_catboost_result,
 )
 from experiments.temporal_portfolio.identity import TrainingIdentity
@@ -373,7 +374,22 @@ def test_loss_rejects_index_device_mismatch() -> None:
         )
 
 
-def _identity(expert: str = "catboost") -> TrainingIdentity:
+def _identity(
+    expert: str = "catboost",
+    *,
+    job_id: str | None = None,
+    family: str | None = None,
+    train_request_sha256: str | None = None,
+) -> TrainingIdentity:
+    bound_job_id = job_id or f"{expert}_2022"
+    model = {
+        "job_id": bound_job_id,
+        "candidate_id": bound_job_id,
+        "expert": expert,
+        "family": family or ("catboost" if expert == "catboost" else "tabm"),
+    }
+    if train_request_sha256 is not None:
+        model["train_request_sha256"] = train_request_sha256
     return TrainingIdentity.from_payload(
         {
             "data_rows": "a" * 64,
@@ -381,7 +397,7 @@ def _identity(expert: str = "catboost") -> TrainingIdentity:
             "valid_year": 2022,
             "decay": None,
             "features": ["S1"],
-            "model": {"expert": expert},
+            "model": model,
             "loss": "bce",
             "seed": 3407,
         }
@@ -434,6 +450,36 @@ def test_job_seed_must_match_training_identity_before_backend_fit() -> None:
             valid_frame=pd.DataFrame({"feature": [20.0, 10.0]}),
             target=np.array([1, 0, 1]),
             valid_row_id=np.array(["r2", "r1"]),
+        )
+
+
+def test_job_identity_requires_mandatory_model_bindings() -> None:
+    incomplete = TrainingIdentity.from_payload(
+        {
+            **dict(_identity().payload),
+            "model": {"expert": "catboost"},
+        }
+    )
+    with pytest.raises(ValueError, match="model bindings|job_id|candidate_id|family"):
+        TemporalTrainingJob(
+            job_id="catboost_2022", expert="catboost", identity=incomplete,
+            sample_weight=np.array([1.0, 0.5, 0.25]), seed=3407,
+            audit_frame=_audit_frame(), segment_columns=("segment_hand_matchup",),
+            train_frame=pd.DataFrame({"feature": [3.0, 2.0, 1.0]}),
+            valid_frame=pd.DataFrame({"feature": [20.0, 10.0]}),
+            target=np.array([1, 0, 1]), valid_row_id=np.array(["r2", "r1"]),
+        )
+
+
+def test_identity_for_one_job_cannot_be_reused_for_different_job() -> None:
+    with pytest.raises(ValueError, match="job_id|candidate"):
+        TemporalTrainingJob(
+            job_id="catboost_other", expert="catboost", identity=_identity(),
+            sample_weight=np.array([1.0, 0.5, 0.25]), seed=3407,
+            audit_frame=_audit_frame(), segment_columns=("segment_hand_matchup",),
+            train_frame=pd.DataFrame({"feature": [3.0, 2.0, 1.0]}),
+            valid_frame=pd.DataFrame({"feature": [20.0, 10.0]}),
+            target=np.array([1, 0, 1]), valid_row_id=np.array(["r2", "r1"]),
         )
 
 
@@ -554,7 +600,7 @@ def test_job_snapshots_constructor_frames_ids_targets_and_weights() -> None:
     job = TemporalTrainingJob(
         job_id="snapshot",
         expert="catboost",
-        identity=_identity(),
+        identity=_identity(job_id="snapshot"),
         sample_weight=weight,
         seed=3407,
         audit_frame=audit,
@@ -784,7 +830,10 @@ def _tabm_job(*, expert: str, teacher: TeacherOOF | None = None) -> TemporalTrai
     return TemporalTrainingJob(
         job_id=f"{expert}_2022",
         expert=expert,
-        identity=_identity(expert),
+        identity=_identity(
+            expert,
+            train_request_sha256=temporal_train_request_sha256(request),
+        ),
         sample_weight=np.array([1.0, 0.25]),
         seed=3407,
         audit_frame=_audit_frame(),
@@ -805,6 +854,21 @@ def _teacher() -> TeacherOOF:
         metadata={"fixture": True},
         backend_evidence={"backend": "fixture"},
     )
+
+
+def test_tabm_identity_requires_train_request_digest() -> None:
+    template = _tabm_job(expert="tabm")
+    with pytest.raises(ValueError, match="train_request_sha256|bindings"):
+        TemporalTrainingJob(
+            job_id=template.job_id,
+            expert=template.expert,
+            identity=_identity("tabm"),
+            sample_weight=template.sample_weight,
+            seed=template.seed,
+            audit_frame=template.audit_frame,
+            segment_columns=template.segment_columns,
+            train_request=template.train_request,
+        )
 
 
 def test_worker_dispatches_weighted_tabm_through_existing_fit_entrypoint(

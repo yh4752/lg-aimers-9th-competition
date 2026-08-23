@@ -26,6 +26,7 @@ class CatBoostTrainingError(ValueError):
 
 CATBOOST_PREFIXES = (16, 64, 192, 384)
 _EXPERTS = frozenset({"catboost", "tabm", "lupi"})
+_CANONICAL_FAMILY = {"catboost": "catboost", "tabm": "tabm", "lupi": "tabm"}
 _BASE_AUDIT_COLUMNS = (
     "row_id",
     "target",
@@ -81,6 +82,14 @@ class _SealedRequest:
     train: _SealedBatch = field(repr=False)
     valid: _SealedBatch = field(repr=False)
     model_metadata: _SealedMetadata | None = field(repr=False)
+
+
+def temporal_train_request_sha256(request: TrainRequest) -> str:
+    """Return the canonical digest used to bind a temporal TabM/LUPI request."""
+
+    if type(request) is not TrainRequest:
+        raise CatBoostTrainingError("temporal request digest requires an exact TrainRequest")
+    return _sealed_request_sha256(_seal_request(request))
 
     def predict(
         self,
@@ -149,7 +158,17 @@ class TemporalTrainingJob:
             raise CatBoostTrainingError("training identity is invalid") from error
         if type(seed) is not int or seed < 0:
             raise CatBoostTrainingError("seed must be an exact non-negative integer")
-        _validate_identity_bindings(identity, job_id, expert, seed, train_request)
+        if expert != "catboost":
+            if type(train_request) is not TrainRequest:
+                raise CatBoostTrainingError("TabM jobs require an existing TrainRequest")
+            if train_request.candidate_id != job_id:
+                raise CatBoostTrainingError("TrainRequest candidate does not match job_id")
+            if type(train_request.seed) is not int or train_request.seed != seed:
+                raise CatBoostTrainingError("TrainRequest seed does not match job seed")
+        _validate_identity_bindings(
+            identity, job_id, expert, seed,
+            None if expert == "catboost" else train_request,
+        )
 
         weight = _numeric_vector(sample_weight, "sample weight", nonempty=True)
         if np.any(weight <= 0):
@@ -214,8 +233,8 @@ class TemporalTrainingJob:
                 raise CatBoostTrainingError("TrainRequest seed does not match job seed")
             sealed_request = _seal_request(train_request)
             request_sha256 = _sealed_request_sha256(sealed_request)
-            identity_request_sha = identity.payload["model"].get("train_request_sha256")
-            if identity_request_sha is not None and identity_request_sha != request_sha256:
+            identity_request_sha = identity.payload["model"]["train_request_sha256"]
+            if identity_request_sha != request_sha256:
                 raise CatBoostTrainingError("TrainRequest hash differs from training identity")
             if len(weight) != len(getattr(train_request, "train").row_id):
                 raise CatBoostTrainingError("TabM sample weights are not row aligned")
@@ -335,8 +354,8 @@ class TemporalTrainingJob:
         observed = _sealed_request_sha256(self._train_request)
         if observed != self._train_request_sha256:
             raise CatBoostTrainingError("sealed TrainRequest integrity digest differs")
-        identity_digest = self.identity.payload["model"].get("train_request_sha256")
-        if identity_digest is not None and identity_digest != observed:
+        identity_digest = self.identity.payload["model"]["train_request_sha256"]
+        if identity_digest != observed:
             raise CatBoostTrainingError("sealed TrainRequest digest differs from identity")
 
 
@@ -548,17 +567,27 @@ def _validate_identity_bindings(
     if identity.payload["seed"] != seed:
         raise CatBoostTrainingError("job seed differs from training identity seed")
     model = identity.payload["model"]
+    required = {"job_id", "candidate_id", "expert", "family"}
+    if request is not None:
+        required.add("train_request_sha256")
+    missing = required.difference(model)
+    if missing:
+        raise CatBoostTrainingError(
+            f"training identity model bindings are missing: {sorted(missing)}"
+        )
+    canonical_family = _CANONICAL_FAMILY[expert]
+    if request is not None and request.family != canonical_family:
+        raise CatBoostTrainingError("TrainRequest family is not canonical for expert")
     expected = {
         "job_id": job_id,
         "candidate_id": job_id,
         "expert": expert,
+        "family": canonical_family,
     }
     if request is not None:
-        expected["family"] = request.family
-    elif "family" in model:
-        expected["family"] = expert
+        expected["train_request_sha256"] = temporal_train_request_sha256(request)
     for key, value in expected.items():
-        if key in model and model[key] != value:
+        if model[key] != value:
             raise CatBoostTrainingError(f"training identity {key} differs")
 
 
