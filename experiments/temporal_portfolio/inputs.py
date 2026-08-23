@@ -585,6 +585,28 @@ def _unlink_owned(
         return
 
 
+def _remove_owned_strict(path: Path, version: _FileVersion, label: str) -> None:
+    try:
+        metadata = os.lstat(path)
+    except FileNotFoundError:
+        return
+    except OSError as error:
+        raise PortfolioInputError(f"cannot inspect {label}: {error}") from error
+    if not _matches_version(metadata, version):
+        raise PortfolioInputError(f"{label} changed before it could be removed")
+    try:
+        path.unlink()
+    except OSError as error:
+        raise PortfolioInputError(f"cannot remove {label}: {error}") from error
+    try:
+        os.lstat(path)
+    except FileNotFoundError:
+        return
+    except OSError as error:
+        raise PortfolioInputError(f"cannot confirm removal of {label}: {error}") from error
+    raise PortfolioInputError(f"cannot confirm removal of {label}")
+
+
 def _publish_without_replace(
     temporary: Path, destination: Path, version: _FileVersion
 ) -> None:
@@ -604,16 +626,21 @@ def _publish_with_replace(
 ) -> None:
     candidate: Path | None = None
     descriptor: int | None = None
+    candidate_identity: tuple[int, int] | None = None
+    candidate_link_version: _FileVersion | None = None
     try:
         descriptor, candidate_name = mkstemp(
             prefix=".temporal-portfolio-publish-", suffix=".zip", dir=destination.parent
         )
         candidate = Path(candidate_name)
+        candidate_stat = os.fstat(descriptor)
+        candidate_identity = (candidate_stat.st_dev, candidate_stat.st_ino)
         os.close(descriptor)
         descriptor = None
         candidate.unlink()
         _require_path_version(temporary, version, "prepared temporary ZIP")
         os.link(temporary, candidate, follow_symlinks=False)
+        candidate_link_version = version
         _require_path_version(candidate, version, "publication staging archive")
         os.replace(candidate, destination)
         candidate = None
@@ -629,7 +656,11 @@ def _publish_with_replace(
                 os.close(descriptor)
             except OSError:
                 pass
-        _unlink_owned(candidate, version)
+        _unlink_owned(
+            candidate,
+            candidate_link_version,
+            identity=candidate_identity,
+        )
 
 
 def prepare_input_archive(
@@ -703,7 +734,14 @@ def prepare_input_archive(
             _publish_with_replace(temporary, destination, temporary_version)
         else:
             _publish_without_replace(temporary, destination, temporary_version)
-        _unlink_owned(temporary, temporary_version)
+        try:
+            temporary_handle.close()
+        except OSError as error:
+            raise PortfolioInputError(
+                f"cannot close prepared temporary ZIP: {error}"
+            ) from error
+        temporary_handle = None
+        _remove_owned_strict(temporary, temporary_version, "prepared temporary ZIP")
         temporary = None
         return PreparedInputArchive(destination, archive_sha256, archive_size)
     except PortfolioInputError:

@@ -484,3 +484,46 @@ def test_archive_verifier_rejects_duplicate_tampered_member(
 
     with pytest.raises(PortfolioInputError, match="members|evidence"):
         module._verify_archive(result.path, manifest, verified)
+
+
+def test_successful_publication_raises_when_owned_temp_unlink_initially_fails(
+    tmp_path: Path, tiny_official_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    original = Path.unlink
+    failed_once = False
+
+    def fail_first_temp_unlink(path: Path, *args: object, **kwargs: object) -> None:
+        nonlocal failed_once
+        if path.name.startswith(".temporal-portfolio-input-") and not failed_once:
+            failed_once = True
+            raise OSError("temporary unlink denied")
+        original(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", fail_first_temp_unlink)
+    output = tmp_path / "input.zip"
+    with pytest.raises(PortfolioInputError, match="remove.*temporary"):
+        prepare_input_archive(tiny_official_dir, output)
+    assert output.is_file()
+    assert not list(tmp_path.glob(".temporal-portfolio-input-*"))
+
+
+def test_replace_candidate_mkstemp_phase_failure_cleans_owned_staging(
+    tmp_path: Path, tiny_official_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    original = Path.unlink
+    failed_once = False
+
+    def fail_candidate_unlink(path: Path, *args: object, **kwargs: object) -> None:
+        nonlocal failed_once
+        if path.name.startswith(".temporal-portfolio-publish-") and not failed_once:
+            failed_once = True
+            raise OSError("candidate unlink denied")
+        original(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", fail_candidate_unlink)
+    output = tmp_path / "input.zip"
+    output.write_bytes(b"original destination")
+    with pytest.raises(PortfolioInputError, match="replacement input archive"):
+        prepare_input_archive(tiny_official_dir, output, replace=True)
+    assert output.read_bytes() == b"original destination"
+    assert not list(tmp_path.glob(".temporal-portfolio-publish-*"))
