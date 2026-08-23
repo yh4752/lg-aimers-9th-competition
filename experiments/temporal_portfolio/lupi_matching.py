@@ -55,6 +55,7 @@ _MAIN_REQUIRED = (
 _HISTORY_REQUIRED = (
     "trackman_id",
     "trackman_game_id",
+    "pitch_no",
     "season",
     "game_month",
     "game_dayofweek",
@@ -232,9 +233,11 @@ def _canonical_main(frame: pd.DataFrame) -> pd.DataFrame:
         "batter_team_id",
         "pitcher_id",
         "batter_id",
-        "top_bottom",
     ):
         result[column] = [_entity_scalar(value, column) for value in result[column]]
+    result["top_bottom"] = _canonical_sides(
+        result["top_bottom"], mapping={"T": "T", "B": "B"}, label="main"
+    )
     return result
 
 
@@ -248,6 +251,7 @@ def _canonical_history(frame: pd.DataFrame) -> pd.DataFrame:
         ("season", 1000, 9999),
         ("game_month", 1, 12),
         ("game_dayofweek", 0, 6),
+        ("pitch_no", 1, None),
         ("inning", 1, None),
         ("balls_before", 0, 3),
         ("strikes_before", 0, 2),
@@ -258,11 +262,15 @@ def _canonical_history(frame: pd.DataFrame) -> pd.DataFrame:
         "trackman_game_id",
         "pitcher_team",
         "batter_team",
-        "top_bottom",
         "pitcher_trackman_id",
         "batter_trackman_id",
     ):
         result[column] = [_entity_scalar(value, column) for value in result[column]]
+    result["top_bottom"] = _canonical_sides(
+        result["top_bottom"],
+        mapping={"Top": "T", "Bottom": "B"},
+        label="history",
+    )
     return result
 
 
@@ -309,26 +317,18 @@ def _split_pseudo_games(frame: pd.DataFrame) -> list[tuple[int, pd.DataFrame]]:
 def _stable_history_games(frame: pd.DataFrame) -> list[pd.DataFrame]:
     if frame.empty:
         return []
-    game_ids = frame["trackman_game_id"].tolist()
-    seen: set[object] = set()
-    previous: object = object()
-    for game_id in game_ids:
-        if game_id != previous:
-            if game_id in seen:
-                raise LupiMatchingError("trackman_game_id groups are not contiguous")
-            seen.add(game_id)
-            previous = game_id
-    games = [
-        group.copy(deep=True)
-        for _, group in frame.groupby("trackman_game_id", sort=False)
-    ]
-    for game in games:
+    game_order = tuple(dict.fromkeys(frame["trackman_game_id"].tolist()))
+    games: list[pd.DataFrame] = []
+    for game_id in game_order:
+        game = frame.loc[frame["trackman_game_id"].eq(game_id)].copy(deep=True)
         for column in ("season", "game_month", "game_dayofweek"):
             if game[column].nunique(dropna=False) != 1:
                 raise LupiMatchingError(f"TrackMan game has ambiguous {column}")
-        innings = game["inning"].to_numpy(dtype="int64", copy=False)
-        if len(innings) > 1 and bool(np.any(innings[1:] < innings[:-1])):
-            raise LupiMatchingError("TrackMan game source order is nonmonotonic")
+        if not game["pitch_no"].is_unique:
+            raise LupiMatchingError(
+                "pitch_no must be unique within each trackman_game_id"
+            )
+        games.append(game.sort_values("pitch_no", kind="stable").reset_index(drop=True))
     return games
 
 
@@ -579,6 +579,20 @@ def _validated_integer_series(
 def _validate_cutoff(value: object) -> None:
     if type(value) is not int or not 1000 <= value <= 9999:
         raise LupiMatchingError("cutoff_year must be an exact four-digit integer")
+
+
+def _canonical_sides(
+    values: pd.Series, *, mapping: Mapping[str, str], label: str
+) -> list[str]:
+    canonical: list[str] = []
+    for value in values.tolist():
+        if type(value) is not str or value not in mapping:
+            allowed = tuple(mapping)
+            raise LupiMatchingError(
+                f"{label} top_bottom must contain only {allowed}"
+            )
+        canonical.append(mapping[value])
+    return canonical
 
 
 def _entity_scalar(value: object, label: str) -> object:

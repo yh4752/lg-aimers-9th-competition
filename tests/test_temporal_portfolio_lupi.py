@@ -54,13 +54,14 @@ def _trackman_game(*, rows: int = 6, game_id: str = "tm-game-1") -> pd.DataFrame
         {
             "trackman_id": [f"pitch-{index}" for index in range(rows)],
             "trackman_game_id": [game_id] * rows,
+            "pitch_no": list(range(1, rows + 1)),
             "season": main["season"].to_list(),
             "game_month": main["game_month"].to_list(),
             "game_dayofweek": main["game_dayofweek"].to_list(),
             "pitcher_team": ["B"] * rows,
             "batter_team": ["A"] * rows,
             "inning": main["inning"].to_list(),
-            "top_bottom": main["top_bottom"].to_list(),
+            "top_bottom": ["Top"] * rows,
             "balls_before": main["balls_before"].to_list(),
             "strikes_before": main["strikes_before"].to_list(),
             "outs_before": main["outs_before"].to_list(),
@@ -77,6 +78,13 @@ def _id_maps() -> EntityMaps:
         batters={21: 201},
         teams={10: "A", 20: "B"},
     )
+
+
+def _canonically_nonmonotonic_history() -> pd.DataFrame:
+    history = _trackman_game()
+    for column in ("inning", "balls_before", "strikes_before", "outs_before"):
+        history[column] = history[column].iloc[::-1].to_list()
+    return history
 
 
 def test_exact_unique_monotonic_alignment_accepts_and_preserves_source_order() -> None:
@@ -119,20 +127,74 @@ def test_future_history_mutation_cannot_change_cutoff_result() -> None:
         trackman_game_id="future",
         rel_speed=9999.0,
     )
-    combined = pd.concat([history, future], ignore_index=True)
+    combined = pd.concat([history, future], ignore_index=True).iloc[
+        [2, 7, 0, 10, 5, 6, 1, 11, 4, 8, 3, 9]
+    ]
     expected = fit_lupi_matches(main, combined, cutoff_year=2023, id_maps=_id_maps())
     changed = combined.copy(deep=True)
     changed.loc[changed["season"].eq(2024), "rel_speed"] = -9999.0
-    changed.loc[changed["season"].eq(2024), "trackman_id"] = history[
-        "trackman_id"
-    ].to_list()
+    changed.loc[changed["season"].eq(2024), "trackman_id"] = [
+        f"pitch-{index}" for index in changed.loc[changed["season"].eq(2024), "pitch_no"] - 1
+    ]
 
     replay = fit_lupi_matches(main, changed, cutoff_year=2023, id_maps=_id_maps())
 
     pd.testing.assert_frame_equal(replay, expected)
 
 
-@pytest.mark.parametrize("history", [_trackman_game(rows=4), _trackman_game().iloc[::-1]])
+def test_official_side_and_pitch_number_canonicalize_shuffled_interleaved_games() -> None:
+    main = _main_game()
+    official = _trackman_game().assign(top_bottom="Top")
+    decoy = _trackman_game(game_id="decoy").assign(
+        game_month=6,
+        top_bottom="Top",
+        trackman_id=[f"decoy-{index}" for index in range(6)],
+    )
+    interleaved = pd.concat([official, decoy], ignore_index=True).iloc[
+        [2, 7, 0, 10, 5, 6, 1, 11, 4, 8, 3, 9]
+    ]
+
+    expected = fit_lupi_matches(
+        main, official, cutoff_year=2023, id_maps=_id_maps()
+    )
+    replay = fit_lupi_matches(
+        main, interleaved, cutoff_year=2023, id_maps=_id_maps()
+    )
+
+    assert expected["lupi_match_accepted"].eq(1).all()
+    assert expected["trackman_id"].tolist() == [f"pitch-{index}" for index in range(6)]
+    pd.testing.assert_frame_equal(replay, expected)
+
+
+@pytest.mark.parametrize(
+    ("source", "side"),
+    [("main", "Top"), ("history", "T"), ("main", "X"), ("history", "Unknown")],
+)
+def test_side_values_are_strict_for_each_official_schema(source: str, side: str) -> None:
+    main = _main_game()
+    history = _trackman_game().assign(top_bottom="Top")
+    if source == "main":
+        main["top_bottom"] = side
+    else:
+        history["top_bottom"] = side
+
+    with pytest.raises(LupiMatchingError, match="top_bottom"):
+        fit_lupi_matches(main, history, cutoff_year=2023, id_maps=_id_maps())
+
+
+def test_duplicate_pitch_number_within_trackman_game_fails_closed() -> None:
+    history = _trackman_game().assign(top_bottom="Top")
+    history.loc[1, "pitch_no"] = history.loc[0, "pitch_no"]
+
+    with pytest.raises(LupiMatchingError, match="pitch_no.*unique"):
+        fit_lupi_matches(
+            _main_game(), history, cutoff_year=2023, id_maps=_id_maps()
+        )
+
+
+@pytest.mark.parametrize(
+    "history", [_trackman_game(rows=4), _canonically_nonmonotonic_history()]
+)
 def test_partial_or_nonmonotonic_alignment_rejects_without_forcing(
     history: pd.DataFrame,
 ) -> None:
