@@ -29,7 +29,12 @@ from typing import BinaryIO
 from zipfile import BadZipFile, ZIP_DEFLATED, ZipFile, ZipInfo
 import zlib
 
-from .compatibility import STATE_SCHEMA_VERSION
+from .compatibility import (
+    STATE_SCHEMA_VERSION,
+    CheckpointIdentity,
+    CompatibilityError,
+    validate_runtime,
+)
 from .state import ALLOWED_STAGE_ORDER, Bindings, Lineage
 
 
@@ -599,8 +604,26 @@ def _checkpoint_lineage_identity(lineage: Lineage) -> tuple[object, ...]:
         lineage.campaign_id,
         lineage.training_sha256,
         lineage.state_schema_version,
-        lineage.runtime_sha256,
     )
+
+
+def _validate_lineage_successor(previous: Lineage, current: Lineage) -> None:
+    if _checkpoint_lineage_identity(previous) != _checkpoint_lineage_identity(current):
+        raise PortfolioArtifactError("handoff lineage identity conflicts")
+    try:
+        validate_runtime(
+            CheckpointIdentity(
+                previous.training_sha256,
+                previous.runtime_sha256,
+                previous.state_schema_version,
+            ),
+            current_training_sha256=current.training_sha256,
+            current_runtime_sha256=current.runtime_sha256,
+        )
+    except CompatibilityError as error:
+        raise PortfolioArtifactError(
+            f"handoff lineage runtime compatibility failed: {error}"
+        ) from error
 
 
 def _require_monotonic_successor(
@@ -608,16 +631,13 @@ def _require_monotonic_successor(
 ) -> None:
     if existing.bindings != evidence.bindings:
         raise PortfolioArtifactError("handoff publication bindings conflict")
-    if (
-        existing.stage != evidence.stage
-        or _checkpoint_lineage_identity(existing.lineage)
-        != _checkpoint_lineage_identity(evidence.lineage)
-    ):
+    if existing.stage != evidence.stage:
         raise PortfolioArtifactError("handoff publication lineage identity conflicts")
     if evidence.lineage.sequence != existing.sequence + 1:
         raise PortfolioArtifactError("handoff publication sequence would conflict or rollback")
     if evidence.lineage.parent_manifest_sha256 != existing.manifest_sha256:
         raise PortfolioArtifactError("handoff publication parent is disconnected")
+    _validate_lineage_successor(existing.lineage, evidence.lineage)
 
 
 def _create_temporary_at(directory: int, path: Path) -> tuple[int, str]:
@@ -1403,6 +1423,7 @@ def discover_handoffs(roots: Iterable[str | Path]) -> tuple[VerifiedHandoff, ...
                 raise PortfolioArtifactError(
                     "discovered handoffs form a fork or disconnected parent chain"
                 )
+            _validate_lineage_successor(previous.lineage, current.lineage)
         return (chain[-1],)
     except PortfolioArtifactError:
         raise

@@ -21,6 +21,7 @@ def test_contract_pins_budget_folds_and_t1_grid() -> None:
     contract = load_contract()
 
     assert contract.campaign_id == "temporal_portfolio_v1"
+    assert contract.bootstrap_seed == 3407
     assert sum(contract.stage_hours.values()) == Decimal("30")
     assert [(f.recent_year, f.multi_start, f.valid_year) for f in contract.folds] == [
         (2021, 2019, 2022),
@@ -57,6 +58,7 @@ def test_contract_is_fail_closed() -> None:
         {"decays": lambda contract: (Decimal("0.99"),)},
         {"screen_seed": lambda contract: 99},
         {"screen_seed": lambda contract: 3407.0},
+        {"bootstrap_seed": lambda contract: 99},
         {"schema_version": lambda contract: True},
         {"decays": lambda contract: (Decimal("0.4"), *contract.decays[1:])},
     ),

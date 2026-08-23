@@ -13,6 +13,7 @@ from zipfile import ZIP_DEFLATED, ZipFile, ZipInfo
 import pytest
 
 from experiments.temporal_portfolio import artifacts as artifact_module
+from experiments.temporal_portfolio import compatibility as compatibility_module
 from experiments.temporal_portfolio.artifacts import (
     BoundFile,
     HandoffPath,
@@ -921,6 +922,55 @@ def test_discovery_rejects_binding_and_lineage_identity_conflicts(
 
     with pytest.raises(PortfolioArtifactError, match="bindings|lineage"):
         discover_handoffs([tmp_path])
+
+
+def test_registered_runtime_migration_allows_publication_and_discovery(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    old_runtime = "4" * 64
+    new_runtime = "7" * 64
+    monkeypatch.setattr(
+        compatibility_module,
+        "COMPATIBLE_RUNTIME_MIGRATIONS",
+        {(old_runtime, new_runtime): compatibility_module.STATE_SCHEMA_VERSION},
+    )
+    first = write_handoff(
+        tmp_path / "published", _evidence(lineage=_lineage(runtime=old_runtime))
+    ).path
+    first_verified = verify_handoff(first)
+    successor = _evidence(
+        lineage=_lineage(
+            sequence=2,
+            parent=first_verified.manifest_sha256,
+            runtime=new_runtime,
+        ),
+        marker="migrated-runtime",
+    )
+
+    published = write_handoff(tmp_path / "published", successor)
+    write_handoff(tmp_path / "discovery-old", _evidence(lineage=_lineage(runtime=old_runtime)))
+    write_handoff(tmp_path / "discovery-new", successor)
+
+    assert verify_handoff(published.path).lineage.runtime_sha256 == new_runtime
+    assert discover_handoffs(
+        [tmp_path / "discovery-old", tmp_path / "discovery-new"]
+    )[0].lineage.runtime_sha256 == new_runtime
+
+
+def test_unregistered_runtime_migration_rejects_publication(tmp_path: Path) -> None:
+    first = write_handoff(tmp_path, _evidence()).path
+    first_verified = verify_handoff(first)
+    successor = _evidence(
+        lineage=_lineage(
+            sequence=2,
+            parent=first_verified.manifest_sha256,
+            runtime="7" * 64,
+        ),
+        marker="unregistered-runtime",
+    )
+
+    with pytest.raises(PortfolioArtifactError, match="runtime|migration"):
+        write_handoff(tmp_path, successor)
 
 
 @pytest.mark.parametrize("opaque_name", ["opaque-upload.zip", "opaque-upload"])

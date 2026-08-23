@@ -111,6 +111,7 @@ class PortfolioContract:
     lupi_lambdas: tuple[Decimal, ...]
     pair_primary_weights: tuple[Decimal, ...]
     bootstrap_repeats: int
+    bootstrap_seed: int
     minimum_segment_rows: int
     gates: Mapping[str, Decimal]
     stage_hours: Mapping[str, Decimal]
@@ -350,6 +351,7 @@ def load_contract(path: str | Path = DEFAULT_CONTRACT) -> PortfolioContract:
         lupi_lambdas=lupi_lambdas,
         pair_primary_weights=pair_primary_weights,
         bootstrap_repeats=bootstrap["repeats"],
+        bootstrap_seed=bootstrap["seed"],
         minimum_segment_rows=bootstrap["minimum_segment_rows"],
         gates=gates,
         stage_hours=stage_hours,
