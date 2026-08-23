@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+import sys
+import types
 
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -11,6 +14,14 @@ from experiments.temporal_portfolio.lupi_matching import (
     LupiMatchingError,
     fit_lupi_matches,
     match_current_pitch_rows,
+)
+from experiments.temporal_portfolio.lupi_teacher import (
+    TEACHER_FEATURES,
+    CatBoostTeacherBackend,
+    TeacherError,
+    build_teacher_vector,
+    crossfit_teacher,
+    teacher_fold,
 )
 
 
@@ -378,3 +389,238 @@ def test_fit_rejects_evaluation_rows_and_invalid_main_identity() -> None:
         fit_lupi_matches(
             duplicate_ids, _trackman_game(), cutoff_year=2023, id_maps=_id_maps()
         )
+
+
+class _RecordingTeacherBackend:
+    def __init__(self, prediction: object | None = None) -> None:
+        self.fit_calls: list[dict[str, object]] = []
+        self.predict_calls: list[dict[str, object]] = []
+        self.prediction = prediction
+
+    def fit(
+        self, features: pd.DataFrame, target: pd.Series, *, seed: int
+    ) -> dict[str, object]:
+        model = {
+            "pitchers": frozenset(features.index.map(lambda index: index[0])),
+            "seed": seed,
+            "target": tuple(target),
+            "columns": tuple(features.columns),
+        }
+        self.fit_calls.append(model)
+        return model
+
+    def predict(self, model: object, features: pd.DataFrame) -> np.ndarray:
+        assert isinstance(model, dict)
+        call = {
+            "train_pitchers": model["pitchers"],
+            "valid_pitchers": frozenset(features.index.map(lambda index: index[0])),
+            "seed": model["seed"],
+            "columns": tuple(features.columns),
+        }
+        self.predict_calls.append(call)
+        if self.prediction is not None:
+            value = self.prediction
+            return np.asarray(value(len(features)) if callable(value) else value)
+        return np.linspace(0.2, 0.8, len(features), dtype="float64")
+
+    @property
+    def evidence(self) -> Mapping[str, object]:
+        return {"name": "recording", "fit_count": len(self.fit_calls)}
+
+
+def _teacher_rows(*, folds: int = 3, seed: int = 3407) -> pd.DataFrame:
+    pitchers_by_fold: dict[int, int] = {}
+    candidate = 10
+    while len(pitchers_by_fold) < folds:
+        assigned = teacher_fold(candidate, seed, folds)
+        pitchers_by_fold.setdefault(assigned, candidate)
+        candidate += 1
+    records: list[dict[str, object]] = []
+    for fold, pitcher_id in sorted(pitchers_by_fold.items()):
+        for repeat in range(2):
+            record: dict[str, object] = {
+                "row_id": f"row-{fold}-{repeat}",
+                "pitcher_id": pitcher_id,
+                "control_success": repeat,
+                "lupi_match_accepted": 1,
+            }
+            for offset, feature in enumerate(TEACHER_FEATURES):
+                record[feature] = float(100 * fold + 10 * repeat + offset)
+            records.append(record)
+    result = pd.DataFrame(records)
+    result.index = pd.MultiIndex.from_arrays(
+        [result["pitcher_id"], np.arange(len(result))]
+    )
+    return result
+
+
+def test_teacher_probability_is_genuinely_held_out_by_pitcher_group() -> None:
+    rows = _teacher_rows()
+    backend = _RecordingTeacherBackend()
+
+    result = crossfit_teacher(rows, seed=3407, folds=3, backend=backend)
+
+    assert result.probability.between(0.0, 1.0).all()
+    assert tuple(result.row_ids) == tuple(rows["row_id"])
+    assert set(result.predicted_by_fold) == set(rows["row_id"])
+    assert len(backend.predict_calls) == 3
+    assert all(
+        call["train_pitchers"].isdisjoint(call["valid_pitchers"])
+        for call in backend.predict_calls
+    )
+    assert all(
+        result.fold_by_row_id[row_id] == predicted_fold
+        for row_id, predicted_fold in result.predicted_by_fold.items()
+    )
+
+
+def test_teacher_fold_is_stable_typed_and_independent_of_row_order() -> None:
+    ids = ["pitcher-z", 91, "pitcher-a", 91]
+    first = [teacher_fold(value, 3407, 5) for value in ids]
+    replay = {
+        value: teacher_fold(value, 3407, 5) for value in reversed(ids)
+    }
+
+    assert first == [replay[value] for value in ids]
+    assert first[1] == first[3]
+    assert teacher_fold(91, 3407, 5) == teacher_fold(91, 3407, 5)
+    with pytest.raises(TeacherError, match="pitcher_id"):
+        teacher_fold(True, 3407, 5)
+    with pytest.raises(TeacherError, match="pitcher_id"):
+        teacher_fold(float("nan"), 3407, 5)
+    with pytest.raises(TeacherError, match="pitcher_id"):
+        teacher_fold(object(), 3407, 5)
+    with pytest.raises(TeacherError, match="seed"):
+        teacher_fold(91, True, 5)
+    with pytest.raises(TeacherError, match="folds"):
+        teacher_fold(91, 3407, 1)
+
+
+def test_teacher_vector_preserves_requested_order_and_nan_for_unmatched() -> None:
+    rows = _teacher_rows()
+    oof = crossfit_teacher(
+        rows, seed=3407, folds=3, backend=_RecordingTeacherBackend()
+    )
+    requested = [
+        rows.iloc[2]["row_id"],
+        "unmatched",
+        rows.iloc[0]["row_id"],
+        *rows.iloc[[1, 3, 4, 5]]["row_id"],
+    ]
+
+    vector = build_teacher_vector(requested, oof)
+    expected = oof.probability_by_row_id
+
+    assert vector.dtype == np.dtype("float32")
+    assert vector[0] == pytest.approx(expected[requested[0]])
+    assert np.isnan(vector[1])
+    assert vector[2] == pytest.approx(expected[requested[2]])
+    vector[0] = 0.99
+    assert oof.probability_by_row_id[requested[0]] == pytest.approx(expected[requested[0]])
+
+
+def test_teacher_validates_schema_target_identity_and_backend_probabilities() -> None:
+    rows = _teacher_rows()
+    backend = _RecordingTeacherBackend()
+    changed_target = rows.assign(control_success=1 - rows["control_success"])
+    crossfit_teacher(changed_target, seed=3407, folds=3, backend=backend)
+    assert all(call["columns"] == TEACHER_FEATURES for call in backend.fit_calls)
+    assert any(call["target"] != (0, 1, 0, 1) for call in backend.fit_calls)
+
+    duplicate = rows.copy(deep=True)
+    duplicate.iloc[1, duplicate.columns.get_loc("row_id")] = duplicate.iloc[0]["row_id"]
+    with pytest.raises(TeacherError, match="row_id.*unique"):
+        crossfit_teacher(duplicate, seed=3407, folds=3, backend=_RecordingTeacherBackend())
+    null_id = rows.copy(deep=True)
+    null_id.iloc[0, null_id.columns.get_loc("pitcher_id")] = None
+    with pytest.raises(TeacherError, match="pitcher_id"):
+        crossfit_teacher(null_id, seed=3407, folds=3, backend=_RecordingTeacherBackend())
+    with pytest.raises(TeacherError, match="schema"):
+        crossfit_teacher(rows.assign(student_validation=1), seed=3407, folds=3, backend=_RecordingTeacherBackend())
+
+    for prediction in (
+        lambda size: np.full(size + 1, 0.5),
+        lambda size: np.full(size, 1.01),
+        lambda size: np.full(size, np.nan),
+    ):
+        with pytest.raises(TeacherError, match="probabil"):
+            crossfit_teacher(
+                rows,
+                seed=3407,
+                folds=3,
+                backend=_RecordingTeacherBackend(prediction),
+            )
+
+
+def test_teacher_impossible_group_split_fails_without_in_sample_fallback() -> None:
+    rows = _teacher_rows().loc[lambda frame: frame["pitcher_id"].eq(frame["pitcher_id"].iloc[0])]
+    backend = _RecordingTeacherBackend()
+
+    with pytest.raises(TeacherError, match="disjoint.*train.*validation|split"):
+        crossfit_teacher(rows, seed=3407, folds=3, backend=backend)
+
+    assert backend.fit_calls == []
+    assert backend.predict_calls == []
+
+
+def test_catboost_teacher_backend_has_sealed_config_and_records_device(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    instances: list[object] = []
+
+    class FakeCatBoostClassifier:
+        def __init__(self, **kwargs: object) -> None:
+            self.kwargs = kwargs
+            self.fit_kwargs: dict[str, object] | None = None
+            instances.append(self)
+
+        def fit(self, features: pd.DataFrame, target: pd.Series, **kwargs: object) -> object:
+            self.fit_kwargs = kwargs
+            return self
+
+        def predict_proba(self, features: pd.DataFrame) -> np.ndarray:
+            return np.column_stack((np.full(len(features), 0.4), np.full(len(features), 0.6)))
+
+    monkeypatch.setitem(
+        sys.modules,
+        "catboost",
+        types.SimpleNamespace(CatBoostClassifier=FakeCatBoostClassifier),
+    )
+    backend = CatBoostTeacherBackend(device="GPU")
+    config = backend.config
+    with pytest.raises(TypeError):
+        config["iterations"] = 1  # type: ignore[index]
+    features = _teacher_rows().iloc[:2].loc[:, TEACHER_FEATURES]
+    model = backend.fit(features, pd.Series([0, 1]), seed=3410)
+    prediction = backend.predict(model, features)
+
+    assert prediction.tolist() == pytest.approx([0.6, 0.6])
+    assert instances[0].kwargs["task_type"] == "GPU"  # type: ignore[attr-defined]
+    assert instances[0].kwargs["random_seed"] == 3410  # type: ignore[attr-defined]
+    assert "early_stopping_rounds" not in instances[0].kwargs  # type: ignore[attr-defined]
+    assert instances[0].fit_kwargs == {}  # type: ignore[attr-defined]
+    assert backend.evidence["device"] == "GPU"
+    assert backend.evidence["fit_seeds"] == (3410,)
+    with pytest.raises(TeacherError, match="device"):
+        CatBoostTeacherBackend(device="gpu")
+
+
+def test_teacher_oof_is_detached_and_revalidates_on_access() -> None:
+    rows = _teacher_rows()
+    oof = crossfit_teacher(rows, seed=3407, folds=3, backend=_RecordingTeacherBackend())
+    probability = oof.probability
+    probability.iloc[0] = -1.0
+    folds = oof.fold_by_row_id
+    with pytest.raises(TypeError):
+        folds[rows.iloc[0]["row_id"]] = 99  # type: ignore[index]
+
+    assert oof.probability.iloc[0] >= 0.0
+    with pytest.raises(TypeError, match="crossfit_teacher"):
+        type(oof)()
+
+    with pytest.raises(TeacherError, match="duplicate"):
+        build_teacher_vector([rows.iloc[0]["row_id"]] * 2, oof)
+
+    object.__setattr__(oof, "_metadata_json", 1)
+    with pytest.raises(TeacherError, match="integrity|invalid"):
+        _ = oof.metadata
