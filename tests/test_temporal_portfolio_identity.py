@@ -1,3 +1,4 @@
+from collections.abc import Mapping
 from types import MappingProxyType
 
 import pytest
@@ -12,12 +13,32 @@ def _payload(**overrides: object) -> dict[str, object]:
         "valid_year": 2022,
         "decay": None,
         "features": ["base"],
-        "model": {"profile": "p2"},
+        "model": {"profile": "p2", "config": {"alpha": 1, "beta": [True]}},
         "loss": "bce",
         "seed": 3407,
     }
     payload.update(overrides)
     return payload
+
+
+class _ItemsSnapshotMapping(Mapping[str, object]):
+    def __init__(self, items: tuple[tuple[str, object], ...], getitem_value: object) -> None:
+        self._items = items
+        self._getitem_value = getitem_value
+
+    def __getitem__(self, key: str) -> object:
+        if isinstance(self._getitem_value, Exception):
+            raise self._getitem_value
+        return self._getitem_value
+
+    def __iter__(self):
+        return (key for key, _ in self._items)
+
+    def __len__(self) -> int:
+        return len(self._items)
+
+    def items(self):
+        return self._items
 
 
 def test_training_identity_changes_only_for_semantic_changes() -> None:
@@ -154,6 +175,48 @@ def test_audit_duplicate_returns_none_when_no_identity_matches() -> None:
     identity = TrainingIdentity.from_payload(_payload())
 
     assert audit_duplicate(identity, {"b" * 64: "jobs/other"}) is None
+
+
+def test_audit_duplicate_uses_the_validated_completed_snapshot() -> None:
+    identity = TrainingIdentity.from_payload(_payload())
+    completed = _ItemsSnapshotMapping(((identity.sha256, "jobs/old"),), 7)
+
+    assert audit_duplicate(identity, completed) == "jobs/old"
+
+
+def test_training_identity_uses_root_items_snapshot_without_getitem() -> None:
+    expected = TrainingIdentity.from_payload(_payload())
+    volatile = _ItemsSnapshotMapping(tuple(_payload().items()), KeyError("volatile"))
+
+    assert TrainingIdentity.from_payload(volatile).sha256 == expected.sha256
+
+
+def test_training_identity_rejects_duplicate_nested_mapping_items() -> None:
+    duplicate_model = _ItemsSnapshotMapping(
+        (("profile", "p2"), ("profile", "p3")), "not-the-snapshot"
+    )
+
+    with pytest.raises(ValueError):
+        TrainingIdentity.from_payload(_payload(model=duplicate_model))
+
+
+@pytest.mark.parametrize("path", ("", " ", "\t"))
+def test_audit_duplicate_rejects_empty_or_whitespace_completed_paths(path: str) -> None:
+    identity = TrainingIdentity.from_payload(_payload())
+
+    with pytest.raises(ValueError):
+        audit_duplicate(identity, {identity.sha256: path})
+
+
+def test_training_identity_uses_a_pinned_canonical_digest_for_reordered_mappings() -> None:
+    expected_sha256 = "347604821446076c9e3c368c495a4b70ac190a933c3ef2ef8b4ace322bcb29bb"
+    standard = _payload()
+    reordered_root = dict(reversed(tuple(standard.items())))
+    reordered_nested = _payload(model={"config": {"beta": [True], "alpha": 1}, "profile": "p2"})
+
+    assert TrainingIdentity.from_payload(standard).sha256 == expected_sha256
+    assert TrainingIdentity.from_payload(reordered_root).sha256 == expected_sha256
+    assert TrainingIdentity.from_payload(reordered_nested).sha256 == expected_sha256
 
 
 @pytest.mark.parametrize(

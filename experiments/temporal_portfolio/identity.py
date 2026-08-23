@@ -68,40 +68,38 @@ def audit_duplicate(identity: TrainingIdentity, completed: Mapping[str, str]) ->
         raise PortfolioIdentityError("identity payload is not the frozen representation")
     if type(supplied_sha256) is not str or supplied_sha256 != verified.sha256:
         raise PortfolioIdentityError("identity payload and SHA-256 differ")
-    if not isinstance(completed, Mapping):
-        raise PortfolioIdentityError("completed jobs must be a mapping")
-    for digest, path in completed.items():
-        if not _is_sha256(digest) or type(path) is not str:
+    completed_snapshot = _snapshot_mapping(completed, "completed jobs")
+    for digest, path in completed_snapshot.items():
+        if not _is_sha256(digest) or type(path) is not str or not path.strip():
             raise PortfolioIdentityError("completed jobs contain an invalid hash or path")
-    path = completed.get(supplied_sha256)
+    path = completed_snapshot.get(supplied_sha256)
     return None if path is None else str(path)
 
 
 def _normalize_payload(payload: Mapping[str, object]) -> dict[str, object]:
-    if not isinstance(payload, Mapping):
-        raise PortfolioIdentityError("training identity payload must be a mapping")
-    if set(payload) != _ROOT_FIELDS:
+    root = _snapshot_mapping(payload, "training identity payload")
+    if set(root) != _ROOT_FIELDS:
         raise PortfolioIdentityError("training identity fields differ")
 
-    data_rows = payload["data_rows"]
+    data_rows = root["data_rows"]
     if not _is_sha256(data_rows):
         raise PortfolioIdentityError("data_rows must be a lowercase SHA-256")
 
-    train_seasons = _list(payload["train_seasons"], "train_seasons")
+    train_seasons = _list(root["train_seasons"], "train_seasons")
     if not train_seasons or any(type(year) is not int or not _is_year(year) for year in train_seasons):
         raise PortfolioIdentityError("train_seasons must contain four-digit integer years")
     if any(left >= right for left, right in zip(train_seasons, train_seasons[1:])):
         raise PortfolioIdentityError("train_seasons must be strictly increasing")
 
-    valid_year = payload["valid_year"]
+    valid_year = root["valid_year"]
     if type(valid_year) is not int or not _is_year(valid_year) or valid_year <= train_seasons[-1]:
         raise PortfolioIdentityError("valid_year must follow all training seasons")
 
-    decay = payload["decay"]
+    decay = root["decay"]
     if decay is not None and (type(decay) is not str or decay not in _DECAYS):
         raise PortfolioIdentityError("decay must be an approved decimal string or null")
 
-    features = _list(payload["features"], "features")
+    features = _list(root["features"], "features")
     if (
         not features
         or any(type(feature) is not str or not feature for feature in features)
@@ -109,15 +107,15 @@ def _normalize_payload(payload: Mapping[str, object]) -> dict[str, object]:
     ):
         raise PortfolioIdentityError("features must be unique non-empty strings")
 
-    model = payload["model"]
-    if not isinstance(model, Mapping) or not model:
+    model = _normalize_json(root["model"], "model")
+    if type(model) is not dict or not model:
         raise PortfolioIdentityError("model must be a non-empty object")
 
-    loss = payload["loss"]
+    loss = root["loss"]
     if type(loss) is not str or loss not in _LOSSES:
         raise PortfolioIdentityError("loss is not approved")
 
-    seed = payload["seed"]
+    seed = root["seed"]
     if type(seed) is not int or seed < 0:
         raise PortfolioIdentityError("seed must be a non-negative integer")
 
@@ -127,7 +125,7 @@ def _normalize_payload(payload: Mapping[str, object]) -> dict[str, object]:
         "valid_year": valid_year,
         "decay": decay,
         "features": features,
-        "model": _normalize_json(model, "model"),
+        "model": model,
         "loss": loss,
         "seed": seed,
     }
@@ -149,15 +147,33 @@ def _normalize_json(value: object, label: str) -> object:
             raise PortfolioIdentityError(f"{label} contains a non-finite number")
         return value
     if isinstance(value, Mapping):
+        snapshot = _snapshot_mapping(value, label)
         normalized: dict[str, object] = {}
-        for key, nested in value.items():
-            if type(key) is not str:
-                raise PortfolioIdentityError(f"{label} has a non-string object key")
+        for key, nested in snapshot.items():
             normalized[key] = _normalize_json(nested, f"{label}.{key}")
         return normalized
     if type(value) is list or isinstance(value, _FrozenList):
         return [_normalize_json(item, label) for item in value]
     raise PortfolioIdentityError(f"{label} contains an unsupported JSON value")
+
+
+def _snapshot_mapping(value: object, label: str) -> dict[str, object]:
+    if not isinstance(value, Mapping):
+        raise PortfolioIdentityError(f"{label} must be a mapping")
+    snapshot: dict[str, object] = {}
+    try:
+        for item in value.items():
+            key, nested = item
+            if type(key) is not str:
+                raise PortfolioIdentityError(f"{label} has a non-string object key")
+            if key in snapshot:
+                raise PortfolioIdentityError(f"{label} has a duplicate object key")
+            snapshot[key] = nested
+    except PortfolioIdentityError:
+        raise
+    except Exception as error:
+        raise PortfolioIdentityError(f"{label} mapping snapshot failed") from error
+    return snapshot
 
 
 def _freeze_json(value: object) -> object:
