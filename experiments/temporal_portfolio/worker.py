@@ -72,6 +72,11 @@ def run_worker(
         if runtime is None:
             raise WorkerPublicationError("CatBoost backend is missing")
         result = run_catboost_job(job, backend=runtime)
+        if (
+            result.valid_row_ids != job.valid_row_ids
+            or result.valid_row_order_sha256 != job.valid_row_order_sha256
+        ):
+            raise WorkerPublicationError("CatBoost result row binding differs")
         predictions = result.prefix_predictions[max(CATBOOST_PREFIXES)]
         prediction_frame = _prediction_frame(job, predictions)
         for prefix, values in result.prefix_predictions.items():
@@ -198,8 +203,17 @@ def publish_worker_result(
         "training_identity_sha256": job.identity.sha256,
         "artifacts": records,
     }
-    _atomic_bytes(manifest_path, _canonical_json(payload))
-    verify_worker_result(directory)
+    _validate_worker_payload(directory, payload)
+    try:
+        _atomic_bytes(manifest_path, _canonical_json(payload))
+        verify_worker_result(directory)
+    except Exception:
+        manifest_path.unlink(missing_ok=True)
+        try:
+            _fsync_directory(directory)
+        except Exception:
+            pass
+        raise
     return manifest_path
 
 
@@ -214,6 +228,15 @@ def verify_worker_result(root: str | Path) -> Mapping[str, object]:
         payload = json.loads(raw.decode("utf-8"), object_pairs_hook=_unique_object)
     except (UnicodeDecodeError, json.JSONDecodeError) as error:
         raise WorkerPublicationError("worker result JSON is invalid") from error
+    if raw != _canonical_json(payload):
+        raise WorkerPublicationError("worker result is not canonical JSON")
+    _validate_worker_payload(directory, payload)
+    return MappingProxyType(payload)
+
+
+def _validate_worker_payload(directory: Path, payload: object) -> None:
+    """Validate the exact manifest payload without requiring it to be published."""
+
     if type(payload) is not dict or set(payload) != {
         "schema_version",
         "job_id",
@@ -222,8 +245,6 @@ def verify_worker_result(root: str | Path) -> Mapping[str, object]:
         "artifacts",
     }:
         raise WorkerPublicationError("worker result schema differs")
-    if raw != _canonical_json(payload):
-        raise WorkerPublicationError("worker result is not canonical JSON")
     if payload["schema_version"] != 1:
         raise WorkerPublicationError("worker result schema version differs")
     if type(payload["job_id"]) is not str or not payload["job_id"]:
@@ -253,7 +274,7 @@ def verify_worker_result(root: str | Path) -> Mapping[str, object]:
         raise WorkerPublicationError("artifact set leaves missing or unbound files")
     if payload["status"] == "completed" and not _REQUIRED_ARTIFACTS.issubset(seen):
         raise WorkerPublicationError("completed worker lacks required artifacts")
-    return MappingProxyType(payload)
+    return None
 
 
 def _verified_teacher_vector(job: TemporalTrainingJob) -> np.ndarray:
@@ -276,7 +297,10 @@ def _verified_teacher_vector(job: TemporalTrainingJob) -> np.ndarray:
 
 def _prediction_frame(job: TemporalTrainingJob, probability: object) -> pd.DataFrame:
     values = _finite_probabilities(probability, job.valid_rows)
-    frame = job.audit_frame.copy(deep=True)
+    try:
+        frame = job.frozen_audit_frame()
+    except ValueError as error:
+        raise WorkerPublicationError("frozen audit evidence is invalid") from error
     if tuple(frame["row_id"].tolist()) != job.valid_row_ids:
         raise WorkerPublicationError("prediction row order differs from source")
     frame.insert(2, "probability", values)
@@ -321,15 +345,20 @@ def _save_catboost_model(backend: object, result: CatBoostResult, path: Path) ->
 def _bound_checkpoint(root: Path, value: object) -> Path:
     if not isinstance(value, (str, os.PathLike)):
         raise WorkerPublicationError("TabM checkpoint path is invalid")
-    path = Path(value)
-    if not path.is_absolute():
-        path = root / path
+    supplied = Path(value)
+    path = supplied if supplied.is_absolute() else root / supplied
     try:
-        path.relative_to(root)
-    except ValueError as error:
+        canonical = path.resolve(strict=True)
+        canonical.relative_to(root)
+    except (OSError, ValueError) as error:
         raise WorkerPublicationError("TabM checkpoint escapes worker root") from error
+    if any(part == ".." for part in supplied.parts):
+        raise WorkerPublicationError("TabM checkpoint traversal is forbidden")
+    if path != canonical:
+        raise WorkerPublicationError("TabM checkpoint path is noncanonical or contains a symlink")
     _regular_file(path)
-    return path
+    _regular_file(canonical)
+    return canonical
 
 
 def _safe_root(value: str | Path, *, create: bool = True) -> Path:

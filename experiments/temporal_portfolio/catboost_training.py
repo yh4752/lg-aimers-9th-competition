@@ -53,7 +53,7 @@ class CatBoostBackend(Protocol):
     ) -> object: ...
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, init=False)
 class TemporalTrainingJob:
     """One immutable-identity temporal training request.
 
@@ -64,120 +64,196 @@ class TemporalTrainingJob:
     job_id: str
     expert: str
     identity: TrainingIdentity
-    sample_weight: np.ndarray = field(repr=False)
     seed: int
-    audit_frame: pd.DataFrame = field(repr=False)
-    segment_columns: tuple[str, ...] = ()
-    train_frame: pd.DataFrame | None = field(default=None, repr=False)
-    valid_frame: pd.DataFrame | None = field(default=None, repr=False)
-    target: np.ndarray | None = field(default=None, repr=False)
-    valid_row_id: np.ndarray | None = field(default=None, repr=False)
-    train_request: object | None = field(default=None, repr=False)
-    teacher_oof: object | None = field(default=None, repr=False)
-    teacher_oof_sha256: str | None = None
-    teacher_lambda: float = 0.0
+    segment_columns: tuple[str, ...]
+    train_request: object | None = field(repr=False)
+    teacher_oof: object | None = field(repr=False)
+    teacher_oof_sha256: str | None
+    teacher_lambda: float
+    _sample_weight_bytes: bytes = field(repr=False)
+    _audit_frame: pd.DataFrame = field(repr=False)
+    _train_frame: pd.DataFrame | None = field(repr=False)
+    _valid_frame: pd.DataFrame | None = field(repr=False)
+    _target_bytes: bytes | None = field(repr=False)
+    _valid_row_ids: tuple[object, ...] = field(repr=False)
+    _valid_row_order_sha256: str = field(repr=False)
+    _audit_sha256: str = field(repr=False)
 
-    def __post_init__(self) -> None:
-        if type(self.job_id) is not str or not self.job_id or self.job_id != self.job_id.strip():
+    def __init__(
+        self,
+        *,
+        job_id: str,
+        expert: str,
+        identity: TrainingIdentity,
+        sample_weight: np.ndarray,
+        seed: int,
+        audit_frame: pd.DataFrame,
+        segment_columns: tuple[str, ...] = (),
+        train_frame: pd.DataFrame | None = None,
+        valid_frame: pd.DataFrame | None = None,
+        target: np.ndarray | None = None,
+        valid_row_id: np.ndarray | None = None,
+        train_request: object | None = None,
+        teacher_oof: object | None = None,
+        teacher_oof_sha256: str | None = None,
+        teacher_lambda: float = 0.0,
+    ) -> None:
+        if type(job_id) is not str or not job_id or job_id != job_id.strip():
             raise CatBoostTrainingError("job_id must be a nonempty canonical string")
-        if type(self.expert) is not str or self.expert not in _EXPERTS:
+        if type(expert) is not str or expert not in _EXPERTS:
             raise CatBoostTrainingError("expert is not preregistered")
-        if type(self.identity) is not TrainingIdentity:
+        if type(identity) is not TrainingIdentity:
             raise CatBoostTrainingError("identity must be an exact TrainingIdentity")
         try:
-            audit_duplicate(self.identity, {})
+            audit_duplicate(identity, {})
         except ValueError as error:
             raise CatBoostTrainingError("training identity is invalid") from error
-        if type(self.seed) is not int or self.seed < 0:
+        if type(seed) is not int or seed < 0:
             raise CatBoostTrainingError("seed must be an exact non-negative integer")
 
-        weight = _numeric_vector(self.sample_weight, "sample weight", nonempty=True)
+        weight = _numeric_vector(sample_weight, "sample weight", nonempty=True)
         if np.any(weight <= 0):
             raise CatBoostTrainingError("sample weight must be strictly positive")
-        object.__setattr__(self, "sample_weight", weight)
 
-        if type(self.audit_frame) is not pd.DataFrame or self.audit_frame.empty:
+        if type(audit_frame) is not pd.DataFrame or audit_frame.empty:
             raise CatBoostTrainingError("audit frame must be a nonempty pandas DataFrame")
-        if not self.audit_frame.columns.is_unique:
+        if not audit_frame.columns.is_unique:
             raise CatBoostTrainingError("audit frame columns must be unique")
-        if type(self.segment_columns) is not tuple or any(
-            type(column) is not str or not column for column in self.segment_columns
+        if type(segment_columns) is not tuple or any(
+            type(column) is not str or not column for column in segment_columns
         ):
             raise CatBoostTrainingError("segment columns must be canonical strings")
-        if len(set(self.segment_columns)) != len(self.segment_columns):
+        if len(set(segment_columns)) != len(segment_columns):
             raise CatBoostTrainingError("segment columns must be unique")
-        required = (*_BASE_AUDIT_COLUMNS, *self.segment_columns)
-        if set(self.audit_frame.columns) != set(required):
+        required = (*_BASE_AUDIT_COLUMNS, *segment_columns)
+        if set(audit_frame.columns) != set(required):
             raise CatBoostTrainingError("audit frame schema differs")
-        audit = self.audit_frame.loc[:, required].copy(deep=True).reset_index(drop=True)
+        audit = audit_frame.loc[:, required].copy(deep=True).reset_index(drop=True)
         row_ids = _stable_ids(audit["row_id"].tolist(), "audit row_id")
         target_valid = _binary_vector(audit["target"], "audit target", len(audit))
         audit["target"] = target_valid
-        object.__setattr__(self, "audit_frame", audit)
 
-        if self.valid_row_id is None:
+        if valid_row_id is None:
             supplied_row_ids = row_ids
         else:
-            if not isinstance(self.valid_row_id, np.ndarray):
+            if not isinstance(valid_row_id, np.ndarray):
                 raise CatBoostTrainingError("valid row IDs must be a NumPy array")
-            supplied_row_ids = _stable_ids(self.valid_row_id.tolist(), "valid row_id")
+            supplied_row_ids = _stable_ids(valid_row_id.tolist(), "valid row_id")
         if supplied_row_ids != row_ids:
             raise CatBoostTrainingError("valid row order differs from the audit source")
-        immutable_ids = np.asarray(supplied_row_ids, dtype=object)
-        object.__setattr__(self, "valid_row_id", immutable_ids)
 
-        if self.expert == "catboost":
-            if type(self.train_frame) is not pd.DataFrame or self.train_frame.empty:
+        train_snapshot = valid_snapshot = None
+        target_bytes = None
+        if expert == "catboost":
+            if type(train_frame) is not pd.DataFrame or train_frame.empty:
                 raise CatBoostTrainingError("CatBoost train frame must be nonempty")
-            if type(self.valid_frame) is not pd.DataFrame or self.valid_frame.empty:
+            if type(valid_frame) is not pd.DataFrame or valid_frame.empty:
                 raise CatBoostTrainingError("CatBoost valid frame must be nonempty")
-            if not self.train_frame.columns.is_unique or not self.valid_frame.columns.is_unique:
+            if not train_frame.columns.is_unique or not valid_frame.columns.is_unique:
                 raise CatBoostTrainingError("CatBoost feature columns must be unique")
-            if tuple(self.train_frame.columns) != tuple(self.valid_frame.columns):
+            if tuple(train_frame.columns) != tuple(valid_frame.columns):
                 raise CatBoostTrainingError("CatBoost train and valid columns differ")
-            if len(self.valid_frame) != len(row_ids):
+            if len(valid_frame) != len(row_ids):
                 raise CatBoostTrainingError("CatBoost validation rows differ")
-            train_target = _binary_vector(self.target, "training target", len(self.train_frame))
-            if len(weight) != len(self.train_frame):
+            train_target = _binary_vector(target, "training target", len(train_frame))
+            if len(weight) != len(train_frame):
                 raise CatBoostTrainingError("CatBoost sample weights are not row aligned")
-            object.__setattr__(self, "train_frame", self.train_frame.copy(deep=True).reset_index(drop=True))
-            object.__setattr__(self, "valid_frame", self.valid_frame.copy(deep=True).reset_index(drop=True))
-            object.__setattr__(self, "target", train_target)
-            if self.train_request is not None or self.teacher_oof is not None:
+            train_snapshot = train_frame.copy(deep=True).reset_index(drop=True)
+            valid_snapshot = valid_frame.copy(deep=True).reset_index(drop=True)
+            target_bytes = train_target.tobytes()
+            if train_request is not None or teacher_oof is not None:
                 raise CatBoostTrainingError("CatBoost job contains unrelated trainer state")
         else:
-            if self.train_request is None:
+            if train_request is None:
                 raise CatBoostTrainingError("TabM jobs require an existing TrainRequest")
-            if len(weight) != len(getattr(self.train_request, "train").row_id):
+            if len(weight) != len(getattr(train_request, "train").row_id):
                 raise CatBoostTrainingError("TabM sample weights are not row aligned")
             request_valid_ids = _stable_ids(
-                list(getattr(self.train_request, "valid").row_id), "request valid row_id"
+                list(getattr(train_request, "valid").row_id), "request valid row_id"
             )
             if request_valid_ids != row_ids:
                 raise CatBoostTrainingError("TrainRequest validation order differs")
-            if self.expert == "tabm" and (
-                self.teacher_oof is not None
-                or self.teacher_oof_sha256 is not None
-                or self.teacher_lambda != 0.0
+            if expert == "tabm" and (
+                teacher_oof is not None
+                or teacher_oof_sha256 is not None
+                or teacher_lambda != 0.0
             ):
                 raise CatBoostTrainingError("plain TabM job contains teacher state")
-            if self.expert == "lupi":
-                if self.teacher_oof is None or not _is_sha256(self.teacher_oof_sha256):
+            if expert == "lupi":
+                if teacher_oof is None or not _is_sha256(teacher_oof_sha256):
                     raise CatBoostTrainingError("LUPI job requires a sealed teacher OOF hash")
-                if isinstance(self.teacher_lambda, bool) or not isinstance(self.teacher_lambda, Real):
+                if isinstance(teacher_lambda, bool) or not isinstance(teacher_lambda, Real):
                     raise CatBoostTrainingError("teacher lambda must be numeric")
-                value = float(self.teacher_lambda)
+                value = float(teacher_lambda)
                 if not np.isfinite(value) or not 0.0 < value <= 1.0:
                     raise CatBoostTrainingError("teacher lambda must be in (0, 1]")
-                object.__setattr__(self, "teacher_lambda", value)
+                teacher_lambda = value
+
+        object.__setattr__(self, "job_id", job_id)
+        object.__setattr__(self, "expert", expert)
+        object.__setattr__(self, "identity", identity)
+        object.__setattr__(self, "seed", seed)
+        object.__setattr__(self, "segment_columns", segment_columns)
+        object.__setattr__(self, "train_request", train_request)
+        object.__setattr__(self, "teacher_oof", teacher_oof)
+        object.__setattr__(self, "teacher_oof_sha256", teacher_oof_sha256)
+        object.__setattr__(self, "teacher_lambda", teacher_lambda)
+        object.__setattr__(self, "_sample_weight_bytes", weight.tobytes())
+        object.__setattr__(self, "_audit_frame", audit)
+        object.__setattr__(self, "_train_frame", train_snapshot)
+        object.__setattr__(self, "_valid_frame", valid_snapshot)
+        object.__setattr__(self, "_target_bytes", target_bytes)
+        object.__setattr__(self, "_valid_row_ids", row_ids)
+        object.__setattr__(self, "_valid_row_order_sha256", _row_order_sha256(row_ids))
+        object.__setattr__(self, "_audit_sha256", _audit_frame_sha256(audit))
+
+    @property
+    def sample_weight(self) -> np.ndarray:
+        return np.frombuffer(self._sample_weight_bytes, dtype="float64")
+
+    @property
+    def audit_frame(self) -> pd.DataFrame:
+        return self._audit_frame.copy(deep=True)
+
+    @property
+    def train_frame(self) -> pd.DataFrame | None:
+        return None if self._train_frame is None else self._train_frame.copy(deep=True)
+
+    @property
+    def valid_frame(self) -> pd.DataFrame | None:
+        return None if self._valid_frame is None else self._valid_frame.copy(deep=True)
+
+    @property
+    def target(self) -> np.ndarray | None:
+        if self._target_bytes is None:
+            return None
+        return np.frombuffer(self._target_bytes, dtype="int8")
+
+    @property
+    def valid_row_id(self) -> np.ndarray:
+        result = np.asarray(self._valid_row_ids, dtype=object)
+        result.setflags(write=False)
+        return result
 
     @property
     def valid_rows(self) -> int:
-        return len(self.audit_frame)
+        return len(self._valid_row_ids)
 
     @property
     def valid_row_ids(self) -> tuple[object, ...]:
-        return tuple(self.audit_frame["row_id"].tolist())
+        return self._valid_row_ids
+
+    @property
+    def valid_row_order_sha256(self) -> str:
+        return self._valid_row_order_sha256
+
+    def frozen_audit_frame(self) -> pd.DataFrame:
+        frame = self._audit_frame.copy(deep=True)
+        if _audit_frame_sha256(frame) != self._audit_sha256:
+            raise CatBoostTrainingError("sealed audit frame integrity differs")
+        if _row_order_sha256(_stable_ids(frame["row_id"].tolist(), "audit row_id")) != self._valid_row_order_sha256:
+            raise CatBoostTrainingError("sealed audit row order differs")
+        return frame
 
 
 @dataclass(frozen=True, init=False)
@@ -223,10 +299,13 @@ def run_catboost_job(
         iterations=max(CATBOOST_PREFIXES),
         seed=job.seed,
     )
-    tree_count = getattr(model, "tree_count_", max(CATBOOST_PREFIXES))
+    try:
+        tree_count = model.tree_count_
+    except AttributeError as error:
+        raise CatBoostTrainingError("backend model tree count evidence is missing") from error
     if isinstance(tree_count, bool) or not isinstance(tree_count, Integral):
         raise CatBoostTrainingError("backend model tree count is invalid")
-    if int(tree_count) != max(CATBOOST_PREFIXES):
+    if tree_count != max(CATBOOST_PREFIXES):
         raise CatBoostTrainingError(
             "backend did not fit the exact maximum prefix; early stopping is forbidden"
         )
@@ -359,6 +438,18 @@ def _row_order_sha256(row_ids: tuple[object, ...]) -> str:
         encoded = (f"int:{int(value)}" if isinstance(value, Integral) else f"str:{value}").encode("utf-8")
         digest.update(len(encoded).to_bytes(8, "big"))
         digest.update(encoded)
+    return digest.hexdigest()
+
+
+def _audit_frame_sha256(frame: pd.DataFrame) -> str:
+    digest = hashlib.sha256()
+    digest.update(repr(tuple(frame.columns)).encode("utf-8"))
+    digest.update(repr(tuple(str(dtype) for dtype in frame.dtypes)).encode("utf-8"))
+    digest.update(
+        pd.util.hash_pandas_object(frame, index=True, categorize=False)
+        .to_numpy(dtype="uint64", copy=False)
+        .tobytes()
+    )
     return digest.hexdigest()
 
 

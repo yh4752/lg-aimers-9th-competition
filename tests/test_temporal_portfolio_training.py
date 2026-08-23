@@ -496,12 +496,86 @@ def test_catboost_job_detaches_inputs_and_predictions_from_callers() -> None:
     returned = backend.predict(None, job.valid_frame, ntree_end=16)
     returned[:] = 0.99
     job.train_frame.iloc[0, 0] = -999
-    job.sample_weight[0] = 99
+    with pytest.raises(ValueError):
+        job.sample_weight[0] = 99
 
     np.testing.assert_allclose(result.prefix_predictions[16], [0.016, 0.116])
     assert backend.fit_calls[0]["frame"].iloc[0, 0] == 3.0
     assert backend.fit_calls[0]["sample_weight"][0] == 1.0
     assert not result.prefix_predictions[16].flags.writeable
+
+
+def test_job_public_views_cannot_mutate_frozen_row_and_audit_bindings() -> None:
+    job = _catboost_job()
+    exposed_audit = job.audit_frame
+    exposed_audit.iloc[:] = exposed_audit.iloc[::-1].to_numpy()
+    exposed_audit.loc[0, "row_id"] = "changed"
+    exposed_audit.drop(columns=["game_type"], inplace=True)
+    exposed_train = job.train_frame
+    exposed_train.iloc[0, 0] = -999
+    exposed_ids = job.valid_row_id
+    with pytest.raises(ValueError):
+        exposed_ids[:] = ["changed-1", "changed-2"]
+
+    assert job.valid_row_ids == ("r2", "r1")
+    assert job.valid_rows == 2
+    assert job.audit_frame["row_id"].tolist() == ["r2", "r1"]
+    assert "game_type" in job.audit_frame
+    assert job.train_frame.iloc[0, 0] == 3.0
+    np.testing.assert_array_equal(job.valid_row_id, ["r2", "r1"])
+
+
+def test_job_snapshots_constructor_frames_ids_targets_and_weights() -> None:
+    audit = _audit_frame()
+    train = pd.DataFrame({"feature": [3.0, 2.0, 1.0]})
+    valid = pd.DataFrame({"feature": [20.0, 10.0]})
+    target = np.array([1, 0, 1])
+    weight = np.array([1.0, 0.5, 0.25])
+    row_ids = np.array(["r2", "r1"])
+    job = TemporalTrainingJob(
+        job_id="snapshot",
+        expert="catboost",
+        identity=_identity(),
+        sample_weight=weight,
+        seed=3407,
+        audit_frame=audit,
+        segment_columns=("segment_hand_matchup",),
+        train_frame=train,
+        valid_frame=valid,
+        target=target,
+        valid_row_id=row_ids,
+    )
+    audit.iloc[:] = audit.iloc[::-1].to_numpy()
+    audit.loc[0, "row_id"] = "changed"
+    train.iloc[0, 0] = -1
+    valid.iloc[0, 0] = -1
+    target[:] = 0
+    weight[:] = 99
+    row_ids[:] = "changed"
+
+    assert job.audit_frame["row_id"].tolist() == ["r2", "r1"]
+    assert job.train_frame.iloc[0, 0] == 3.0
+    assert job.valid_frame.iloc[0, 0] == 20.0
+    np.testing.assert_array_equal(job.target, [1, 0, 1])
+    np.testing.assert_array_equal(job.sample_weight, [1.0, 0.5, 0.25])
+    np.testing.assert_array_equal(job.valid_row_id, ["r2", "r1"])
+
+
+@pytest.mark.parametrize("tree_count", [None, True, "384", 383, 385])
+def test_catboost_rejects_missing_or_inexact_tree_count(tree_count: object) -> None:
+    class Backend(_CatBoostBackend):
+        def fit(self, *args, **kwargs):
+            if tree_count is None:
+                super().fit(*args, **kwargs)
+                return object()
+            model = super().fit(*args, **kwargs)
+            model.tree_count_ = tree_count
+            return model
+
+    backend = Backend()
+    with pytest.raises(ValueError, match="tree count|early stopping"):
+        run_catboost_job(_catboost_job(), backend=backend)
+    assert backend.predict_calls == []
 
 
 def test_worker_publishes_bound_artifacts_and_row_aligned_audit_csv(
@@ -597,6 +671,66 @@ def test_atomic_manifest_failure_leaves_no_completed_worker_result(
         )
 
     assert not (tmp_path / "worker_result.json").exists()
+
+
+@pytest.mark.parametrize("failure", ["verify", "directory_fsync"])
+def test_post_replace_failure_removes_completed_worker_result(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str
+) -> None:
+    job = _catboost_job()
+    run_worker(job, tmp_path / "source", backend=_CatBoostBackend())
+    source = tmp_path / "source"
+    (source / "worker_result.json").unlink()
+    artifacts = sorted(source.iterdir())
+    if failure == "verify":
+        monkeypatch.setattr(
+            "experiments.temporal_portfolio.worker.verify_worker_result",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                WorkerPublicationError("injected verify failure")
+            ),
+        )
+    else:
+        calls = 0
+
+        def fail_manifest_fsync(_path):
+            nonlocal calls
+            calls += 1
+            raise OSError("injected directory fsync failure")
+
+        monkeypatch.setattr(
+            "experiments.temporal_portfolio.worker._fsync_directory",
+            fail_manifest_fsync,
+        )
+
+    with pytest.raises((OSError, WorkerPublicationError), match="injected"):
+        publish_worker_result(source, job, artifacts, status="completed")
+
+    assert not (source / "worker_result.json").exists()
+
+
+def test_tabm_checkpoint_traversal_is_rejected(tmp_path: Path) -> None:
+    outside = tmp_path / "outside.pt"
+    outside.write_bytes(b"outside")
+
+    def fake_fit(request, adapter, output_dir, *, backend):
+        del request, adapter, backend
+        return SimpleNamespace(
+            predictions=np.array([0.6, 0.4]),
+            checkpoint=Path(output_dir) / ".." / "outside.pt",
+            best_epoch=2,
+            best_brier=0.24,
+        )
+
+    output = tmp_path / "worker"
+    with pytest.raises(WorkerPublicationError, match="escapes|traversal"):
+        run_worker(
+            _tabm_job(expert="tabm"),
+            output,
+            backend=WorkerBackendDispatcher(
+                tabm_backend=object(), fit_function=fake_fit
+            ),
+        )
+    assert not (output / "worker_result.json").exists()
 
 
 def _tabm_job(*, expert: str, teacher: TeacherOOF | None = None) -> TemporalTrainingJob:
