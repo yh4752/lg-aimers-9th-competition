@@ -135,6 +135,7 @@ def run_worker(
         )
         prediction_frame = _prediction_frame(job, predictions)
         checkpoint = _bound_checkpoint(root, getattr(trained, "checkpoint", None))
+        target_rate, weighted_target_rate = _training_target_rates(job)
         metrics = {
             "schema_version": 1,
             "job_id": job.job_id,
@@ -143,6 +144,8 @@ def run_worker(
             "best_brier": float(getattr(trained, "best_brier")),
             "teacher_oof_sha256": job.teacher_oof_sha256,
             "train_request_sha256": job.train_request_sha256,
+            "train_target_rate": target_rate,
+            "weighted_train_target_rate": weighted_target_rate,
         }
         meta_path = root / "checkpoint_meta.json"
         if meta_path.exists() or meta_path.is_symlink():
@@ -368,6 +371,23 @@ def _finite_probabilities(value: object, rows: int) -> np.ndarray:
     if not np.isfinite(result).all() or np.any((result < 0) | (result > 1)):
         raise WorkerPublicationError("worker probabilities must be finite and in [0, 1]")
     return np.array(result, copy=True)
+
+
+def _training_target_rates(job: TemporalTrainingJob) -> tuple[float, float]:
+    request = job.train_request
+    if request is None or request.train.y is None:
+        raise WorkerPublicationError("training target evidence is missing")
+    target = np.asarray(request.train.y, dtype="float64")
+    weight = np.asarray(job.sample_weight, dtype="float64")
+    if (
+        target.ndim != 1
+        or target.shape != weight.shape
+        or not np.isin(target, (0.0, 1.0)).all()
+        or not np.isfinite(weight).all()
+        or np.any(weight <= 0)
+    ):
+        raise WorkerPublicationError("training target-rate evidence is invalid")
+    return float(target.mean()), float(np.average(target, weights=weight))
 
 
 def _save_catboost_model(backend: object, result: CatBoostResult, path: Path) -> None:

@@ -65,6 +65,18 @@ def test_stage_planner_never_requeues_completed_identity(tmp_path: Path) -> None
     assert not {job.identity.sha256 for job in second.jobs} & set(completed)
 
 
+def test_t1_job_budget_uses_both_gpu_device_hours(tmp_path: Path) -> None:
+    verified = _verified(tmp_path)
+    from experiments.temporal_portfolio.runner import _input_manifest_sha
+
+    plan = plan_stage(
+        "T1",
+        prior_review=PriorReview(_input_manifest_sha(verified), {}),
+        completed={},
+    )
+    assert {job.max_seconds for job in plan.jobs} == {2_625}
+
+
 def test_runner_stops_new_jobs_and_reserves_handoff_time(tmp_path: Path) -> None:
     verified = _verified(tmp_path / "data")
     scheduler = _Scheduler(9_200)

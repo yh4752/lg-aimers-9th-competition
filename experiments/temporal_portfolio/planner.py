@@ -133,7 +133,12 @@ def _t1_job(spec: JobSpec, data_rows: str) -> PlannedJob:
             "seed": spec.seed,
         }
     )
-    maximum = max(900, load_contract().physical_stage_seconds["T1"] // max(1, len(build_stage_jobs(load_contract(), "T1"))))
+    job_count = len(build_stage_jobs(load_contract(), "T1"))
+    waves = max(1, (job_count + 1) // 2)
+    maximum = max(
+        900,
+        (load_contract().physical_stage_seconds["T1"] - 600) // waves,
+    )
     return PlannedJob(
         spec.job_id,
         _STAGE_IDS["T1"],

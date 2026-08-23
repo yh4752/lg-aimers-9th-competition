@@ -1122,6 +1122,8 @@ def test_tabm_request_is_sealed_against_nested_and_array_mutation(
     assert job.train_request_sha256 == digest
     metrics = json.loads((tmp_path / "metrics.json").read_text())
     assert metrics["train_request_sha256"] == digest
+    assert metrics["train_target_rate"] == pytest.approx(0.5)
+    assert metrics["weighted_train_target_rate"] == pytest.approx(0.8)
 
 
 @pytest.mark.parametrize(("field", "value"), [("seed", 7), ("candidate_id", "other")])

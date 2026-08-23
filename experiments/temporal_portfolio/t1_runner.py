@@ -17,6 +17,7 @@ import pandas as pd
 from .contracts import build_stage_jobs, load_contract
 from .inputs import VerifiedOfficialData
 from .job_materialization import MaterializedJob, materialize_t1_job
+from .t1_artifacts import verify_compact_result
 from .worker import WorkerBudgetIncomplete, run_worker, verify_worker_result
 
 
@@ -296,9 +297,19 @@ def _reuse_completed(
     verifier: Callable[[str | Path], Mapping[str, object]],
 ) -> bool:
     manifest = output_dir / "worker_result.json"
-    if not manifest.exists() and not manifest.is_symlink():
+    compact = output_dir / "compact_result.json"
+    if manifest.exists() or manifest.is_symlink():
+        _require_completed(output_dir, materialized, verifier)
+        return True
+    if not compact.exists() and not compact.is_symlink():
         return False
-    _require_completed(output_dir, materialized, verifier)
+    try:
+        payload = verify_compact_result(output_dir)
+    except Exception as error:
+        raise T1RunnerError(
+            f"compact worker verification failed: {materialized.training.job_id}"
+        ) from error
+    _require_identity(payload, materialized)
     return True
 
 
@@ -313,6 +324,12 @@ def _require_completed(
         raise T1RunnerError(
             f"completed worker verification failed: {materialized.training.job_id}"
         ) from error
+    _require_identity(payload, materialized)
+
+
+def _require_identity(
+    payload: Mapping[str, object], materialized: MaterializedJob
+) -> None:
     if (
         payload.get("status") != "completed"
         or payload.get("job_id") != materialized.training.job_id

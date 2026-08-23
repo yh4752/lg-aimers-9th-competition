@@ -12,6 +12,7 @@ from experiments.temporal_portfolio.t1_runner import (
     require_two_t4_gpus,
     run_t1_stage,
 )
+from experiments.temporal_portfolio.t1_artifacts import restore_t1_resume, write_t1_bundles
 import pytest
 
 
@@ -87,6 +88,11 @@ class _Launcher:
     def start(self, materialized, output_dir, *, gpu, deadline):
         self.starts.append((materialized.training.job_id, gpu, deadline))
         output_dir.mkdir(parents=True, exist_ok=True)
+        (output_dir / "predictions.csv").write_text(
+            "row_id,target,probability\nr1,1,0.7\n", encoding="utf-8"
+        )
+        (output_dir / "metrics.json").write_text("{}", encoding="utf-8")
+        (output_dir / "checkpoint_meta.json").write_text("{}", encoding="utf-8")
         payload = {
             "job_id": materialized.training.job_id,
             "status": "completed",
@@ -214,3 +220,45 @@ def test_production_gpu_gate_requires_exactly_two_tesla_t4_devices() -> None:
         require_two_t4_gpus(lambda: ("Tesla T4",))
     with pytest.raises(T1RunnerError, match="exactly two Tesla T4"):
         require_two_t4_gpus(lambda: ("NVIDIA A100-SXM4-40GB", "Tesla T4"))
+
+
+def test_t1_runner_reuses_compact_result_restored_from_resume(tmp_path: Path) -> None:
+    verified = _verified(tmp_path / "data")
+    source = tmp_path / "source"
+    launcher = _Launcher()
+    run_t1_stage(
+        verified=verified,
+        output_root=source,
+        deadline=30_000,
+        launcher=launcher,
+        materializer=_materializer,
+        result_verifier=_verify,
+        frame_loader=lambda _path: SimpleNamespace(),
+        clock=lambda: 1_000.0,
+        sleeper=lambda _seconds: None,
+    )
+    first_job = launcher.starts[0][0]
+    bundles = write_t1_bundles(
+        tmp_path / "bundles",
+        jobs_root=source / "jobs",
+        completed=(first_job,),
+        pending=(),
+        failed=(),
+        verifier=_verify,
+    )
+    restored = tmp_path / "restored"
+    restore_t1_resume(bundles.resume, restored)
+    next_launcher = _Launcher()
+    run_t1_stage(
+        verified=verified,
+        output_root=restored,
+        deadline=30_000,
+        launcher=next_launcher,
+        materializer=_materializer,
+        result_verifier=_verify,
+        frame_loader=lambda _path: SimpleNamespace(),
+        clock=lambda: 1_000.0,
+        sleeper=lambda _seconds: None,
+    )
+
+    assert first_job not in {job_id for job_id, _, _ in next_launcher.starts}
