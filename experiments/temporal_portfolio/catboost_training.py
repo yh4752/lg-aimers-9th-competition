@@ -5,12 +5,17 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 import hashlib
+import json
 from numbers import Integral, Real
 from types import MappingProxyType
 from typing import Protocol
 
 import numpy as np
 import pandas as pd
+
+from experiments.independent_dl.features import FeatureBatch
+from experiments.independent_dl.models.common import ModelMetadata
+from experiments.independent_dl.training import TrainRequest
 
 from .identity import TrainingIdentity, audit_duplicate
 
@@ -44,6 +49,39 @@ class CatBoostBackend(Protocol):
         seed: int,
     ) -> object: ...
 
+
+@dataclass(frozen=True)
+class _SealedBatch:
+    row_id: np.ndarray = field(repr=False)
+    season: np.ndarray = field(repr=False)
+    game_type: np.ndarray = field(repr=False)
+    x_num: np.ndarray = field(repr=False)
+    x_cat: np.ndarray = field(repr=False)
+    y: np.ndarray | None = field(repr=False)
+
+
+@dataclass(frozen=True)
+class _SealedMetadata:
+    n_num_features: int
+    categorical_cardinalities: tuple[int, ...]
+    train_x_num: np.ndarray | None = field(repr=False)
+    piecewise_bin_edges: tuple[np.ndarray, ...] | None = field(repr=False)
+
+
+@dataclass(frozen=True)
+class _SealedRequest:
+    candidate_id: str
+    family: str
+    seed: int
+    epochs: int
+    min_epochs: int
+    model_config_json: bytes = field(repr=False)
+    training_config_json: bytes = field(repr=False)
+    checkpoint_binding_json: bytes = field(repr=False)
+    train: _SealedBatch = field(repr=False)
+    valid: _SealedBatch = field(repr=False)
+    model_metadata: _SealedMetadata | None = field(repr=False)
+
     def predict(
         self,
         model: object,
@@ -66,7 +104,6 @@ class TemporalTrainingJob:
     identity: TrainingIdentity
     seed: int
     segment_columns: tuple[str, ...]
-    train_request: object | None = field(repr=False)
     teacher_oof: object | None = field(repr=False)
     teacher_oof_sha256: str | None
     teacher_lambda: float
@@ -78,6 +115,8 @@ class TemporalTrainingJob:
     _valid_row_ids: tuple[object, ...] = field(repr=False)
     _valid_row_order_sha256: str = field(repr=False)
     _audit_sha256: str = field(repr=False)
+    _train_request: _SealedRequest | None = field(repr=False)
+    _train_request_sha256: str | None = field(repr=False)
 
     def __init__(
         self,
@@ -93,7 +132,7 @@ class TemporalTrainingJob:
         valid_frame: pd.DataFrame | None = None,
         target: np.ndarray | None = None,
         valid_row_id: np.ndarray | None = None,
-        train_request: object | None = None,
+        train_request: TrainRequest | None = None,
         teacher_oof: object | None = None,
         teacher_oof_sha256: str | None = None,
         teacher_lambda: float = 0.0,
@@ -110,6 +149,7 @@ class TemporalTrainingJob:
             raise CatBoostTrainingError("training identity is invalid") from error
         if type(seed) is not int or seed < 0:
             raise CatBoostTrainingError("seed must be an exact non-negative integer")
+        _validate_identity_bindings(identity, job_id, expert, seed, train_request)
 
         weight = _numeric_vector(sample_weight, "sample weight", nonempty=True)
         if np.any(weight <= 0):
@@ -144,6 +184,8 @@ class TemporalTrainingJob:
 
         train_snapshot = valid_snapshot = None
         target_bytes = None
+        sealed_request = None
+        request_sha256 = None
         if expert == "catboost":
             if type(train_frame) is not pd.DataFrame or train_frame.empty:
                 raise CatBoostTrainingError("CatBoost train frame must be nonempty")
@@ -164,8 +206,17 @@ class TemporalTrainingJob:
             if train_request is not None or teacher_oof is not None:
                 raise CatBoostTrainingError("CatBoost job contains unrelated trainer state")
         else:
-            if train_request is None:
+            if type(train_request) is not TrainRequest:
                 raise CatBoostTrainingError("TabM jobs require an existing TrainRequest")
+            if train_request.candidate_id != job_id:
+                raise CatBoostTrainingError("TrainRequest candidate does not match job_id")
+            if type(train_request.seed) is not int or train_request.seed != seed:
+                raise CatBoostTrainingError("TrainRequest seed does not match job seed")
+            sealed_request = _seal_request(train_request)
+            request_sha256 = _sealed_request_sha256(sealed_request)
+            identity_request_sha = identity.payload["model"].get("train_request_sha256")
+            if identity_request_sha is not None and identity_request_sha != request_sha256:
+                raise CatBoostTrainingError("TrainRequest hash differs from training identity")
             if len(weight) != len(getattr(train_request, "train").row_id):
                 raise CatBoostTrainingError("TabM sample weights are not row aligned")
             request_valid_ids = _stable_ids(
@@ -194,7 +245,6 @@ class TemporalTrainingJob:
         object.__setattr__(self, "identity", identity)
         object.__setattr__(self, "seed", seed)
         object.__setattr__(self, "segment_columns", segment_columns)
-        object.__setattr__(self, "train_request", train_request)
         object.__setattr__(self, "teacher_oof", teacher_oof)
         object.__setattr__(self, "teacher_oof_sha256", teacher_oof_sha256)
         object.__setattr__(self, "teacher_lambda", teacher_lambda)
@@ -206,6 +256,8 @@ class TemporalTrainingJob:
         object.__setattr__(self, "_valid_row_ids", row_ids)
         object.__setattr__(self, "_valid_row_order_sha256", _row_order_sha256(row_ids))
         object.__setattr__(self, "_audit_sha256", _audit_frame_sha256(audit))
+        object.__setattr__(self, "_train_request", sealed_request)
+        object.__setattr__(self, "_train_request_sha256", request_sha256)
 
     @property
     def sample_weight(self) -> np.ndarray:
@@ -236,6 +288,18 @@ class TemporalTrainingJob:
         return result
 
     @property
+    def train_request(self) -> TrainRequest | None:
+        if self._train_request is None:
+            return None
+        self._validate_request_seal()
+        return _restore_request(self._train_request)
+
+    @property
+    def train_request_sha256(self) -> str | None:
+        self._validate_request_seal()
+        return self._train_request_sha256
+
+    @property
     def valid_rows(self) -> int:
         return len(self._valid_row_ids)
 
@@ -254,6 +318,26 @@ class TemporalTrainingJob:
         if _row_order_sha256(_stable_ids(frame["row_id"].tolist(), "audit row_id")) != self._valid_row_order_sha256:
             raise CatBoostTrainingError("sealed audit row order differs")
         return frame
+
+    def validate_seals(self) -> None:
+        _validate_identity_bindings(
+            self.identity, self.job_id, self.expert, self.seed,
+            None if self._train_request is None else _restore_request(self._train_request),
+        )
+        self.frozen_audit_frame()
+        self._validate_request_seal()
+
+    def _validate_request_seal(self) -> None:
+        if self._train_request is None:
+            if self._train_request_sha256 is not None:
+                raise CatBoostTrainingError("unexpected TrainRequest digest")
+            return
+        observed = _sealed_request_sha256(self._train_request)
+        if observed != self._train_request_sha256:
+            raise CatBoostTrainingError("sealed TrainRequest integrity digest differs")
+        identity_digest = self.identity.payload["model"].get("train_request_sha256")
+        if identity_digest is not None and identity_digest != observed:
+            raise CatBoostTrainingError("sealed TrainRequest digest differs from identity")
 
 
 @dataclass(frozen=True, init=False)
@@ -284,6 +368,7 @@ def run_catboost_job(
 
     if type(job) is not TemporalTrainingJob or job.expert != "catboost":
         raise CatBoostTrainingError("run_catboost_job requires a validated CatBoost job")
+    job.validate_seals()
     fit = getattr(backend, "fit", None)
     predict = getattr(backend, "predict", None)
     if not callable(fit) or not callable(predict):
@@ -451,6 +536,215 @@ def _audit_frame_sha256(frame: pd.DataFrame) -> str:
         .tobytes()
     )
     return digest.hexdigest()
+
+
+def _validate_identity_bindings(
+    identity: TrainingIdentity,
+    job_id: str,
+    expert: str,
+    seed: int,
+    request: TrainRequest | None,
+) -> None:
+    if identity.payload["seed"] != seed:
+        raise CatBoostTrainingError("job seed differs from training identity seed")
+    model = identity.payload["model"]
+    expected = {
+        "job_id": job_id,
+        "candidate_id": job_id,
+        "expert": expert,
+    }
+    if request is not None:
+        expected["family"] = request.family
+    elif "family" in model:
+        expected["family"] = expert
+    for key, value in expected.items():
+        if key in model and model[key] != value:
+            raise CatBoostTrainingError(f"training identity {key} differs")
+
+
+def _seal_request(request: TrainRequest) -> _SealedRequest:
+    metadata = request.model_metadata
+    sealed_metadata = None
+    if metadata is not None:
+        if type(metadata) is not ModelMetadata:
+            raise CatBoostTrainingError("TrainRequest model metadata type differs")
+        sealed_metadata = _SealedMetadata(
+            metadata.n_num_features,
+            tuple(metadata.categorical_cardinalities),
+            None if metadata.train_x_num is None else _sealed_array(metadata.train_x_num),
+            None
+            if metadata.piecewise_bin_edges is None
+            else tuple(_sealed_array(edge) for edge in metadata.piecewise_bin_edges),
+        )
+    return _SealedRequest(
+        candidate_id=request.candidate_id,
+        family=request.family,
+        seed=request.seed,
+        epochs=request.epochs,
+        min_epochs=request.min_epochs,
+        model_config_json=_canonical_config(request.model_config, "model config"),
+        training_config_json=_canonical_config(request.training_config, "training config"),
+        checkpoint_binding_json=_canonical_config(
+            request.checkpoint_binding, "checkpoint binding"
+        ),
+        train=_seal_batch(request.train, "training batch"),
+        valid=_seal_batch(request.valid, "validation batch"),
+        model_metadata=sealed_metadata,
+    )
+
+
+def _seal_batch(batch: object, label: str) -> _SealedBatch:
+    if type(batch) is not FeatureBatch:
+        raise CatBoostTrainingError(f"{label} type differs")
+    return _SealedBatch(
+        _sealed_array(batch.row_id),
+        _sealed_array(batch.season),
+        _sealed_array(batch.game_type),
+        _sealed_array(batch.x_num),
+        _sealed_array(batch.x_cat),
+        None if batch.y is None else _sealed_array(batch.y),
+    )
+
+
+def _sealed_array(value: object) -> np.ndarray:
+    if not isinstance(value, np.ndarray):
+        raise CatBoostTrainingError("TrainRequest arrays must be NumPy arrays")
+    if value.dtype.hasobject:
+        normalized = json.loads(_canonical_json_value(value.tolist()).decode("utf-8"))
+        result = np.asarray(normalized, dtype=object).reshape(value.shape)
+    else:
+        result = np.array(value, copy=True, order="C")
+    result.setflags(write=False)
+    return result
+
+
+def _restore_request(sealed: _SealedRequest) -> TrainRequest:
+    metadata = sealed.model_metadata
+    restored_metadata = None
+    if metadata is not None:
+        restored_metadata = ModelMetadata(
+            metadata.n_num_features,
+            metadata.categorical_cardinalities,
+            None if metadata.train_x_num is None else np.array(metadata.train_x_num, copy=True),
+            None
+            if metadata.piecewise_bin_edges is None
+            else tuple(np.array(edge, copy=True) for edge in metadata.piecewise_bin_edges),
+        )
+    return TrainRequest(
+        candidate_id=sealed.candidate_id,
+        family=sealed.family,
+        seed=sealed.seed,
+        epochs=sealed.epochs,
+        model_config=json.loads(sealed.model_config_json),
+        training_config=json.loads(sealed.training_config_json),
+        train=_restore_batch(sealed.train),
+        valid=_restore_batch(sealed.valid),
+        min_epochs=sealed.min_epochs,
+        checkpoint_binding=json.loads(sealed.checkpoint_binding_json),
+        model_metadata=restored_metadata,
+    )
+
+
+def _restore_batch(sealed: _SealedBatch) -> FeatureBatch:
+    return FeatureBatch(
+        *(np.array(value, copy=True) for value in (
+            sealed.row_id, sealed.season, sealed.game_type,
+            sealed.x_num, sealed.x_cat,
+        )),
+        None if sealed.y is None else np.array(sealed.y, copy=True),
+    )
+
+
+def _sealed_request_sha256(request: _SealedRequest) -> str:
+    payload = {
+        "candidate_id": request.candidate_id,
+        "family": request.family,
+        "seed": request.seed,
+        "epochs": request.epochs,
+        "min_epochs": request.min_epochs,
+        "model_config": json.loads(request.model_config_json),
+        "training_config": json.loads(request.training_config_json),
+        "checkpoint_binding": json.loads(request.checkpoint_binding_json),
+        "train": _batch_digest_payload(request.train),
+        "valid": _batch_digest_payload(request.valid),
+        "model_metadata": _metadata_digest_payload(request.model_metadata),
+    }
+    return hashlib.sha256(_canonical_json_value(payload)).hexdigest()
+
+
+def _batch_digest_payload(batch: _SealedBatch) -> dict[str, object]:
+    return {
+        name: _array_digest(value)
+        for name, value in (
+            ("row_id", batch.row_id), ("season", batch.season),
+            ("game_type", batch.game_type), ("x_num", batch.x_num),
+            ("x_cat", batch.x_cat), ("y", batch.y),
+        )
+    }
+
+
+def _metadata_digest_payload(metadata: _SealedMetadata | None) -> object:
+    if metadata is None:
+        return None
+    return {
+        "n_num_features": metadata.n_num_features,
+        "categorical_cardinalities": list(metadata.categorical_cardinalities),
+        "train_x_num": _array_digest(metadata.train_x_num),
+        "piecewise_bin_edges": None
+        if metadata.piecewise_bin_edges is None
+        else [_array_digest(edge) for edge in metadata.piecewise_bin_edges],
+    }
+
+
+def _array_digest(value: np.ndarray | None) -> object:
+    if value is None:
+        return None
+    payload = (
+        _canonical_json_value(value.tolist())
+        if value.dtype.hasobject
+        else np.ascontiguousarray(value).tobytes()
+    )
+    return {
+        "dtype": value.dtype.str,
+        "shape": list(value.shape),
+        "sha256": hashlib.sha256(payload).hexdigest(),
+    }
+
+
+def _canonical_config(value: object, label: str) -> bytes:
+    if not isinstance(value, Mapping):
+        raise CatBoostTrainingError(f"TrainRequest {label} must be a mapping")
+    return _canonical_json_value(value)
+
+
+def _canonical_json_value(value: object) -> bytes:
+    def plain(item: object) -> object:
+        if item is None or type(item) in {bool, str, int}:
+            return item
+        if isinstance(item, np.generic):
+            return plain(item.item())
+        if type(item) is float:
+            if not np.isfinite(item):
+                raise CatBoostTrainingError("TrainRequest JSON contains non-finite values")
+            return item
+        if isinstance(item, Mapping):
+            result: dict[str, object] = {}
+            for key, nested in item.items():
+                if type(key) is not str or key in result:
+                    raise CatBoostTrainingError("TrainRequest JSON keys differ")
+                result[key] = plain(nested)
+            return result
+        if type(item) in {list, tuple}:
+            return [plain(nested) for nested in item]
+        raise CatBoostTrainingError("TrainRequest JSON contains unsupported values")
+
+    try:
+        return json.dumps(
+            plain(value), sort_keys=True, separators=(",", ":"),
+            ensure_ascii=False, allow_nan=False,
+        ).encode("utf-8")
+    except (TypeError, ValueError, UnicodeError) as error:
+        raise CatBoostTrainingError("TrainRequest JSON cannot be canonicalized") from error
 
 
 def _is_sha256(value: object) -> bool:

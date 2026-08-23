@@ -11,6 +11,8 @@ import pytest
 import torch
 
 from experiments.independent_dl.models.tabm import TabMAdapter
+from experiments.independent_dl.features import FeatureBatch
+from experiments.independent_dl.training import TrainRequest
 from experiments.temporal_portfolio.catboost_training import (
     CATBOOST_PREFIXES,
     TemporalTrainingJob,
@@ -418,6 +420,23 @@ def _catboost_job() -> TemporalTrainingJob:
     )
 
 
+def test_job_seed_must_match_training_identity_before_backend_fit() -> None:
+    with pytest.raises(ValueError, match="seed.*identity|identity.*seed"):
+        TemporalTrainingJob(
+            job_id="catboost_2022",
+            expert="catboost",
+            identity=_identity(),
+            sample_weight=np.array([1.0, 0.5, 0.25]),
+            seed=7,
+            audit_frame=_audit_frame(),
+            segment_columns=("segment_hand_matchup",),
+            train_frame=pd.DataFrame({"feature": [3.0, 2.0, 1.0]}),
+            valid_frame=pd.DataFrame({"feature": [20.0, 10.0]}),
+            target=np.array([1, 0, 1]),
+            valid_row_id=np.array(["r2", "r1"]),
+        )
+
+
 class _CatBoostBackend:
     def __init__(self) -> None:
         self.fit_calls: list[dict[str, object]] = []
@@ -734,9 +753,33 @@ def test_tabm_checkpoint_traversal_is_rejected(tmp_path: Path) -> None:
 
 
 def _tabm_job(*, expert: str, teacher: TeacherOOF | None = None) -> TemporalTrainingJob:
-    request = SimpleNamespace(
-        train=SimpleNamespace(row_id=np.array(["t1", "t2"])),
-        valid=SimpleNamespace(row_id=np.array(["r2", "r1"])),
+    request = TrainRequest(
+        candidate_id=f"{expert}_2022",
+        family="tabm",
+        seed=3407,
+        epochs=2,
+        model_config={"profile": {"width": 32}},
+        training_config={
+            "effective_batch_size": 2,
+            "micro_batch_size": 1,
+            "optimizer": {"learning_rate": 0.001},
+        },
+        train=FeatureBatch(
+            row_id=np.array(["t1", "t2"]),
+            season=np.array([2021, 2021]),
+            game_type=np.array(["regular", "regular"]),
+            x_num=np.array([[1.0], [2.0]], dtype="float32"),
+            x_cat=np.array([[0], [1]], dtype="int64"),
+            y=np.array([1, 0], dtype="int8"),
+        ),
+        valid=FeatureBatch(
+            row_id=np.array(["r2", "r1"]),
+            season=np.array([2022, 2022]),
+            game_type=np.array(["regular", "postseason"]),
+            x_num=np.array([[3.0], [4.0]], dtype="float32"),
+            x_cat=np.array([[1], [0]], dtype="int64"),
+            y=np.array([1, 0], dtype="int8"),
+        ),
     )
     return TemporalTrainingJob(
         job_id=f"{expert}_2022",
@@ -791,10 +834,79 @@ def test_worker_dispatches_weighted_tabm_through_existing_fit_entrypoint(
     )
 
     assert len(calls) == 1
-    assert calls[0][0] is job.train_request
+    assert calls[0][0].candidate_id == job.job_id
     assert calls[0][2] is runtime
     np.testing.assert_array_equal(calls[0][1].sample_weight_np, [1.0, 0.25])
     assert calls[0][1].teacher_probability_np is None
+
+
+def test_tabm_request_is_sealed_against_nested_and_array_mutation(
+    tmp_path: Path,
+) -> None:
+    template = _tabm_job(expert="tabm")
+    original = template.train_request
+    job = TemporalTrainingJob(
+        job_id=template.job_id,
+        expert=template.expert,
+        identity=template.identity,
+        sample_weight=template.sample_weight,
+        seed=template.seed,
+        audit_frame=template.audit_frame,
+        segment_columns=template.segment_columns,
+        train_request=original,
+    )
+    digest = job.train_request_sha256
+    original.model_config["profile"]["width"] = 999
+    original.training_config["optimizer"]["learning_rate"] = 99
+    original.train.x_num[:] = -999
+    original.train.y[:] = 0
+    original.valid.row_id[:] = "changed"
+    seen: list[TrainRequest] = []
+
+    def fake_fit(request, adapter, output_dir, *, backend):
+        del adapter, backend
+        seen.append(request)
+        checkpoint = Path(output_dir) / "checkpoint.pt"
+        checkpoint.write_bytes(b"sealed")
+        return SimpleNamespace(
+            predictions=np.array([0.6, 0.4]), checkpoint=checkpoint,
+            best_epoch=1, best_brier=0.24,
+        )
+
+    run_worker(
+        job,
+        tmp_path,
+        backend=WorkerBackendDispatcher(tabm_backend=object(), fit_function=fake_fit),
+    )
+    dispatched = seen[0]
+    assert dispatched.model_config["profile"]["width"] == 32
+    assert dispatched.training_config["optimizer"]["learning_rate"] == 0.001
+    np.testing.assert_array_equal(dispatched.train.x_num, [[1.0], [2.0]])
+    np.testing.assert_array_equal(dispatched.train.y, [1, 0])
+    np.testing.assert_array_equal(dispatched.valid.row_id, ["r2", "r1"])
+    assert job.train_request_sha256 == digest
+    metrics = json.loads((tmp_path / "metrics.json").read_text())
+    assert metrics["train_request_sha256"] == digest
+
+
+@pytest.mark.parametrize(("field", "value"), [("seed", 7), ("candidate_id", "other")])
+def test_tabm_request_identity_mismatch_rejects_before_dispatch(
+    field: str, value: object
+) -> None:
+    job = _tabm_job(expert="tabm")
+    payload = dict(job.train_request.__dict__)
+    payload[field] = value
+    with pytest.raises(ValueError, match=field.replace("candidate_id", "candidate")):
+        TemporalTrainingJob(
+            job_id=job.job_id,
+            expert="tabm",
+            identity=job.identity,
+            sample_weight=job.sample_weight,
+            seed=job.seed,
+            audit_frame=job.audit_frame,
+            segment_columns=job.segment_columns,
+            train_request=TrainRequest(**payload),
+        )
 
 
 def test_lupi_verifies_teacher_hash_before_weighted_tabm_dispatch(

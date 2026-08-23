@@ -62,6 +62,10 @@ def run_worker(
 
     if type(job) is not TemporalTrainingJob:
         raise WorkerPublicationError("worker job has an invalid type")
+    try:
+        job.validate_seals()
+    except ValueError as error:
+        raise WorkerPublicationError("worker job seal validation failed") from error
     root = _safe_root(output_dir)
     if any(root.iterdir()):
         raise WorkerPublicationError("worker output directory must start empty")
@@ -129,6 +133,7 @@ def run_worker(
             "best_epoch": int(getattr(trained, "best_epoch")),
             "best_brier": float(getattr(trained, "best_brier")),
             "teacher_oof_sha256": job.teacher_oof_sha256,
+            "train_request_sha256": job.train_request_sha256,
         }
         meta_path = root / "checkpoint_meta.json"
         if meta_path.exists() or meta_path.is_symlink():
@@ -140,6 +145,7 @@ def run_worker(
                 "job_id": job.job_id,
                 "training_identity_sha256": job.identity.sha256,
                 "checkpoint": checkpoint.name,
+                "train_request_sha256": job.train_request_sha256,
             }
         )
 
@@ -165,6 +171,10 @@ def publish_worker_result(
     directory = _safe_root(root)
     if type(job) is not TemporalTrainingJob:
         raise WorkerPublicationError("worker job has an invalid type")
+    try:
+        job.validate_seals()
+    except ValueError as error:
+        raise WorkerPublicationError("worker job seal validation failed") from error
     if type(status) is not str or status not in FINAL_WORKER_STATUSES:
         raise WorkerPublicationError("worker status is not an exact final status")
     manifest_path = directory / _MANIFEST
@@ -204,6 +214,10 @@ def publish_worker_result(
         "artifacts": records,
     }
     _validate_worker_payload(directory, payload)
+    try:
+        job.validate_seals()
+    except ValueError as error:
+        raise WorkerPublicationError("worker job seal changed before publication") from error
     try:
         _atomic_bytes(manifest_path, _canonical_json(payload))
         verify_worker_result(directory)
