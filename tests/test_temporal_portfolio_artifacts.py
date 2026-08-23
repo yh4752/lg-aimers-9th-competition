@@ -629,14 +629,109 @@ def test_discovery_rejects_binding_and_lineage_identity_conflicts(
         discover_handoffs([tmp_path])
 
 
-def test_discovery_verifies_all_candidates_before_selection(tmp_path: Path) -> None:
-    write_handoff(tmp_path / "valid", _evidence())
-    broken_dir = tmp_path / "broken"
-    broken_dir.mkdir()
-    (broken_dir / "temporal_portfolio_stage_T1_handoff.zip").write_bytes(b"bad")
+@pytest.mark.parametrize("opaque_name", ["opaque-upload.zip", "opaque-upload"])
+def test_directory_discovery_identifies_handoff_by_internal_manifest(
+    tmp_path: Path, opaque_name: str
+) -> None:
+    source = write_handoff(tmp_path / "source", _evidence()).path
+    expected = verify_handoff(source).manifest_sha256
+    scan = tmp_path / "scan"
+    scan.mkdir()
+    renamed = scan / opaque_name
+    source.replace(renamed)
+
+    found = discover_handoffs([scan])
+
+    assert found[0].path == renamed
+    assert found[0].manifest_sha256 == expected
+
+
+def test_directory_discovery_ignores_unrelated_files_and_zips(tmp_path: Path) -> None:
+    source = write_handoff(tmp_path / "source", _evidence()).path
+    scan = tmp_path / "scan"
+    scan.mkdir()
+    renamed = scan / "actual-upload.bin"
+    source.replace(renamed)
+    (scan / "notes.txt").write_bytes(b"not a zip")
+    (scan / "unrelated.zip").write_bytes(_zip_bytes([("data.txt", b"data")]))
+
+    found = discover_handoffs([scan])
+
+    assert found[0].path == renamed
+
+
+def test_internal_manifest_candidate_that_fails_verification_poisons_discovery(
+    tmp_path: Path,
+) -> None:
+    source = write_handoff(tmp_path / "source", _evidence()).path
+    scan = tmp_path / "scan"
+    scan.mkdir()
+    source.replace(scan / source.name)
+    (scan / "malformed-opaque").write_bytes(
+        _zip_bytes([("handoff_manifest.json", b"{malformed")])
+    )
 
     with pytest.raises(PortfolioArtifactError):
-        discover_handoffs([tmp_path])
+        discover_handoffs([scan])
+
+
+def test_discovery_bounds_total_archive_bytes_inspected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = write_handoff(tmp_path / "source", _evidence()).path
+    scan = tmp_path / "scan"
+    scan.mkdir()
+    renamed = scan / "opaque"
+    source.replace(renamed)
+    monkeypatch.setattr(
+        artifact_module,
+        "_MAX_DISCOVERY_INSPECTED_BYTES",
+        renamed.stat().st_size - 1,
+    )
+
+    with pytest.raises(PortfolioArtifactError, match="inspection byte limit"):
+        discover_handoffs([scan])
+
+
+def test_discovery_bounds_manifest_bearing_candidate_count(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = write_handoff(tmp_path / "source", _evidence()).path
+    scan = tmp_path / "scan"
+    scan.mkdir()
+    (scan / "one").write_bytes(source.read_bytes())
+    (scan / "two").write_bytes(source.read_bytes())
+    monkeypatch.setattr(artifact_module, "_MAX_DISCOVERY_CANDIDATES", 1)
+
+    with pytest.raises(PortfolioArtifactError, match="candidate limit"):
+        discover_handoffs([scan])
+
+
+def test_discovery_preflight_rejects_file_swap_after_directory_stat(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = write_handoff(tmp_path / "source", _evidence(marker="first")).path
+    replacement = write_handoff(
+        tmp_path / "replacement", _evidence(marker="replacement")
+    ).path
+    scan = tmp_path / "scan"
+    scan.mkdir()
+    opaque = scan / "opaque"
+    source.replace(opaque)
+    original_open = artifact_module._open_safe_file
+    swapped = False
+
+    def swap_then_open(path: Path, label: str):
+        nonlocal swapped
+        if path == opaque and label == "discovery archive" and not swapped:
+            swapped = True
+            replacement.replace(opaque)
+        return original_open(path, label)
+
+    monkeypatch.setattr(artifact_module, "_open_safe_file", swap_then_open)
+
+    with pytest.raises(PortfolioArtifactError, match="changed"):
+        discover_handoffs([scan])
 
 
 def test_discovery_is_bounded_and_rejects_symlink_aliases(

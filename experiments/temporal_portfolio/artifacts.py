@@ -1,8 +1,9 @@
 """Deterministic, fail-closed handoffs for the temporal portfolio.
 
-Discovery deliberately searches at most ``_MAX_DISCOVERY_DEPTH`` directory levels
-and ``_MAX_DISCOVERY_ENTRIES`` entries.  It never extracts archives and treats every
-handoff-looking candidate as untrusted until all candidates have been verified.
+Discovery deliberately searches at most ``_MAX_DISCOVERY_DEPTH`` directory levels,
+``_MAX_DISCOVERY_ENTRIES`` entries, and ``_MAX_DISCOVERY_INSPECTED_BYTES`` bytes of
+regular-file candidates.  It never extracts archives and treats every manifest-
+bearing candidate as untrusted until all candidates have been verified.
 """
 from __future__ import annotations
 
@@ -49,6 +50,9 @@ _MAX_COMPRESSION_RATIO = 200.0
 _MAX_DISCOVERY_ROOTS = 32
 _MAX_DISCOVERY_DEPTH = 4
 _MAX_DISCOVERY_ENTRIES = 4096
+_MAX_DISCOVERY_INSPECTED_BYTES = 2 * 1024 * 1024 * 1024
+_MAX_DISCOVERY_CANDIDATES = 128
+_MAX_DISCOVERY_ZIP_MEMBERS = 16384
 _CHUNK_SIZE = 1024 * 1024
 _SHA256_LENGTH = 64
 
@@ -159,6 +163,28 @@ class _SafeFile:
         current = os.fstat(self.handle.fileno())
         if not _same_file(self.initial_stat, current):
             raise PortfolioArtifactError(f"file changed while being read: {self.path}")
+
+
+@dataclass
+class _DiscoveryBudget:
+    entries: int = 0
+    inspected_bytes: int = 0
+    candidates: int = 0
+
+    def add_entries(self, count: int) -> None:
+        self.entries += count
+        if self.entries > _MAX_DISCOVERY_ENTRIES:
+            raise PortfolioArtifactError("discovery entry limit exceeded")
+
+    def add_inspected_file(self, size_bytes: int) -> None:
+        self.inspected_bytes += size_bytes
+        if self.inspected_bytes > _MAX_DISCOVERY_INSPECTED_BYTES:
+            raise PortfolioArtifactError("discovery inspection byte limit exceeded")
+
+    def add_candidate(self) -> None:
+        self.candidates += 1
+        if self.candidates > _MAX_DISCOVERY_CANDIDATES:
+            raise PortfolioArtifactError("discovery candidate limit exceeded")
 
 
 def _is_sha256(value: object) -> bool:
@@ -939,21 +965,46 @@ def _verify_handoff_directory(path: Path) -> VerifiedHandoff:
     return _verify_handoff_values(values, path=absolute, archive_sha256=None)
 
 
-def _is_handoff_filename(name: str) -> bool:
-    return (
-        name.startswith("temporal_portfolio_stage_")
-        and name.endswith("_handoff.zip")
-        and len(name) > len("temporal_portfolio_stage__handoff.zip")
-    )
+def _zip_declares_handoff_manifest(
+    path: Path, expected_stat: os.stat_result
+) -> bool:
+    """Inspect central metadata only; never decompress a prospective member."""
+
+    source = _open_safe_file(path, "discovery archive")
+    try:
+        if (
+            not _same_file(expected_stat, source.initial_stat)
+            or source.initial_stat.st_size > _MAX_ARCHIVE_BYTES
+        ):
+            raise PortfolioArtifactError(
+                "discovery archive changed before metadata inspection"
+            )
+        try:
+            with ZipFile(source.handle, "r") as archive:
+                infos = archive.infolist()
+                if len(infos) > _MAX_DISCOVERY_ZIP_MEMBERS:
+                    raise PortfolioArtifactError(
+                        "discovery ZIP member metadata limit exceeded"
+                    )
+                declares_manifest = any(
+                    info.filename == "handoff_manifest.json" for info in infos
+                )
+        except BadZipFile:
+            declares_manifest = False
+        source.require_unchanged()
+        return declares_manifest
+    finally:
+        source.handle.close()
 
 
-def _discover_candidates(root: Path) -> list[Path]:
+def _discover_candidates(root: Path, budget: _DiscoveryBudget) -> list[Path]:
     absolute = _absolute_path(root)
     _reject_symlink_components(absolute)
     root_stat = absolute.lstat()
     if stat.S_ISLNK(root_stat.st_mode):
         raise PortfolioArtifactError(f"discovery root must not be a symlink: {root}")
     if stat.S_ISREG(root_stat.st_mode):
+        budget.add_candidate()
         return [absolute]
     if not stat.S_ISDIR(root_stat.st_mode):
         raise PortfolioArtifactError(f"discovery root is not a file or directory: {root}")
@@ -961,7 +1012,6 @@ def _discover_candidates(root: Path) -> list[Path]:
     candidates: list[Path] = []
     queue: list[tuple[Path, int]] = [(absolute, 0)]
     seen_directories: set[tuple[int, int]] = set()
-    entry_count = 0
     while queue:
         directory, depth = queue.pop(0)
         directory_stat = directory.lstat()
@@ -970,11 +1020,10 @@ def _discover_candidates(root: Path) -> list[Path]:
             raise PortfolioArtifactError("discovery encountered a directory alias")
         seen_directories.add(identity)
         entries = sorted(os.scandir(directory), key=lambda entry: entry.name)
-        entry_count += len(entries)
-        if entry_count > _MAX_DISCOVERY_ENTRIES:
-            raise PortfolioArtifactError("discovery entry limit exceeded")
+        budget.add_entries(len(entries))
         names = {entry.name for entry in entries}
         if "handoff_manifest.json" in names:
+            budget.add_candidate()
             candidates.append(directory)
             continue
         for entry in entries:
@@ -984,8 +1033,12 @@ def _discover_candidates(root: Path) -> list[Path]:
                     f"discovery does not follow symlink aliases: {entry.path}"
                 )
             child = Path(entry.path)
-            if stat.S_ISREG(metadata.st_mode) and _is_handoff_filename(entry.name):
-                candidates.append(child)
+            if stat.S_ISREG(metadata.st_mode):
+                if metadata.st_size <= _MAX_ARCHIVE_BYTES:
+                    budget.add_inspected_file(metadata.st_size)
+                    if _zip_declares_handoff_manifest(child, metadata):
+                        budget.add_candidate()
+                        candidates.append(child)
             elif stat.S_ISDIR(metadata.st_mode) and depth < _MAX_DISCOVERY_DEPTH:
                 queue.append((child, depth + 1))
     return candidates
@@ -1011,13 +1064,12 @@ def discover_handoffs(roots: Iterable[str | Path]) -> tuple[VerifiedHandoff, ...
             raise PortfolioArtifactError("no discovery roots were provided")
         if len(root_snapshot) > _MAX_DISCOVERY_ROOTS:
             raise PortfolioArtifactError("discovery root limit exceeded")
+        budget = _DiscoveryBudget()
         candidates: list[Path] = []
         for root in root_snapshot:
-            candidates.extend(_discover_candidates(Path(root)))
+            candidates.extend(_discover_candidates(Path(root), budget))
         if not candidates:
             raise PortfolioArtifactError("no temporal portfolio handoff was found")
-        if len(candidates) > _MAX_DISCOVERY_ENTRIES:
-            raise PortfolioArtifactError("discovery candidate limit exceeded")
 
         verified: list[VerifiedHandoff] = []
         seen_objects: dict[tuple[int, int], Path] = {}
