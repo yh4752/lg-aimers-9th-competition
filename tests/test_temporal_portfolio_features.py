@@ -61,6 +61,15 @@ def _by_row_position(frame: pd.DataFrame) -> pd.DataFrame:
     return frame.reset_index(drop=True)
 
 
+def _forge_state(state: S1State, **changes: object) -> S1State:
+    forged = object.__new__(S1State)
+    for name in S1State.__dataclass_fields__:
+        object.__setattr__(forged, name, object.__getattribute__(state, name))
+    for name, value in changes.items():
+        object.__setattr__(forged, name, value)
+    return forged
+
+
 def test_s1_uses_only_the_previous_season_snapshot() -> None:
     train, valid = _fit_and_valid()
     state = fit_s1_state(train, valid_year=2024)
@@ -193,6 +202,24 @@ def test_s1_fit_rejects_validation_and_future_rows() -> None:
         fit_s1_state(frame, valid_year=2024)
 
 
+def test_s1_fit_requires_rows_from_the_immediate_previous_season() -> None:
+    train, _ = _fit_and_valid()
+    earlier_only = train.loc[train["season"].eq(2022)]
+
+    with pytest.raises(SeasonalFeatureError, match="immediate previous season"):
+        fit_s1_state(earlier_only, valid_year=2024)
+
+
+def test_s1_fit_does_not_require_each_entity_in_the_previous_season() -> None:
+    train, _ = _fit_and_valid()
+    train = train.copy(deep=True)
+    train.loc[train["season"].eq(2022), ["pitcher_id", "batter_id"]] = [91, 92]
+
+    state = fit_s1_state(train, valid_year=2024)
+
+    assert state.snapshot.cutoff_year == 2023
+
+
 @pytest.mark.parametrize("target", [np.nan, np.inf, -np.inf, -1, 0.5, 2, "1"])
 def test_s1_fit_requires_a_finite_numeric_binary_target(target: object) -> None:
     train, _ = _fit_and_valid()
@@ -262,6 +289,7 @@ def test_s1_rejects_non_string_column_names_with_a_schema_error() -> None:
         ("pitcher_id", ["unhashable"]),
         ("asof_pitcher_n", "not-a-number"),
         ("asof_pitcher_success_rate", np.inf),
+        ("asof_pitcher_success_rate", 0.5 + 0.1j),
     ],
 )
 def test_s1_transform_rejects_malformed_entity_and_numeric_values(
@@ -285,3 +313,118 @@ def test_s1_rejects_preexisting_generated_or_snapshot_columns() -> None:
         transform_s1(rows.assign(season_pitcher_n=123), state)
     with pytest.raises(SeasonalFeatureError, match="reserved"):
         transform_s1(rows.assign(snapshot_pitcher_success_n=123), state)
+
+
+def test_s1_ignores_unrelated_season_prefixed_columns() -> None:
+    train, rows = _fit_and_valid()
+    state = fit_s1_state(train, valid_year=2024)
+
+    expected = transform_s1(rows, state)
+    actual = transform_s1(rows.assign(season_note=["a", "b", "c"]), state)
+
+    pd.testing.assert_frame_equal(actual, expected)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("valid_year", 2024.0),
+        ("valid_year", 999),
+        ("_cutoff_year", 2022),
+        ("_cutoff_year", 2023.0),
+        ("prior_rate", np.float64(0.5)),
+        ("prior_rate", np.nan),
+        ("prior_rate", -0.1),
+        ("prior_rate", 1.1),
+    ],
+)
+def test_s1_transform_rejects_forged_scalar_state_fields(
+    field: str, value: object
+) -> None:
+    train, rows = _fit_and_valid()
+    state = fit_s1_state(train, valid_year=2024)
+
+    with pytest.raises(SeasonalFeatureError, match="state"):
+        transform_s1(rows, _forge_state(state, **{field: value}))
+
+
+def test_s1_transform_normalizes_missing_state_fields() -> None:
+    _, rows = _fit_and_valid()
+    forged = object.__new__(S1State)
+
+    with pytest.raises(SeasonalFeatureError, match="state"):
+        transform_s1(rows, forged)
+
+
+@pytest.mark.parametrize("side", ["pitcher", "batter"])
+def test_s1_transform_rejects_forged_snapshot_schema(side: str) -> None:
+    train, rows = _fit_and_valid()
+    state = fit_s1_state(train, valid_year=2024)
+    field = f"_{side}_columns"
+    columns = object.__getattribute__(state, field)
+
+    with pytest.raises(SeasonalFeatureError, match="state"):
+        transform_s1(rows, _forge_state(state, **{field: columns[:-1]}))
+
+
+@pytest.mark.parametrize("side", ["pitcher", "batter"])
+def test_s1_transform_rejects_forged_snapshot_row_shapes(side: str) -> None:
+    train, rows = _fit_and_valid()
+    state = fit_s1_state(train, valid_year=2024)
+    field = f"_{side}_rows"
+    snapshot_rows = object.__getattribute__(state, field)
+    malformed = (snapshot_rows[0][:-1], *snapshot_rows[1:])
+
+    with pytest.raises(SeasonalFeatureError, match="state"):
+        transform_s1(rows, _forge_state(state, **{field: malformed}))
+    with pytest.raises(SeasonalFeatureError, match="state"):
+        transform_s1(rows, _forge_state(state, **{field: list(snapshot_rows)}))
+    with pytest.raises(SeasonalFeatureError, match="state"):
+        transform_s1(
+            rows,
+            _forge_state(state, **{field: (list(snapshot_rows[0]),)}),
+        )
+
+
+@pytest.mark.parametrize("side", ["pitcher", "batter"])
+def test_s1_transform_rejects_duplicate_or_malformed_snapshot_entities(
+    side: str,
+) -> None:
+    train, rows = _fit_and_valid()
+    state = fit_s1_state(train, valid_year=2024)
+    field = f"_{side}_rows"
+    snapshot_rows = object.__getattribute__(state, field)
+
+    with pytest.raises(SeasonalFeatureError, match="state"):
+        transform_s1(
+            rows,
+            _forge_state(state, **{field: (*snapshot_rows, snapshot_rows[0])}),
+        )
+    for bad_entity in (None, ["unhashable"]):
+        malformed = ((bad_entity, *snapshot_rows[0][1:]), *snapshot_rows[1:])
+        with pytest.raises(SeasonalFeatureError, match="state"):
+            transform_s1(rows, _forge_state(state, **{field: malformed}))
+
+
+@pytest.mark.parametrize(
+    ("column", "value"),
+    [
+        ("snapshot_pitcher_success_n", -1.0),
+        ("snapshot_pitcher_success_count", np.nan),
+        ("snapshot_pitcher_success_count", "1"),
+        ("snapshot_pitcher_success_count", 999.0),
+    ],
+)
+def test_s1_transform_rejects_forged_snapshot_numeric_payloads(
+    column: str, value: object
+) -> None:
+    train, rows = _fit_and_valid()
+    state = fit_s1_state(train, valid_year=2024)
+    snapshot_rows = object.__getattribute__(state, "_pitcher_rows")
+    columns = object.__getattribute__(state, "_pitcher_columns")
+    changed = list(snapshot_rows[0])
+    changed[columns.index(column)] = value
+    forged_rows = (tuple(changed), *snapshot_rows[1:])
+
+    with pytest.raises(SeasonalFeatureError, match="state"):
+        transform_s1(rows, _forge_state(state, _pitcher_rows=forged_rows))

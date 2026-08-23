@@ -9,7 +9,13 @@ from typing import Iterable
 
 import numpy as np
 import pandas as pd
-from pandas.api.types import is_scalar
+from pandas.api.types import (
+    is_bool_dtype,
+    is_complex_dtype,
+    is_extension_array_dtype,
+    is_numeric_dtype,
+    is_scalar,
+)
 
 from experiments.independent_dl.feature_sources.seasonal import (
     PITCHER_RATE_COLUMNS,
@@ -46,6 +52,69 @@ _TRANSFORM_COLUMNS = (
     *_RECENT_COLUMNS,
 )
 _POSITION_COLUMN = "__s1_input_position__"
+_PITCHER_SNAPSHOT_COLUMNS = (
+    "pitcher_id",
+    "snapshot_pitcher_success_n",
+    "snapshot_pitcher_success_count",
+    *(
+        item
+        for component in ("reverse", "middle", "ball", "strike")
+        for item in (
+            f"snapshot_pitcher_{component}_n",
+            f"snapshot_pitcher_{component}_count",
+        )
+    ),
+    *(
+        item
+        for component in ("fastball", "breaking", "offspeed")
+        for item in (
+            f"snapshot_pitchmix_{component}_n",
+            f"snapshot_pitchmix_{component}_count",
+        )
+    ),
+)
+_BATTER_SNAPSHOT_COLUMNS = (
+    "batter_id",
+    "snapshot_batter_success_n",
+    "snapshot_batter_success_count",
+    "snapshot_batter_middle_n",
+    "snapshot_batter_middle_count",
+)
+_GENERATED_COLUMNS = (
+    "season_pitcher_n",
+    "season_pitcher_log1p_n",
+    "season_pitcher_reliability_100",
+    *(
+        f"season_pitcher_success_smooth_{strength}"
+        for strength in (10, 25, 50, 100, 200, 500)
+    ),
+    "season_pitcher_success_rate",
+    "season_vs_career_success",
+    *(
+        f"season_pitcher_{component}_smooth_50"
+        for component in ("reverse", "middle", "ball", "strike")
+    ),
+    *(f"season_vs_prev{games}_game_success_rate" for games in (1, 3, 5)),
+    *(
+        f"season_pitchmix_{component}_smooth_50"
+        for component in ("fastball", "breaking", "offspeed")
+    ),
+    "season_pitchmix_n",
+    "season_batter_n",
+    "season_batter_log1p_n",
+    *(f"season_batter_success_smooth_{strength}" for strength in (50, 100, 200, 500)),
+    "season_pitcher_batter_success_gap",
+    "season_pitcher_n_bucket",
+    "season_batter_n_bucket",
+)
+_RESERVED_TRANSFORM_COLUMNS = frozenset(
+    (
+        *_PITCHER_SNAPSHOT_COLUMNS[1:],
+        *_BATTER_SNAPSHOT_COLUMNS[1:],
+        *_GENERATED_COLUMNS,
+        _POSITION_COLUMN,
+    )
+)
 
 
 @dataclass(frozen=True, init=False)
@@ -83,6 +152,7 @@ class S1State:
         object.__setattr__(state, "_pitcher_rows", pitcher_rows)
         object.__setattr__(state, "_batter_columns", batter_columns)
         object.__setattr__(state, "_batter_rows", batter_rows)
+        _validate_state(state)
         return state
 
     @property
@@ -110,6 +180,10 @@ def fit_s1_state(train: pd.DataFrame, *, valid_year: int) -> S1State:
         raise SeasonalFeatureError("S1 fit rows are empty")
     if any(season >= valid_year for season in seasons):
         raise SeasonalFeatureError("S1 fit rows reach validation season")
+    if max(seasons) != valid_year - 1:
+        raise SeasonalFeatureError(
+            "S1 fit rows must include the immediate previous season"
+        )
     _validate_entities(prepared)
     _validate_numeric_columns(prepared, _SNAPSHOT_NUMERIC_COLUMNS)
     target = _validated_target(prepared[TARGET_COLUMN])
@@ -135,17 +209,14 @@ def transform_s1(rows: pd.DataFrame, state: S1State) -> pd.DataFrame:
     before calling this evaluation-facing adapter, making target non-use explicit.
     """
 
-    if type(state) is not S1State:
-        raise SeasonalFeatureError("S1 state type must be exactly S1State")
-    prepared = _validated_frame(rows, required=_TRANSFORM_COLUMNS, label="S1 transform")
-    if TARGET_COLUMN in prepared.columns:
-        raise SeasonalFeatureError("S1 transform rows must not contain the target")
-    if any(
-        column.startswith(("season_", "snapshot_"))
-        or column == _POSITION_COLUMN
-        for column in prepared.columns
-    ):
-        raise SeasonalFeatureError("S1 transform rows contain reserved columns")
+    _validate_state(state)
+    prepared = _validated_frame(
+        rows,
+        required=_TRANSFORM_COLUMNS,
+        label="S1 transform",
+        reject_target=True,
+        reserved=_RESERVED_TRANSFORM_COLUMNS,
+    )
     seasons = _validated_seasons(prepared["season"])
     if any(season != state.valid_year for season in seasons):
         raise SeasonalFeatureError("S1 transform season differs from valid_year")
@@ -155,7 +226,7 @@ def transform_s1(rows: pd.DataFrame, state: S1State) -> pd.DataFrame:
         (*_SNAPSHOT_NUMERIC_COLUMNS, *_RECENT_COLUMNS),
     )
 
-    working = prepared.copy(deep=True)
+    working = prepared
     working[_POSITION_COLUMN] = np.arange(len(working), dtype="int64")
     try:
         transformed, categorical = attach_seasonal_features(
@@ -189,6 +260,8 @@ def _validated_frame(
     *,
     required: Iterable[str],
     label: str,
+    reject_target: bool = False,
+    reserved: frozenset[str] = frozenset(),
 ) -> pd.DataFrame:
     if type(frame) is not pd.DataFrame:
         raise SeasonalFeatureError(f"{label} rows must be an actual pandas DataFrame")
@@ -196,12 +269,21 @@ def _validated_frame(
         raise SeasonalFeatureError(f"{label} rows have duplicate columns")
     if any(type(column) is not str for column in frame.columns):
         raise SeasonalFeatureError(f"{label} column names must be strings")
-    missing = sorted(set(required).difference(frame.columns))
+    columns = tuple(frame.columns)
+    if reject_target and TARGET_COLUMN in columns:
+        raise SeasonalFeatureError("S1 transform rows must not contain the target")
+    collisions = sorted(reserved.intersection(columns))
+    if collisions:
+        raise SeasonalFeatureError(
+            f"{label} rows contain reserved columns: {collisions}"
+        )
+    required_columns = tuple(required)
+    missing = sorted(set(required_columns).difference(columns))
     if missing:
         raise SeasonalFeatureError(
             f"{label} rows are missing required columns: {missing}"
         )
-    return frame.copy(deep=True)
+    return frame.loc[:, required_columns].copy(deep=True)
 
 
 def _validate_valid_year(valid_year: object) -> None:
@@ -261,7 +343,18 @@ def _validate_entities(frame: pd.DataFrame) -> None:
 
 def _validate_numeric_columns(frame: pd.DataFrame, columns: Iterable[str]) -> None:
     for column in columns:
-        for value in frame[column].tolist():
+        values = frame[column]
+        if (
+            is_numeric_dtype(values.dtype)
+            and not is_bool_dtype(values.dtype)
+            and not is_complex_dtype(values.dtype)
+            and not is_extension_array_dtype(values.dtype)
+        ):
+            numeric = values.to_numpy(dtype="float64", copy=False)
+            if np.isinf(numeric).any():
+                raise SeasonalFeatureError(f"{column} must not contain infinity")
+            continue
+        for value in values.tolist():
             if value is None or value is pd.NA:
                 continue
             if isinstance(value, (bool, np.bool_)) or not isinstance(
@@ -300,3 +393,109 @@ def _freeze_frame(
             raise SeasonalFeatureError("S1 snapshot contains a non-scalar value")
         rows.append(tuple(row))
     return columns, tuple(rows)
+
+
+def _validate_state(state: object) -> None:
+    if type(state) is not S1State:
+        raise SeasonalFeatureError("S1 state type must be exactly S1State")
+    names = tuple(S1State.__dataclass_fields__)
+    try:
+        values = {name: object.__getattribute__(state, name) for name in names}
+    except (AttributeError, KeyError, TypeError) as error:
+        raise SeasonalFeatureError("S1 state is missing required fields") from error
+
+    valid_year = values["valid_year"]
+    cutoff_year = values["_cutoff_year"]
+    prior_rate = values["prior_rate"]
+    if type(valid_year) is not int or not 1000 <= valid_year <= 9999:
+        raise SeasonalFeatureError("S1 state valid_year is invalid")
+    if type(cutoff_year) is not int or cutoff_year != valid_year - 1:
+        raise SeasonalFeatureError("S1 state cutoff differs from valid_year - 1")
+    if (
+        type(prior_rate) is not float
+        or not math.isfinite(prior_rate)
+        or not 0.0 <= prior_rate <= 1.0
+    ):
+        raise SeasonalFeatureError("S1 state prior_rate is invalid")
+
+    _validate_snapshot_payload(
+        columns=values["_pitcher_columns"],
+        rows=values["_pitcher_rows"],
+        expected_columns=_PITCHER_SNAPSHOT_COLUMNS,
+        entity_column="pitcher_id",
+    )
+    _validate_snapshot_payload(
+        columns=values["_batter_columns"],
+        rows=values["_batter_rows"],
+        expected_columns=_BATTER_SNAPSHOT_COLUMNS,
+        entity_column="batter_id",
+    )
+
+
+def _validate_snapshot_payload(
+    *,
+    columns: object,
+    rows: object,
+    expected_columns: tuple[str, ...],
+    entity_column: str,
+) -> None:
+    if (
+        type(columns) is not tuple
+        or any(type(column) is not str for column in columns)
+        or columns != expected_columns
+    ):
+        raise SeasonalFeatureError(f"S1 state {entity_column} schema is invalid")
+    if type(rows) is not tuple or not rows:
+        raise SeasonalFeatureError(f"S1 state {entity_column} rows are invalid")
+    seen: set[object] = set()
+    count_pairs = tuple(
+        (columns.index(column.removesuffix("count") + "n"), index)
+        for index, column in enumerate(columns)
+        if column.endswith("_count")
+    )
+    for row in rows:
+        if type(row) is not tuple or len(row) != len(columns):
+            raise SeasonalFeatureError(f"S1 state {entity_column} row shape is invalid")
+        entity = row[0]
+        if not is_scalar(entity):
+            raise SeasonalFeatureError(f"S1 state {entity_column} entity is invalid")
+        try:
+            missing = bool(pd.isna(entity))
+            hash(entity)
+            duplicated = entity in seen
+            if not missing and not duplicated:
+                seen.add(entity)
+        except Exception as error:
+            raise SeasonalFeatureError(
+                f"S1 state {entity_column} entity is invalid"
+            ) from error
+        if missing or duplicated:
+            raise SeasonalFeatureError(f"S1 state {entity_column} entity is invalid")
+
+        numeric: list[float] = []
+        for value in row[1:]:
+            if isinstance(value, (bool, np.bool_)) or not isinstance(
+                value, (Real, Decimal)
+            ):
+                raise SeasonalFeatureError(
+                    f"S1 state {entity_column} numeric payload is invalid"
+                )
+            try:
+                converted = float(value)
+            except Exception as error:
+                raise SeasonalFeatureError(
+                    f"S1 state {entity_column} numeric payload is invalid"
+                ) from error
+            if not math.isfinite(converted) or converted < 0.0:
+                raise SeasonalFeatureError(
+                    f"S1 state {entity_column} numeric payload is invalid"
+                )
+            numeric.append(converted)
+        numeric_by_column = (0.0, *numeric)
+        if any(
+            numeric_by_column[count_index] > numeric_by_column[n_index]
+            for n_index, count_index in count_pairs
+        ):
+            raise SeasonalFeatureError(
+                f"S1 state {entity_column} count exceeds its n"
+            )
