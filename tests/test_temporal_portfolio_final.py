@@ -159,3 +159,47 @@ def test_frozen_anchor_recipe_produces_bounded_probabilities() -> None:
     result = predictor.predict(pd.DataFrame({"row_id": ["r0"], "x": [1.0]}))
     assert result.shape == (1,)
     assert 0 < result[0] < 1
+
+
+def test_training_delivery_contains_frozen_evidence_without_submission(
+    tmp_path,
+) -> None:
+    from experiments.temporal_portfolio.final_delivery import (
+        AcceptedFullFit,
+        verify_training_delivery,
+        write_training_delivery,
+    )
+    from experiments.temporal_portfolio.state import Bindings
+
+    model = tmp_path / "model.pt"
+    state = tmp_path / "state.json"
+    model.write_bytes(b"weights")
+    state.write_bytes(b"state")
+    accepted = AcceptedFullFit(
+        bindings=Bindings("temporal_portfolio_v1", "b" * 64, "c" * 64),
+        decision_sha256="a" * 64,
+        confirmation_sha256="d" * 64,
+        frozen_members={"models/main.pt": model, "states/main.json": state},
+        acceptance={"status": "accepted", "candidate_id": "main"},
+        row_independence={"accepted": True, "maximum_absolute_difference": 0.0},
+        runtime={"python": "3.11", "inference_seconds": 10.0},
+    )
+    delivery = write_training_delivery(tmp_path / "delivery", accepted)
+    verified = verify_training_delivery(delivery)
+    assert verified.policy["submission_package"] is False
+    assert "submit.zip" not in verified.members
+    assert {
+        "frozen/manifest.json",
+        "policy/policy.json",
+        "review/acceptance.json",
+    }.issubset(verified.members)
+
+
+def test_packaging_is_not_authorized_by_training_delivery() -> None:
+    from experiments.temporal_portfolio.final_delivery import (
+        SubmissionNotAuthorized,
+        assert_submission_packaging_authorized,
+    )
+
+    with pytest.raises(SubmissionNotAuthorized, match="separate reviewed step"):
+        assert_submission_packaging_authorized(object())
