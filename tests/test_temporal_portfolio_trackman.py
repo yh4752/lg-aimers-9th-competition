@@ -23,6 +23,16 @@ from experiments.temporal_portfolio.trackman_pitcher import (
     fit_pitcher_trackman,
     select_columns,
 )
+from experiments.temporal_portfolio.trackman_batter import (
+    BATTER_EXPOSURE_COLUMNS,
+    BATTER_MAPPING_COLUMNS,
+    BatterTrackmanError,
+    BatterTrackmanState,
+    attach_batter_exposure,
+    build_matchup_features,
+    coverage_status,
+    fit_batter_trackman,
+)
 
 
 def _main() -> pd.DataFrame:
@@ -74,6 +84,62 @@ def _history() -> pd.DataFrame:
     future.update(season=2024, rel_speed=999.0, spin_rate=9999.0)
     rows.append(future)
     return pd.DataFrame(rows)
+
+
+def _batter_main() -> pd.DataFrame:
+    return pd.DataFrame(
+        {
+            "season": [2022, 2023, 2022, 2023, 2022, 2023, 2024],
+            "batter_id": [21, 21, 22, 22, 23, 23, 21],
+            "batter_hand": [1, 1, 2, 2, 1, 1, 2],
+            "batter_team_id": [7, 7, 8, 8, 9, 9, 99],
+            "asof_batter_n": [19, 49, 29, 79, 24, 59, 9999],
+        }
+    )
+
+
+def _batter_history() -> pd.DataFrame:
+    rows: list[dict[str, object]] = []
+    specifications = (
+        (201, "Left", "A", 50, 145.0),
+        (202, "Right", "B", 80, 151.0),
+        (203, "Left", "C", 60, 142.0),
+        (204, "Left", "C", 60, 142.0),
+    )
+    groups = ("fastball", "breaking", "offspeed", "other")
+    for batter_trackman_id, hand, team, count, speed in specifications:
+        for index in range(count):
+            group = groups[index % len(groups)]
+            rows.append(
+                {
+                    "season": 2023,
+                    "batter_trackman_id": batter_trackman_id,
+                    "pitch_type_group": group,
+                    "batter_hand": hand,
+                    "batter_team": team,
+                    "rel_speed": speed - float(index % 3),
+                    "spin_rate": 2100.0 + index,
+                    "induced_vert_break": 15.0 + (index % 2),
+                    "horz_break": -3.0 if hand == "Left" else 3.0,
+                }
+            )
+    future = dict(rows[0])
+    future.update(season=2024, rel_speed=999.0, spin_rate=9999.0)
+    rows.append(future)
+    return pd.DataFrame(rows)
+
+
+def _matchup_rows() -> pd.DataFrame:
+    return pd.DataFrame(
+        {
+            "row_id": ["r1", "r2", "r3"],
+            "pitcher_id": [11, 12, 999],
+            "batter_id": [21, 22, 999],
+            "pitcher_hand": [1, 2, 1],
+            "batter_hand": [1, 1, 2],
+        },
+        index=[8, 3, 5],
+    )
 
 
 def _expected_columns() -> dict[str, tuple[str, ...]]:
@@ -486,3 +552,227 @@ def test_pitcher_trackman_rejects_nonfinite_legacy_lookup(monkeypatch: pytest.Mo
 
     with pytest.raises(PitcherTrackmanError, match="infinity"):
         fit_pitcher_trackman(_main(), _history(), cutoff_year=2023)
+
+
+def _forge_batter_state(
+    state: BatterTrackmanState, **changes: object
+) -> BatterTrackmanState:
+    forged = object.__new__(BatterTrackmanState)
+    for field in BatterTrackmanState.__dataclass_fields__:
+        object.__setattr__(forged, field, object.__getattribute__(state, field))
+    for field, value in changes.items():
+        object.__setattr__(forged, field, value)
+    return forged
+
+
+def test_batter_mapping_is_one_to_one_and_ambiguous_candidates_stay_unmatched() -> None:
+    state = fit_batter_trackman(_batter_main(), _batter_history(), cutoff_year=2023)
+    accepted = state.mapping.loc[state.mapping["tm_batter_match_accepted"].eq(1)]
+
+    assert accepted["batter_id"].is_unique
+    assert accepted["batter_trackman_id"].is_unique
+    assert set(accepted["batter_id"]) == {21, 22}
+    assert state.mapping.loc[
+        state.mapping["batter_id"].eq(23), "tm_batter_match_accepted"
+    ].item() == 0
+    assert state.coverage == pytest.approx(2 / 3)
+    assert state.status == "eligible"
+
+
+def test_batter_exposure_and_matchup_have_fixed_schema_and_preserve_rows() -> None:
+    batter_state = fit_batter_trackman(
+        _batter_main(), _batter_history(), cutoff_year=2023
+    )
+    pitcher_state = fit_pitcher_trackman(_main(), _history(), cutoff_year=2023)
+    rows = _matchup_rows()
+
+    exposure = attach_batter_exposure(rows, batter_state)
+    matchup = build_matchup_features(
+        rows, pitcher_state=pitcher_state, batter_state=batter_state
+    )
+
+    assert exposure.index.equals(rows.index)
+    assert matchup.index.equals(rows.index)
+    assert exposure["row_id"].tolist() == rows["row_id"].tolist()
+    assert matchup["row_id"].tolist() == rows["row_id"].tolist()
+    assert tuple(exposure.columns[-(len(BATTER_EXPOSURE_COLUMNS) - 1) :]) == tuple(
+        column for column in BATTER_EXPOSURE_COLUMNS if column != "batter_id"
+    )
+    assert any(column.startswith("tm_batter_seen_fastball_") for column in exposure)
+    assert any(column.startswith("tm_matchup_fastball_") for column in matchup)
+    assert "tm_matchup_left_left" in matchup
+    assert matchup.loc[8, "tm_matchup_left_left"] == 1
+    assert matchup.loc[3, "tm_matchup_right_left"] == 1
+
+
+def test_batter_exposure_contains_required_counts_confidence_rates_and_moments() -> None:
+    state = fit_batter_trackman(_batter_main(), _batter_history(), cutoff_year=2023)
+    columns = set(state.exposure.columns)
+
+    assert {
+        "tm_batter_seen_history_n",
+        "tm_batter_seen_recent_n",
+        "tm_batter_match_confidence",
+        "tm_batter_match_missing",
+    }.issubset(columns)
+    for group in ("fastball", "breaking", "offspeed", "other"):
+        assert f"tm_batter_seen_{group}_rate" in columns
+    for metric in ("rel_speed", "spin_rate", "induced_vert_break", "horz_break"):
+        assert f"tm_batter_seen_{metric}_mean" in columns
+        assert f"tm_batter_seen_{metric}_std" in columns
+
+
+def test_batter_trackman_is_cutoff_bound_and_row_order_deterministic() -> None:
+    main = _batter_main()
+    history = _batter_history()
+    expected = fit_batter_trackman(main, history, cutoff_year=2023)
+    changed_main = main.copy(deep=True)
+    changed_history = history.copy(deep=True)
+    changed_main.loc[changed_main["season"].gt(2023), "asof_batter_n"] = 1
+    changed_history.loc[changed_history["season"].gt(2023), "rel_speed"] = -9999.0
+
+    replay = fit_batter_trackman(
+        changed_main.sample(frac=1.0, random_state=3).reset_index(drop=True),
+        changed_history.sample(frac=1.0, random_state=5).reset_index(drop=True),
+        cutoff_year=2023,
+    )
+
+    pd.testing.assert_frame_equal(replay.mapping, expected.mapping)
+    pd.testing.assert_frame_equal(replay.exposure, expected.exposure)
+    assert replay.mapping_sha256 == expected.mapping_sha256
+    assert replay.exposure_sha256 == expected.exposure_sha256
+
+
+def test_batter_recent_exposure_is_bound_to_requested_cutoff_year() -> None:
+    main = _batter_main().loc[lambda frame: frame["season"].le(2023)].copy()
+    history = _batter_history()
+
+    state = fit_batter_trackman(main, history, cutoff_year=2024)
+    exposure = state.exposure.set_index("batter_id")
+
+    assert exposure.loc[21, "tm_batter_seen_history_n"] == 51
+    assert exposure.loc[21, "tm_batter_seen_recent_n"] == 1
+
+
+def test_batter_trackman_rejects_conflicting_tied_maximum_signatures() -> None:
+    main = _batter_main()
+    tied = main.loc[main["batter_id"].eq(21) & main["season"].eq(2023)].copy()
+    tied.loc[:, "batter_team_id"] = 99
+    conflict = pd.concat([main, tied], ignore_index=True)
+
+    for ordered in (conflict, conflict.iloc[::-1].reset_index(drop=True)):
+        with pytest.raises(BatterTrackmanError, match="conflicting maximum.*signature"):
+            fit_batter_trackman(ordered, _batter_history(), cutoff_year=2023)
+
+
+def test_batter_trackman_exact_hand_gate_and_low_coverage_status() -> None:
+    main = _batter_main().copy(deep=True)
+    main["batter_hand"] = 1
+    history = _batter_history().copy(deep=True)
+    history["batter_hand"] = "Right"
+    state = fit_batter_trackman(main, history, cutoff_year=2023)
+
+    assert state.mapping["tm_batter_match_accepted"].eq(0).all()
+    assert state.exposure["tm_batter_match_missing"].eq(1).all()
+    assert state.coverage == 0.0
+    assert state.status == "insufficient_mapping"
+
+
+@pytest.mark.parametrize(
+    ("coverage", "expected"),
+    [
+        (0.0, "insufficient_mapping"),
+        (0.299999, "insufficient_mapping"),
+        (0.30, "exploratory"),
+        (0.599999, "exploratory"),
+        (0.60, "eligible"),
+        (1.0, "eligible"),
+    ],
+)
+def test_batter_mapping_coverage_status_thresholds(
+    coverage: float, expected: str
+) -> None:
+    assert coverage_status(coverage) == expected
+
+
+def test_batter_zero_match_state_has_fixed_schema() -> None:
+    main = _batter_main().copy(deep=True)
+    main["batter_hand"] = 1
+    history = _batter_history().copy(deep=True)
+    history["batter_hand"] = "Right"
+    state = fit_batter_trackman(main, history, cutoff_year=2023)
+
+    assert tuple(state.mapping.columns) == BATTER_MAPPING_COLUMNS
+    assert tuple(state.exposure.columns) == BATTER_EXPOSURE_COLUMNS
+    assert len(state.mapping) == len(state.exposure) == 3
+    assert state.exposure.filter(like="_mean").isna().all().all()
+
+
+def test_batter_state_is_immutable_defensive_and_detects_forgery() -> None:
+    with pytest.raises(TypeError, match="fit_batter_trackman"):
+        BatterTrackmanState()  # type: ignore[call-arg]
+    state = fit_batter_trackman(_batter_main(), _batter_history(), cutoff_year=2023)
+    expected_mapping = state.mapping
+    expected_exposure = state.exposure
+
+    with pytest.raises(FrozenInstanceError):
+        state.cutoff_year = 2024  # type: ignore[misc]
+    changed_mapping = state.mapping
+    changed_mapping.iloc[0, 0] = 999
+    changed_exposure = state.exposure
+    changed_exposure.iloc[0, -1] = 999.0
+    pd.testing.assert_frame_equal(state.mapping, expected_mapping)
+    pd.testing.assert_frame_equal(state.exposure, expected_exposure)
+
+    rows = object.__getattribute__(state, "_exposure_rows")
+    changed = list(rows[0])
+    changed[-1] = 12345.0
+    forged = _forge_batter_state(state, _exposure_rows=(tuple(changed), *rows[1:]))
+    with pytest.raises(BatterTrackmanError, match="state"):
+        _ = forged.exposure
+
+    mapping_rows = object.__getattribute__(state, "_mapping_rows")
+    reordered = _forge_batter_state(state, _mapping_rows=tuple(reversed(mapping_rows)))
+    with pytest.raises(BatterTrackmanError, match="state"):
+        _ = reordered.mapping
+
+
+def test_matchup_is_invariant_to_other_evaluation_rows_and_current_pitch_values() -> None:
+    batter_state = fit_batter_trackman(
+        _batter_main(), _batter_history(), cutoff_year=2023
+    )
+    pitcher_state = fit_pitcher_trackman(_main(), _history(), cutoff_year=2023)
+    rows = _matchup_rows().assign(rel_speed=[1.0, 2.0, 3.0], spin_rate=[4.0, 5.0, 6.0])
+    expected = build_matchup_features(
+        rows, pitcher_state=pitcher_state, batter_state=batter_state
+    ).set_index("row_id")
+    changed = rows.copy(deep=True)
+    changed.loc[changed["row_id"].ne("r1"), :] = changed.loc[
+        changed["row_id"].ne("r1"), :
+    ].assign(pitcher_id=12, batter_id=22, rel_speed=9999.0, spin_rate=-9999.0)
+    changed = changed.iloc[::-1]
+    replay = build_matchup_features(
+        changed, pitcher_state=pitcher_state, batter_state=batter_state
+    ).set_index("row_id")
+
+    pd.testing.assert_series_equal(
+        expected.loc["r1"], replay.loc["r1"], check_names=False
+    )
+
+
+@pytest.mark.parametrize("which", ["train", "history", "rows"])
+def test_batter_trackman_normalizes_input_failures(which: str) -> None:
+    main: object = _batter_main()
+    history: object = _batter_history()
+    if which == "train":
+        main = _batter_main().drop(columns="batter_hand")
+    elif which == "history":
+        history = _batter_history().assign(batter_trackman_id=np.inf)
+    else:
+        state = fit_batter_trackman(_batter_main(), _batter_history(), cutoff_year=2023)
+        with pytest.raises(BatterTrackmanError):
+            attach_batter_exposure({"batter_id": [21]}, state)  # type: ignore[arg-type]
+        return
+
+    with pytest.raises(BatterTrackmanError):
+        fit_batter_trackman(main, history, cutoff_year=2023)  # type: ignore[arg-type]
