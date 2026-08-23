@@ -17,6 +17,9 @@ from experiments.temporal_portfolio.catboost_training import (
     CATBOOST_PREFIXES,
     TemporalTrainingJob,
     run_catboost_job,
+    temporal_audit_sha256,
+    temporal_catboost_request_sha256,
+    temporal_sample_weight_sha256,
     temporal_train_request_sha256,
     validate_catboost_result,
 )
@@ -380,6 +383,10 @@ def _identity(
     job_id: str | None = None,
     family: str | None = None,
     train_request_sha256: str | None = None,
+    sample_weight: np.ndarray | None = None,
+    audit_frame: pd.DataFrame | None = None,
+    teacher_oof_sha256: str | None = None,
+    teacher_lambda: float = 0.25,
 ) -> TrainingIdentity:
     bound_job_id = job_id or f"{expert}_2022"
     model = {
@@ -387,9 +394,28 @@ def _identity(
         "candidate_id": bound_job_id,
         "expert": expert,
         "family": family or ("catboost" if expert == "catboost" else "tabm"),
+        "sample_weight_sha256": temporal_sample_weight_sha256(
+            sample_weight
+            if sample_weight is not None
+            else np.array([1.0, 0.5, 0.25] if expert == "catboost" else [1.0, 0.25])
+        ),
+        "audit_sha256": temporal_audit_sha256(
+            audit_frame if audit_frame is not None else _audit_frame(),
+            segment_columns=("segment_hand_matchup",),
+        ),
     }
+    if expert == "catboost":
+        model["catboost_request_sha256"] = temporal_catboost_request_sha256(
+            pd.DataFrame({"feature": [3.0, 2.0, 1.0]}),
+            pd.DataFrame({"feature": [20.0, 10.0]}),
+            np.array([1, 0, 1]),
+            np.array(["r2", "r1"]),
+        )
     if train_request_sha256 is not None:
         model["train_request_sha256"] = train_request_sha256
+    if expert == "lupi":
+        model["teacher_oof_sha256"] = teacher_oof_sha256
+        model["teacher_lambda"] = teacher_lambda
     return TrainingIdentity.from_payload(
         {
             "data_rows": "a" * 64,
@@ -480,6 +506,36 @@ def test_identity_for_one_job_cannot_be_reused_for_different_job() -> None:
             train_frame=pd.DataFrame({"feature": [3.0, 2.0, 1.0]}),
             valid_frame=pd.DataFrame({"feature": [20.0, 10.0]}),
             target=np.array([1, 0, 1]), valid_row_id=np.array(["r2", "r1"]),
+        )
+
+
+def test_catboost_identity_rejects_changed_weight_frame_or_target() -> None:
+    base = _catboost_job()
+    with pytest.raises(ValueError, match="sample_weight_sha256"):
+        TemporalTrainingJob(
+            job_id=base.job_id, expert=base.expert, identity=base.identity,
+            sample_weight=np.array([1.0, 0.5, 0.5]), seed=base.seed,
+            audit_frame=base.audit_frame, segment_columns=base.segment_columns,
+            train_frame=base.train_frame, valid_frame=base.valid_frame,
+            target=base.target, valid_row_id=base.valid_row_id,
+        )
+    changed = base.train_frame
+    changed.iloc[0, 0] = 999
+    with pytest.raises(ValueError, match="catboost_request_sha256"):
+        TemporalTrainingJob(
+            job_id=base.job_id, expert=base.expert, identity=base.identity,
+            sample_weight=base.sample_weight, seed=base.seed,
+            audit_frame=base.audit_frame, segment_columns=base.segment_columns,
+            train_frame=changed, valid_frame=base.valid_frame,
+            target=base.target, valid_row_id=base.valid_row_id,
+        )
+    with pytest.raises(ValueError, match="catboost_request_sha256"):
+        TemporalTrainingJob(
+            job_id=base.job_id, expert=base.expert, identity=base.identity,
+            sample_weight=base.sample_weight, seed=base.seed,
+            audit_frame=base.audit_frame, segment_columns=base.segment_columns,
+            train_frame=base.train_frame, valid_frame=base.valid_frame,
+            target=np.array([0, 0, 1]), valid_row_id=base.valid_row_id,
         )
 
 
@@ -833,6 +889,7 @@ def _tabm_job(*, expert: str, teacher: TeacherOOF | None = None) -> TemporalTrai
         identity=_identity(
             expert,
             train_request_sha256=temporal_train_request_sha256(request),
+            teacher_oof_sha256=None if teacher is None else teacher._sha256,
         ),
         sample_weight=np.array([1.0, 0.25]),
         seed=3407,
@@ -868,6 +925,61 @@ def test_tabm_identity_requires_train_request_digest() -> None:
             audit_frame=template.audit_frame,
             segment_columns=template.segment_columns,
             train_request=template.train_request,
+        )
+
+
+def test_tabm_audit_target_must_equal_sealed_validation_target() -> None:
+    template = _tabm_job(expert="tabm")
+    audit = template.audit_frame
+    audit["target"] = [0, 1]
+    identity = _identity(
+        "tabm",
+        train_request_sha256=template.train_request_sha256,
+        audit_frame=audit,
+    )
+    with pytest.raises(ValueError, match="audit target.*validation target"):
+        TemporalTrainingJob(
+            job_id=template.job_id, expert=template.expert, identity=identity,
+            sample_weight=template.sample_weight, seed=template.seed,
+            audit_frame=audit, segment_columns=template.segment_columns,
+            train_request=template.train_request,
+        )
+
+
+def test_tabm_requires_sealed_validation_target() -> None:
+    template = _tabm_job(expert="tabm")
+    request = template.train_request
+    request = TrainRequest(
+        **{
+            **request.__dict__,
+            "valid": FeatureBatch(
+                request.valid.row_id, request.valid.season, request.valid.game_type,
+                request.valid.x_num, request.valid.x_cat, None,
+            ),
+        }
+    )
+    identity = _identity(
+        "tabm", train_request_sha256=temporal_train_request_sha256(request)
+    )
+    with pytest.raises(ValueError, match="validation target is required"):
+        TemporalTrainingJob(
+            job_id=template.job_id, expert=template.expert, identity=identity,
+            sample_weight=template.sample_weight, seed=template.seed,
+            audit_frame=template.audit_frame, segment_columns=template.segment_columns,
+            train_request=request,
+        )
+
+
+def test_lupi_identity_binds_teacher_hash_and_lambda() -> None:
+    teacher = _teacher()
+    template = _tabm_job(expert="lupi", teacher=teacher)
+    with pytest.raises(ValueError, match="teacher_lambda"):
+        TemporalTrainingJob(
+            job_id=template.job_id, expert=template.expert, identity=template.identity,
+            sample_weight=template.sample_weight, seed=template.seed,
+            audit_frame=template.audit_frame, segment_columns=template.segment_columns,
+            train_request=template.train_request, teacher_oof=teacher,
+            teacher_oof_sha256=teacher._sha256, teacher_lambda=0.10,
         )
 
 

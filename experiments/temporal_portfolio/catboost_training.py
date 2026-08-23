@@ -91,6 +91,55 @@ def temporal_train_request_sha256(request: TrainRequest) -> str:
         raise CatBoostTrainingError("temporal request digest requires an exact TrainRequest")
     return _sealed_request_sha256(_seal_request(request))
 
+
+def temporal_sample_weight_sha256(sample_weight: np.ndarray) -> str:
+    """Digest the exact positive float64 weights used by temporal trainers."""
+
+    weight = _numeric_vector(sample_weight, "sample weight", nonempty=True)
+    if np.any(weight <= 0):
+        raise CatBoostTrainingError("sample weight must be strictly positive")
+    return _array_digest(weight)["sha256"]
+
+
+def temporal_audit_sha256(
+    audit_frame: pd.DataFrame, *, segment_columns: tuple[str, ...]
+) -> str:
+    """Digest normalized, source-ordered worker audit evidence."""
+
+    frame, _ = _validated_audit_frame(audit_frame, segment_columns)
+    return _audit_frame_sha256(frame)
+
+
+def temporal_catboost_request_sha256(
+    train_frame: pd.DataFrame,
+    valid_frame: pd.DataFrame,
+    target: np.ndarray,
+    valid_row_id: np.ndarray,
+) -> str:
+    """Digest CatBoost frames, schema/dtypes, target, and validation row order."""
+
+    if type(train_frame) is not pd.DataFrame or train_frame.empty:
+        raise CatBoostTrainingError("CatBoost train frame must be nonempty")
+    if type(valid_frame) is not pd.DataFrame or valid_frame.empty:
+        raise CatBoostTrainingError("CatBoost valid frame must be nonempty")
+    if not train_frame.columns.is_unique or not valid_frame.columns.is_unique:
+        raise CatBoostTrainingError("CatBoost feature columns must be unique")
+    if tuple(train_frame.columns) != tuple(valid_frame.columns):
+        raise CatBoostTrainingError("CatBoost train and valid columns differ")
+    train_target = _binary_vector(target, "training target", len(train_frame))
+    if not isinstance(valid_row_id, np.ndarray):
+        raise CatBoostTrainingError("valid row IDs must be a NumPy array")
+    row_ids = _stable_ids(valid_row_id.tolist(), "valid row_id")
+    if len(valid_frame) != len(row_ids):
+        raise CatBoostTrainingError("CatBoost validation rows differ")
+    payload = {
+        "train_frame_sha256": _audit_frame_sha256(train_frame.reset_index(drop=True)),
+        "valid_frame_sha256": _audit_frame_sha256(valid_frame.reset_index(drop=True)),
+        "target": _array_digest(train_target),
+        "valid_row_order_sha256": _row_order_sha256(row_ids),
+    }
+    return hashlib.sha256(_canonical_json_value(payload)).hexdigest()
+
     def predict(
         self,
         model: object,
@@ -174,23 +223,8 @@ class TemporalTrainingJob:
         if np.any(weight <= 0):
             raise CatBoostTrainingError("sample weight must be strictly positive")
 
-        if type(audit_frame) is not pd.DataFrame or audit_frame.empty:
-            raise CatBoostTrainingError("audit frame must be a nonempty pandas DataFrame")
-        if not audit_frame.columns.is_unique:
-            raise CatBoostTrainingError("audit frame columns must be unique")
-        if type(segment_columns) is not tuple or any(
-            type(column) is not str or not column for column in segment_columns
-        ):
-            raise CatBoostTrainingError("segment columns must be canonical strings")
-        if len(set(segment_columns)) != len(segment_columns):
-            raise CatBoostTrainingError("segment columns must be unique")
-        required = (*_BASE_AUDIT_COLUMNS, *segment_columns)
-        if set(audit_frame.columns) != set(required):
-            raise CatBoostTrainingError("audit frame schema differs")
-        audit = audit_frame.loc[:, required].copy(deep=True).reset_index(drop=True)
-        row_ids = _stable_ids(audit["row_id"].tolist(), "audit row_id")
-        target_valid = _binary_vector(audit["target"], "audit target", len(audit))
-        audit["target"] = target_valid
+        audit, row_ids = _validated_audit_frame(audit_frame, segment_columns)
+        target_valid = audit["target"].to_numpy(dtype="int8", copy=True)
 
         if valid_row_id is None:
             supplied_row_ids = row_ids
@@ -243,6 +277,15 @@ class TemporalTrainingJob:
             )
             if request_valid_ids != row_ids:
                 raise CatBoostTrainingError("TrainRequest validation order differs")
+            if train_request.valid.y is None:
+                raise CatBoostTrainingError("TrainRequest validation target is required")
+            request_valid_target = _binary_vector(
+                train_request.valid.y, "TrainRequest validation target", len(audit)
+            )
+            if not np.array_equal(target_valid, request_valid_target):
+                raise CatBoostTrainingError(
+                    "audit target differs from TrainRequest validation target"
+                )
             if expert == "tabm" and (
                 teacher_oof is not None
                 or teacher_oof_sha256 is not None
@@ -258,6 +301,31 @@ class TemporalTrainingJob:
                 if not np.isfinite(value) or not 0.0 < value <= 1.0:
                     raise CatBoostTrainingError("teacher lambda must be in (0, 1]")
                 teacher_lambda = value
+
+        model_binding = identity.payload["model"]
+        observed_weight_sha256 = temporal_sample_weight_sha256(weight)
+        if model_binding["sample_weight_sha256"] != observed_weight_sha256:
+            raise CatBoostTrainingError("training identity sample_weight_sha256 differs")
+        observed_audit_sha256 = temporal_audit_sha256(
+            audit, segment_columns=segment_columns
+        )
+        if model_binding["audit_sha256"] != observed_audit_sha256:
+            raise CatBoostTrainingError("training identity audit_sha256 differs")
+        if expert == "catboost":
+            observed_catboost_sha256 = temporal_catboost_request_sha256(
+                train_snapshot, valid_snapshot, train_target,
+                np.asarray(row_ids, dtype=object),
+            )
+            if model_binding["catboost_request_sha256"] != observed_catboost_sha256:
+                raise CatBoostTrainingError(
+                    "training identity catboost_request_sha256 differs"
+                )
+        if expert == "lupi":
+            if model_binding["teacher_oof_sha256"] != teacher_oof_sha256:
+                raise CatBoostTrainingError("training identity teacher_oof_sha256 differs")
+            identity_lambda = model_binding["teacher_lambda"]
+            if type(identity_lambda) is not float or identity_lambda != teacher_lambda:
+                raise CatBoostTrainingError("training identity teacher_lambda differs")
 
         object.__setattr__(self, "job_id", job_id)
         object.__setattr__(self, "expert", expert)
@@ -345,6 +413,26 @@ class TemporalTrainingJob:
         )
         self.frozen_audit_frame()
         self._validate_request_seal()
+        model = self.identity.payload["model"]
+        if model["sample_weight_sha256"] != temporal_sample_weight_sha256(
+            self.sample_weight
+        ):
+            raise CatBoostTrainingError("sealed sample weight digest differs")
+        if model["audit_sha256"] != temporal_audit_sha256(
+            self._audit_frame, segment_columns=self.segment_columns
+        ):
+            raise CatBoostTrainingError("sealed audit identity digest differs")
+        if self.expert == "catboost":
+            observed = temporal_catboost_request_sha256(
+                self._train_frame, self._valid_frame, self.target, self.valid_row_id
+            )
+            if model["catboost_request_sha256"] != observed:
+                raise CatBoostTrainingError("sealed CatBoost request digest differs")
+        if self.expert == "lupi":
+            if model["teacher_oof_sha256"] != self.teacher_oof_sha256:
+                raise CatBoostTrainingError("sealed teacher OOF digest differs")
+            if type(model["teacher_lambda"]) is not float or model["teacher_lambda"] != self.teacher_lambda:
+                raise CatBoostTrainingError("sealed teacher lambda differs")
 
     def _validate_request_seal(self) -> None:
         if self._train_request is None:
@@ -545,6 +633,28 @@ def _row_order_sha256(row_ids: tuple[object, ...]) -> str:
     return digest.hexdigest()
 
 
+def _validated_audit_frame(
+    audit_frame: object, segment_columns: tuple[str, ...]
+) -> tuple[pd.DataFrame, tuple[object, ...]]:
+    if type(audit_frame) is not pd.DataFrame or audit_frame.empty:
+        raise CatBoostTrainingError("audit frame must be a nonempty pandas DataFrame")
+    if not audit_frame.columns.is_unique:
+        raise CatBoostTrainingError("audit frame columns must be unique")
+    if type(segment_columns) is not tuple or any(
+        type(column) is not str or not column for column in segment_columns
+    ):
+        raise CatBoostTrainingError("segment columns must be canonical strings")
+    if len(set(segment_columns)) != len(segment_columns):
+        raise CatBoostTrainingError("segment columns must be unique")
+    required = (*_BASE_AUDIT_COLUMNS, *segment_columns)
+    if set(audit_frame.columns) != set(required):
+        raise CatBoostTrainingError("audit frame schema differs")
+    audit = audit_frame.loc[:, required].copy(deep=True).reset_index(drop=True)
+    row_ids = _stable_ids(audit["row_id"].tolist(), "audit row_id")
+    audit["target"] = _binary_vector(audit["target"], "audit target", len(audit))
+    return audit, row_ids
+
+
 def _audit_frame_sha256(frame: pd.DataFrame) -> str:
     digest = hashlib.sha256()
     digest.update(repr(tuple(frame.columns)).encode("utf-8"))
@@ -567,9 +677,16 @@ def _validate_identity_bindings(
     if identity.payload["seed"] != seed:
         raise CatBoostTrainingError("job seed differs from training identity seed")
     model = identity.payload["model"]
-    required = {"job_id", "candidate_id", "expert", "family"}
+    required = {
+        "job_id", "candidate_id", "expert", "family",
+        "sample_weight_sha256", "audit_sha256",
+    }
     if request is not None:
         required.add("train_request_sha256")
+    if expert == "catboost":
+        required.add("catboost_request_sha256")
+    if expert == "lupi":
+        required.update({"teacher_oof_sha256", "teacher_lambda"})
     missing = required.difference(model)
     if missing:
         raise CatBoostTrainingError(
