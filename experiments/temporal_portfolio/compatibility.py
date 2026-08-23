@@ -26,14 +26,19 @@ COMPATIBLE_RUNTIME_MIGRATIONS: Mapping[tuple[str, str], int] = MappingProxyType(
 def validate_runtime(
     checkpoint: CheckpointIdentity,
     *,
+    current_training_sha256: str,
     current_runtime_sha256: str,
     migrations: Mapping[tuple[str, str], int] = COMPATIBLE_RUNTIME_MIGRATIONS,
 ) -> None:
     if type(checkpoint) is not CheckpointIdentity:
         raise CompatibilityError("checkpoint identity has an invalid type")
     _validate_checkpoint(checkpoint)
+    if not _is_sha256(current_training_sha256):
+        raise CompatibilityError("current training SHA-256 is invalid")
     if not _is_sha256(current_runtime_sha256):
         raise CompatibilityError("current runtime SHA-256 is invalid")
+    if checkpoint.training_sha256 != current_training_sha256:
+        raise CompatibilityError("checkpoint training identity differs")
     migration_snapshot = _snapshot_migrations(migrations)
     if checkpoint.runtime_sha256 == current_runtime_sha256:
         return
