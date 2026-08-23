@@ -34,6 +34,7 @@ class VerifiedOfficialData:
     train_rows: int
     test_rows: int
     member_sizes: Mapping[str, int] = field(repr=False, compare=False)
+    member_versions: Mapping[str, "_FileVersion"] = field(repr=False, compare=False)
 
 
 @dataclass(frozen=True)
@@ -41,6 +42,15 @@ class PreparedInputArchive:
     path: Path
     sha256: str
     size_bytes: int
+
+
+@dataclass(frozen=True)
+class _FileVersion:
+    dev: int
+    ino: int
+    size_bytes: int
+    mtime_ns: int
+    sha256: str
 
 
 _OFFICIAL_NAMES = (
@@ -67,6 +77,7 @@ class _CsvData:
     row_count: int
     sha256: str
     size_bytes: int
+    version: _FileVersion
 
 
 @dataclass
@@ -135,6 +146,26 @@ def _same_file_version(left: os.stat_result, right: os.stat_result) -> bool:
     )
 
 
+def _matches_version(metadata: os.stat_result, version: _FileVersion) -> bool:
+    return (
+        stat.S_ISREG(metadata.st_mode)
+        and metadata.st_dev == version.dev
+        and metadata.st_ino == version.ino
+        and metadata.st_size == version.size_bytes
+        and metadata.st_mtime_ns == version.mtime_ns
+    )
+
+
+def _version_from_stat(metadata: os.stat_result, digest: str) -> _FileVersion:
+    return _FileVersion(
+        dev=metadata.st_dev,
+        ino=metadata.st_ino,
+        size_bytes=metadata.st_size,
+        mtime_ns=metadata.st_mtime_ns,
+        sha256=digest,
+    )
+
+
 def _require_no_symlink_ancestors(path: Path, label: str) -> None:
     try:
         for candidate in (path, *path.parents):
@@ -147,7 +178,9 @@ def _require_no_symlink_ancestors(path: Path, label: str) -> None:
 
 
 @contextmanager
-def _safe_source(path: Path, label: str) -> Iterator[_SafeSource]:
+def _safe_source(
+    path: Path, label: str, *, expected: _FileVersion | None = None
+) -> Iterator[_SafeSource]:
     """Open one non-symlink regular file and bind it to its opened identity."""
     _require_no_symlink_ancestors(path.parent, label)
     descriptor: int | None = None
@@ -156,6 +189,8 @@ def _safe_source(path: Path, label: str) -> Iterator[_SafeSource]:
         before = os.lstat(path)
         if not stat.S_ISREG(before.st_mode):
             raise PortfolioInputError(f"{label} must be a regular non-symlink file")
+        if expected is not None and not _matches_version(before, expected):
+            raise PortfolioInputError(f"{label} changed before it could be opened")
         flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
         nofollow = getattr(os, "O_NOFOLLOW", 0)
         if nofollow:
@@ -163,6 +198,8 @@ def _safe_source(path: Path, label: str) -> Iterator[_SafeSource]:
         descriptor = os.open(path, flags)
         opened = os.fstat(descriptor)
         if not _same_file_version(before, opened):
+            raise PortfolioInputError(f"{label} changed before it could be opened")
+        if expected is not None and not _matches_version(opened, expected):
             raise PortfolioInputError(f"{label} changed before it could be opened")
         handle = os.fdopen(descriptor, "rb", buffering=0)
         descriptor = None
@@ -184,15 +221,18 @@ def _safe_source(path: Path, label: str) -> Iterator[_SafeSource]:
                 pass
 
 
-def file_sha256(path: str | Path) -> str:
+def file_sha256(path: str | Path, *, expected: _FileVersion | None = None) -> str:
     """Return a streaming SHA-256 from one safely opened file descriptor."""
     source_path = Path(path)
-    with _safe_source(source_path, str(source_path)) as source:
+    with _safe_source(source_path, str(source_path), expected=expected) as source:
         digest = sha256()
         for chunk in iter(lambda: source.handle.read(_CHUNK_SIZE), b""):
             digest.update(chunk)
         source.require_unchanged(str(source_path))
-        return digest.hexdigest()
+        value = digest.hexdigest()
+        if expected is not None and value != expected.sha256:
+            raise PortfolioInputError(f"{source_path} content differs from verified bytes")
+        return value
 
 
 def _read_csv(
@@ -257,6 +297,9 @@ def _read_csv(
             row_count=row_count,
             sha256=hashing_reader.digest.hexdigest(),
             size_bytes=hashing_reader.size_bytes,
+            version=_version_from_stat(
+                source.initial_stat, hashing_reader.digest.hexdigest()
+            ),
         )
     except PortfolioInputError:
         raise
@@ -345,6 +388,12 @@ def verify_official_data(root: str | Path) -> VerifiedOfficialData:
         "trackman_history.csv": history.size_bytes,
         "sample_submission.csv": sample.size_bytes,
     }
+    versions = {
+        "train.csv": train.version,
+        "test.csv": test.version,
+        "trackman_history.csv": history.version,
+        "sample_submission.csv": sample.version,
+    }
     return VerifiedOfficialData(
         root=data_root,
         train=members["train.csv"],
@@ -355,12 +404,15 @@ def verify_official_data(root: str | Path) -> VerifiedOfficialData:
         train_rows=train.row_count,
         test_rows=test.row_count,
         member_sizes=MappingProxyType(sizes),
+        member_versions=MappingProxyType(versions),
     )
 
 
-def _copy_source(source: Path, destination: BinaryIO) -> None:
+def _copy_source(
+    source: Path, destination: BinaryIO, *, expected: _FileVersion | None = None
+) -> None:
     """Stream one safely opened source into a destination without path reopens."""
-    with _safe_source(source, source.name) as opened:
+    with _safe_source(source, source.name, expected=expected) as opened:
         for chunk in iter(lambda: opened.handle.read(_CHUNK_SIZE), b""):
             destination.write(chunk)
         opened.require_unchanged(source.name)
@@ -416,40 +468,48 @@ def _canonical_manifest(verified: VerifiedOfficialData) -> bytes:
     )
 
 
-def _verify_archive(path: Path, manifest_bytes: bytes, verified: VerifiedOfficialData) -> None:
+def _verify_archive(
+    path: Path,
+    manifest_bytes: bytes,
+    verified: VerifiedOfficialData,
+    *,
+    expected: _FileVersion | None = None,
+) -> None:
     try:
-        with ZipFile(path) as archive:
-            if archive.namelist() != list(_ARCHIVE_NAMES):
-                raise PortfolioInputError("prepared ZIP members differ")
-            if archive.testzip() is not None:
-                raise PortfolioInputError("prepared ZIP has an invalid CRC")
-            if archive.read("manifest.json") != manifest_bytes:
-                raise PortfolioInputError("prepared ZIP manifest bytes differ")
-            manifest = json.loads(manifest_bytes)
-            if (
-                type(manifest) is not dict
-                or manifest.get("schema_version") != 1
-                or manifest.get("artifact_kind") != "temporal_portfolio_input_v1"
-                or manifest.get("campaign_id") != "temporal_portfolio_v1"
-                or manifest.get("submission_package") is not False
-                or type(manifest.get("members")) is not dict
-            ):
-                raise PortfolioInputError("prepared ZIP manifest schema differs")
-            for archive_name, source_name in _ARCHIVE_SOURCES:
-                info = archive.getinfo(archive_name)
-                digest = sha256()
-                with archive.open(info) as handle:
-                    for chunk in iter(lambda: handle.read(_CHUNK_SIZE), b""):
-                        digest.update(chunk)
-                evidence = manifest["members"].get(archive_name)
+        with _safe_source(path, "prepared temporary ZIP", expected=expected) as source:
+            with ZipFile(source.handle) as archive:
+                if archive.namelist() != list(_ARCHIVE_NAMES):
+                    raise PortfolioInputError("prepared ZIP members differ")
+                if archive.testzip() is not None:
+                    raise PortfolioInputError("prepared ZIP has an invalid CRC")
+                if archive.read("manifest.json") != manifest_bytes:
+                    raise PortfolioInputError("prepared ZIP manifest bytes differ")
+                manifest = json.loads(manifest_bytes)
                 if (
-                    info.file_size != verified.member_sizes[source_name]
-                    or type(evidence) is not dict
-                    or evidence.get("size") != info.file_size
-                    or evidence.get("sha256") != digest.hexdigest()
-                    or digest.hexdigest() != verified.member_sha256[source_name]
+                    type(manifest) is not dict
+                    or manifest.get("schema_version") != 1
+                    or manifest.get("artifact_kind") != "temporal_portfolio_input_v1"
+                    or manifest.get("campaign_id") != "temporal_portfolio_v1"
+                    or manifest.get("submission_package") is not False
+                    or type(manifest.get("members")) is not dict
                 ):
-                    raise PortfolioInputError("prepared ZIP member evidence differs")
+                    raise PortfolioInputError("prepared ZIP manifest schema differs")
+                for archive_name, source_name in _ARCHIVE_SOURCES:
+                    info = archive.getinfo(archive_name)
+                    digest = sha256()
+                    with archive.open(info) as handle:
+                        for chunk in iter(lambda: handle.read(_CHUNK_SIZE), b""):
+                            digest.update(chunk)
+                    evidence = manifest["members"].get(archive_name)
+                    if (
+                        info.file_size != verified.member_sizes[source_name]
+                        or type(evidence) is not dict
+                        or evidence.get("size") != info.file_size
+                        or evidence.get("sha256") != digest.hexdigest()
+                        or digest.hexdigest() != verified.member_sha256[source_name]
+                    ):
+                        raise PortfolioInputError("prepared ZIP member evidence differs")
+            source.require_unchanged("prepared temporary ZIP")
     except PortfolioInputError:
         raise
     except (BadZipFile, OSError, KeyError, TypeError, json.JSONDecodeError) as error:
@@ -473,6 +533,105 @@ def _validate_output_path(output: str | Path, replace: bool) -> Path:
     return destination
 
 
+def _version_from_open_file(handle: BinaryIO, label: str) -> _FileVersion:
+    try:
+        before = os.fstat(handle.fileno())
+        if not stat.S_ISREG(before.st_mode):
+            raise PortfolioInputError(f"{label} must be a regular file")
+        handle.seek(0)
+        digest = sha256()
+        for chunk in iter(lambda: handle.read(_CHUNK_SIZE), b""):
+            digest.update(chunk)
+        after = os.fstat(handle.fileno())
+    except PortfolioInputError:
+        raise
+    except OSError as error:
+        raise PortfolioInputError(f"cannot verify {label}: {error}") from error
+    if not _same_file_version(before, after):
+        raise PortfolioInputError(f"{label} changed while it was being verified")
+    return _version_from_stat(after, digest.hexdigest())
+
+
+def _require_path_version(path: Path, version: _FileVersion, label: str) -> None:
+    try:
+        metadata = os.lstat(path)
+    except OSError as error:
+        raise PortfolioInputError(f"cannot inspect {label}: {error}") from error
+    if not _matches_version(metadata, version):
+        raise PortfolioInputError(f"{label} changed after verification")
+
+
+def _unlink_owned(
+    path: Path | None,
+    version: _FileVersion | None,
+    *,
+    identity: tuple[int, int] | None = None,
+) -> None:
+    if path is None:
+        return
+    try:
+        metadata = os.lstat(path)
+        owned = (
+            _matches_version(metadata, version)
+            if version is not None
+            else identity is not None
+            and (metadata.st_dev, metadata.st_ino) == identity
+        )
+        if owned:
+            path.unlink()
+    except FileNotFoundError:
+        return
+    except OSError:
+        return
+
+
+def _publish_without_replace(
+    temporary: Path, destination: Path, version: _FileVersion
+) -> None:
+    _require_path_version(temporary, version, "prepared temporary ZIP")
+    try:
+        os.link(temporary, destination, follow_symlinks=False)
+    except FileExistsError as error:
+        raise PortfolioInputError("output already exists during publication") from error
+    except OSError as error:
+        raise PortfolioInputError(f"cannot publish input archive: {error}") from error
+    _require_path_version(destination, version, "published input archive")
+    file_sha256(destination, expected=version)
+
+
+def _publish_with_replace(
+    temporary: Path, destination: Path, version: _FileVersion
+) -> None:
+    candidate: Path | None = None
+    descriptor: int | None = None
+    try:
+        descriptor, candidate_name = mkstemp(
+            prefix=".temporal-portfolio-publish-", suffix=".zip", dir=destination.parent
+        )
+        candidate = Path(candidate_name)
+        os.close(descriptor)
+        descriptor = None
+        candidate.unlink()
+        _require_path_version(temporary, version, "prepared temporary ZIP")
+        os.link(temporary, candidate, follow_symlinks=False)
+        _require_path_version(candidate, version, "publication staging archive")
+        os.replace(candidate, destination)
+        candidate = None
+        _require_path_version(destination, version, "published input archive")
+        file_sha256(destination, expected=version)
+    except PortfolioInputError:
+        raise
+    except OSError as error:
+        raise PortfolioInputError(f"cannot publish replacement input archive: {error}") from error
+    finally:
+        if descriptor is not None:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+        _unlink_owned(candidate, version)
+
+
 def prepare_input_archive(
     data_dir: str | Path, output: str | Path, *, replace: bool = False
 ) -> PreparedInputArchive:
@@ -488,20 +647,31 @@ def prepare_input_archive(
     manifest_bytes = _canonical_manifest(verified)
     descriptor: int | None = None
     temporary: Path | None = None
+    temporary_handle: BinaryIO | None = None
+    temporary_version: _FileVersion | None = None
+    temporary_identity: tuple[int, int] | None = None
     try:
         descriptor, temporary_name = mkstemp(
             prefix=".temporal-portfolio-input-", suffix=".zip", dir=destination.parent
         )
         temporary = Path(temporary_name)
-        os.close(descriptor)
+        temporary_stat = os.fstat(descriptor)
+        temporary_identity = (temporary_stat.st_dev, temporary_stat.st_ino)
+        temporary_handle = os.fdopen(descriptor, "w+b", buffering=0)
         descriptor = None
-        with ZipFile(temporary, "w", compression=ZIP_DEFLATED, compresslevel=9) as archive:
+        with ZipFile(
+            temporary_handle, "w", compression=ZIP_DEFLATED, compresslevel=9
+        ) as archive:
             with archive.open(_zip_info("manifest.json"), "w") as target:
                 target.write(manifest_bytes)
             for archive_name, source_name in _ARCHIVE_SOURCES:
                 with archive.open(_zip_info(archive_name), "w") as target:
                     writer = _HashingWriter(target)
-                    _copy_source(sources[source_name], writer)
+                    _copy_source(
+                        sources[source_name],
+                        writer,
+                        expected=verified.member_versions[source_name],
+                    )
                     expected_sha256 = verified.member_sha256[source_name]
                     expected_size = verified.member_sizes[source_name]
                     if (
@@ -511,13 +681,29 @@ def prepare_input_archive(
                         raise PortfolioInputError(
                             f"official data source changed before ZIP copy: {source_name}"
                         )
-        _verify_archive(temporary, manifest_bytes, verified)
+        temporary_handle.flush()
+        temporary_version = _version_from_open_file(
+            temporary_handle, "prepared temporary ZIP"
+        )
+        _verify_archive(
+            temporary, manifest_bytes, verified, expected=temporary_version
+        )
         for source_name, source in sources.items():
-            if file_sha256(source) != verified.member_sha256[source_name]:
+            if (
+                file_sha256(
+                    source, expected=verified.member_versions[source_name]
+                )
+                != verified.member_sha256[source_name]
+            ):
                 raise PortfolioInputError("official data source changed during archive preparation")
-        archive_sha256 = file_sha256(temporary)
-        archive_size = temporary.stat().st_size
-        os.replace(temporary, destination)
+        archive_sha256 = file_sha256(temporary, expected=temporary_version)
+        _require_path_version(temporary, temporary_version, "prepared temporary ZIP")
+        archive_size = temporary_version.size_bytes
+        if replace:
+            _publish_with_replace(temporary, destination, temporary_version)
+        else:
+            _publish_without_replace(temporary, destination, temporary_version)
+        _unlink_owned(temporary, temporary_version)
         temporary = None
         return PreparedInputArchive(destination, archive_sha256, archive_size)
     except PortfolioInputError:
@@ -530,9 +716,14 @@ def prepare_input_archive(
                 os.close(descriptor)
             except OSError:
                 pass
-        if temporary is not None:
+        if temporary_handle is not None:
             try:
-                if os.path.lexists(temporary):
-                    temporary.unlink()
+                temporary_handle.close()
             except OSError:
                 pass
+        if temporary is not None:
+            _unlink_owned(
+                temporary,
+                temporary_version,
+                identity=temporary_identity,
+            )

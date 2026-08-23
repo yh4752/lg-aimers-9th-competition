@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv
 from hashlib import sha256
 import json
+import os
 from pathlib import Path
 import re
 import subprocess
@@ -202,8 +203,10 @@ def test_prepare_detects_source_mutation_after_copy(
 
     original = module._copy_source
 
-    def mutate_after_copy(source: Path, destination: object) -> None:
-        original(source, destination)
+    def mutate_after_copy(
+        source: Path, destination: object, **kwargs: object
+    ) -> None:
+        original(source, destination, **kwargs)
         if source.name == "train.csv":
             source.write_text(
                 "row_id,feature,control_success\\nchanged,a,1\\nchanged-2,b,0\\nchanged-3,c,1\\n",
@@ -211,7 +214,7 @@ def test_prepare_detects_source_mutation_after_copy(
             )
 
     monkeypatch.setattr(module, "_copy_source", mutate_after_copy)
-    with pytest.raises(PortfolioInputError, match="source changed"):
+    with pytest.raises(PortfolioInputError, match="changed"):
         prepare_input_archive(tiny_official_dir, tmp_path / "input.zip")
 
 
@@ -274,8 +277,8 @@ def test_prepare_rejects_same_content_symlink_swap_after_copy(
     replacement = tmp_path / "same-train.csv"
     replacement.write_bytes(original_train)
 
-    def swap_after_copy(source: Path, destination: object) -> None:
-        original(source, destination)
+    def swap_after_copy(source: Path, destination: object, **kwargs: object) -> None:
+        original(source, destination, **kwargs)
         if source.name == "train.csv":
             source.unlink()
             source.symlink_to(replacement)
@@ -357,7 +360,7 @@ def test_prepare_uses_fixed_zip_metadata_and_cleans_atomic_failure(
 
     import experiments.temporal_portfolio.inputs as module
 
-    def fail_copy(source: Path, destination: object) -> None:
+    def fail_copy(source: Path, destination: object, **kwargs: object) -> None:
         raise OSError("copy failed")
 
     monkeypatch.setattr(module, "_copy_source", fail_copy)
@@ -388,3 +391,96 @@ def test_prepare_cli_succeeds_from_outside_repository(
         r"sha256=[0-9a-f]{64} size_bytes=[0-9]+\n",
         completed.stdout,
     )
+
+
+def test_prepare_rejects_same_content_new_train_inode_after_baseline(
+    tmp_path: Path, tiny_official_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import experiments.temporal_portfolio.inputs as module
+
+    original = module._canonical_manifest
+    train = tiny_official_dir / "train.csv"
+    replacement = tmp_path / "replacement-train.csv"
+
+    def replace_after_baseline(verified: object) -> bytes:
+        manifest = original(verified)
+        replacement.write_bytes(train.read_bytes())
+        os.replace(replacement, train)
+        return manifest
+
+    monkeypatch.setattr(module, "_canonical_manifest", replace_after_baseline)
+    with pytest.raises(PortfolioInputError, match="changed"):
+        prepare_input_archive(tiny_official_dir, tmp_path / "input.zip")
+
+
+def test_prepare_rejects_temp_path_swap_after_archive_hash(
+    tmp_path: Path, tiny_official_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import experiments.temporal_portfolio.inputs as module
+
+    original = module.file_sha256
+
+    def swap_after_hash(path: Path, **kwargs: object) -> str:
+        digest = original(path, **kwargs)
+        value = Path(path)
+        if value.name.startswith(".temporal-portfolio-input-"):
+            value.unlink()
+            value.write_bytes(b"arbitrary replacement")
+        return digest
+
+    monkeypatch.setattr(module, "file_sha256", swap_after_hash)
+    output = tmp_path / "input.zip"
+    with pytest.raises(PortfolioInputError, match="temporary|publication|changed"):
+        prepare_input_archive(tiny_official_dir, output)
+    assert not output.exists()
+
+
+def test_prepare_preserves_concurrently_created_output_without_replace(
+    tmp_path: Path, tiny_official_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import experiments.temporal_portfolio.inputs as module
+
+    output = tmp_path / "input.zip"
+    original = module._canonical_manifest
+
+    def create_concurrent_output(verified: object) -> bytes:
+        manifest = original(verified)
+        output.write_bytes(b"concurrent owner")
+        return manifest
+
+    monkeypatch.setattr(module, "_canonical_manifest", create_concurrent_output)
+    with pytest.raises(PortfolioInputError, match="output|publish"):
+        prepare_input_archive(tiny_official_dir, output)
+    assert output.read_bytes() == b"concurrent owner"
+
+
+def test_verify_rejects_blank_row_id_and_sample_count_mismatch(
+    tiny_official_dir: Path,
+) -> None:
+    _write_csv(
+        tiny_official_dir / "test.csv",
+        [["row_id", "feature"], ["", "x"], ["test-2", "y"]],
+    )
+    with pytest.raises(PortfolioInputError, match="blank row_id"):
+        verify_official_data(tiny_official_dir)
+
+    _write_csv(tiny_official_dir / "test.csv", [["row_id", "feature"], ["test-1", "x"], ["test-2", "y"]])
+    _write_csv(tiny_official_dir / "sample_submission.csv", [["row_id", "control_success"], ["test-1", "0.5"]])
+    with pytest.raises(PortfolioInputError, match="row_id sequence"):
+        verify_official_data(tiny_official_dir)
+
+
+def test_archive_verifier_rejects_duplicate_tampered_member(
+    tmp_path: Path, tiny_official_dir: Path
+) -> None:
+    import experiments.temporal_portfolio.inputs as module
+
+    result = prepare_input_archive(tiny_official_dir, tmp_path / "input.zip")
+    verified = verify_official_data(tiny_official_dir)
+    manifest = module._canonical_manifest(verified)
+    with pytest.warns(UserWarning, match="Duplicate name"):
+        with ZipFile(result.path, "a") as archive:
+            archive.writestr("data/train.csv", b"tampered")
+
+    with pytest.raises(PortfolioInputError, match="members|evidence"):
+        module._verify_archive(result.path, manifest, verified)
