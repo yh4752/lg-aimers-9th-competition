@@ -78,4 +78,7 @@ def test_trackman_and_seasonal_sources_are_cutoff_bound() -> None:
     assert any(column.startswith("tm_") for column in first.lookup.columns)
     assert seasonal.cutoff_year == 2023
     assert seasonal.pitcher["snapshot_pitcher_success_n"].tolist() == [100.0]
+    assert seasonal.pitcher["snapshot_pitcher_success_count"].tolist() == [55.45]
+    assert seasonal.batter["snapshot_batter_success_n"].tolist() == [50.0]
+    assert seasonal.batter["snapshot_batter_success_count"].tolist() == [25.5]
     assert np.isfinite(first.lookup.select_dtypes(include="number").to_numpy()).any()
