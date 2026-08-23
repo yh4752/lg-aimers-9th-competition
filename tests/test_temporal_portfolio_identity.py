@@ -38,6 +38,11 @@ def test_training_identity_cannot_be_directly_constructed_with_unbound_state() -
         TrainingIdentity(payload={"mutable": []}, sha256="a" * 64)
 
 
+def test_training_identity_requires_from_payload_factory() -> None:
+    with pytest.raises(TypeError, match="from_payload"):
+        TrainingIdentity()
+
+
 def test_audit_duplicate_rejects_forged_identity_with_mismatched_payload_and_digest() -> None:
     forged = object.__new__(TrainingIdentity)
     object.__setattr__(forged, "payload", _payload())
@@ -45,6 +50,16 @@ def test_audit_duplicate_rejects_forged_identity_with_mismatched_payload_and_dig
 
     with pytest.raises(ValueError):
         audit_duplicate(forged, {"b" * 64: "jobs/unrelated"})
+
+
+def test_audit_duplicate_rejects_mutable_forged_payload_with_correct_digest() -> None:
+    verified = TrainingIdentity.from_payload(_payload(model={"layers": [32]}))
+    forged = object.__new__(TrainingIdentity)
+    object.__setattr__(forged, "payload", _payload(model={"layers": [32]}))
+    object.__setattr__(forged, "sha256", verified.sha256)
+
+    with pytest.raises(ValueError, match="frozen representation"):
+        audit_duplicate(forged, {verified.sha256: "jobs/unrelated"})
 
 
 @pytest.mark.parametrize(

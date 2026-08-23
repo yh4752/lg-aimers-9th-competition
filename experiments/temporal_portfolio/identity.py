@@ -41,6 +41,9 @@ class TrainingIdentity:
     payload: Mapping[str, object]
     sha256: str
 
+    def __init__(self, *args: object, **kwargs: object) -> None:
+        raise TypeError("TrainingIdentity instances must be created with from_payload()")
+
     @classmethod
     def from_payload(cls, payload: Mapping[str, object]) -> TrainingIdentity:
         normalized = _normalize_payload(payload)
@@ -56,17 +59,21 @@ def audit_duplicate(identity: TrainingIdentity, completed: Mapping[str, str]) ->
     if not isinstance(identity, TrainingIdentity):
         raise PortfolioIdentityError("identity has an invalid type")
     try:
-        verified = TrainingIdentity.from_payload(identity.payload)
+        supplied_payload = identity.payload
+        supplied_sha256 = identity.sha256
+        verified = TrainingIdentity.from_payload(supplied_payload)
     except (AttributeError, PortfolioIdentityError) as error:
         raise PortfolioIdentityError("identity has an invalid payload") from error
-    if type(identity.sha256) is not str or identity.sha256 != verified.sha256:
+    if not _same_frozen_json(supplied_payload, verified.payload):
+        raise PortfolioIdentityError("identity payload is not the frozen representation")
+    if type(supplied_sha256) is not str or supplied_sha256 != verified.sha256:
         raise PortfolioIdentityError("identity payload and SHA-256 differ")
     if not isinstance(completed, Mapping):
         raise PortfolioIdentityError("completed jobs must be a mapping")
     for digest, path in completed.items():
         if not _is_sha256(digest) or type(path) is not str:
             raise PortfolioIdentityError("completed jobs contain an invalid hash or path")
-    path = completed.get(identity.sha256)
+    path = completed.get(supplied_sha256)
     return None if path is None else str(path)
 
 
@@ -159,6 +166,21 @@ def _freeze_json(value: object) -> object:
     if type(value) is list:
         return _FrozenList(_freeze_json(item) for item in value)
     return value
+
+
+def _same_frozen_json(left: object, right: object) -> bool:
+    if type(left) is not type(right):
+        return False
+    if type(left) is MappingProxyType:
+        return left.keys() == right.keys() and all(
+            _same_frozen_json(left[key], right[key]) for key in left
+        )
+    if type(left) is _FrozenList:
+        return len(left) == len(right) and all(
+            _same_frozen_json(left_item, right_item)
+            for left_item, right_item in zip(left, right)
+        )
+    return left == right
 
 
 def _canonical_json_bytes(payload: Mapping[str, object]) -> bytes:
