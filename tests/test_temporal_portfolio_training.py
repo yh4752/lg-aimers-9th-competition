@@ -204,6 +204,33 @@ def test_constructor_detaches_and_protects_caller_arrays() -> None:
     assert not adapter.sample_weight_np.flags.writeable
     assert adapter.teacher_probability_np is not None
     assert not adapter.teacher_probability_np.flags.writeable
+    with pytest.raises(ValueError):
+        adapter.sample_weight_np.setflags(write=True)
+    with pytest.raises(ValueError):
+        adapter.teacher_probability_np.setflags(write=True)
+
+
+@pytest.mark.parametrize("scale", [1e-20, np.finfo(np.float32).max])
+def test_weight_scale_does_not_change_loss_or_gradients(scale: float) -> None:
+    model = _FixedMembers(torch.zeros((2, 2)))
+    adapter = TemporalTabMAdapter(
+        sample_weight=np.array([scale, scale], dtype="float32"),
+        loss_name="bce",
+    )
+    adapter.bind_device("cpu")
+    x_num, x_cat = _features(2)
+    loss = adapter.loss_for_window(
+        model,
+        x_num,
+        x_cat,
+        torch.tensor([1.0, 0.0]),
+        row_indices=torch.tensor([0, 1]),
+        window_indices=torch.tensor([0, 1]),
+    )
+    loss.backward()
+
+    torch.testing.assert_close(loss, torch.tensor(np.log(2.0), dtype=torch.float32))
+    assert torch.isfinite(model.logits.grad).all()
 
 
 def test_build_calls_parent_and_binds_requested_device(

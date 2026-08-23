@@ -100,13 +100,28 @@ class TemporalTabMAdapter(TabMAdapter):
             teacher_lambda,
             loss_name=loss_name,
         )
-        self.sample_weight_np = weight
-        self.teacher_probability_np = teacher
-        self.teacher_np = teacher
+        self._sample_weight_bytes = weight.tobytes(order="C")
+        self._teacher_probability_bytes = (
+            None if teacher is None else teacher.tobytes(order="C")
+        )
         self.teacher_lambda = teacher_lambda_value
         self._weight = None
         self._teacher = None
         self._teacher_mask = None
+
+    @property
+    def sample_weight_np(self) -> np.ndarray:
+        return np.frombuffer(self._sample_weight_bytes, dtype="float32")
+
+    @property
+    def teacher_probability_np(self) -> np.ndarray | None:
+        if self._teacher_probability_bytes is None:
+            return None
+        return np.frombuffer(self._teacher_probability_bytes, dtype="float32")
+
+    @property
+    def teacher_np(self) -> np.ndarray | None:
+        return self.teacher_probability_np
 
     def build(
         self,
@@ -120,14 +135,19 @@ class TemporalTabMAdapter(TabMAdapter):
 
     def bind_device(self, device: str) -> None:
         torch = import_runtime_module("torch")
+        weights = self.sample_weight_np
+        normalized_weights = weights / weights.max()
+        if not np.isfinite(normalized_weights).all() or np.any(normalized_weights <= 0):
+            raise ValueError("normalized sample weights must be finite and positive")
         self._weight = torch.tensor(
-            self.sample_weight_np, dtype=torch.float32, device=device
+            normalized_weights, dtype=torch.float32, device=device
         )
         self._teacher = None
         self._teacher_mask = None
-        if self.teacher_probability_np is not None:
-            mask = np.isfinite(self.teacher_probability_np)
-            filled = np.where(mask, self.teacher_probability_np, np.float32(0.5))
+        teacher = self.teacher_probability_np
+        if teacher is not None:
+            mask = np.isfinite(teacher)
+            filled = np.where(mask, teacher, np.float32(0.5))
             self._teacher_mask = torch.tensor(mask, dtype=torch.bool, device=device)
             self._teacher = torch.tensor(
                 filled, dtype=torch.float32, device=device
@@ -235,7 +255,7 @@ class TemporalTabMAdapter(TabMAdapter):
             raise ValueError("model logits must be on the bound device")
         per_row = self._per_row_loss(torch, member_logits, y, row_indices)
         numerator = (per_row * weight[row_indices]).sum()
-        denominator = weight[window_indices].sum().clamp_min(1e-12)
+        denominator = weight[window_indices].sum()
         return numerator / denominator
 
     def debug_per_row_loss(
