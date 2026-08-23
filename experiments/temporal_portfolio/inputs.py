@@ -186,7 +186,9 @@ def _canonical_destination(output: str | Path) -> Path:
     try:
         if not requested.name or requested.name in (".", ".."):
             raise PortfolioInputError("output must name a file")
-        return requested.resolve(strict=False)
+        absolute = requested if requested.is_absolute() else Path.cwd() / requested
+        canonical_parent = absolute.parent.resolve(strict=False)
+        return canonical_parent / absolute.name
     except PortfolioInputError:
         raise
     except OSError as error:
@@ -529,13 +531,19 @@ def _canonical_output_parent(destination: Path) -> Path:
 def prepare_input_archive(data_dir: str | Path, output: str | Path, *, replace: bool = False) -> PreparedInputArchive:
     verified = verify_official_data(data_dir)
     destination = _canonical_destination(output)
+    try:
+        exists = os.path.lexists(destination)
+        if exists and stat.S_ISLNK(os.lstat(destination).st_mode):
+            raise PortfolioInputError("output must not be a symlink")
+    except PortfolioInputError:
+        raise
+    except OSError as error:
+        raise PortfolioInputError(f"cannot inspect output path: {error}") from error
     _require_output_outside_data(destination, verified)
     parent = _canonical_output_parent(destination)
     destination = parent / destination.name
     try:
-        if os.path.lexists(destination) and destination.is_symlink():
-            raise PortfolioInputError("output must not be a symlink")
-        if os.path.lexists(destination) and not replace:
+        if exists and not replace:
             raise PortfolioInputError("output already exists; pass replace=True to replace it")
     except PortfolioInputError:
         raise

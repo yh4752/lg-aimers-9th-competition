@@ -636,3 +636,30 @@ def test_unsupported_hardlink_fails_before_no_replace_commit(
     with pytest.raises(PortfolioInputError, match="publish"):
         prepare_input_archive(tiny_official_dir, output)
     assert not output.exists()
+
+
+@pytest.mark.parametrize("replace", [False, True])
+@pytest.mark.parametrize("target_exists", [False, True])
+def test_prepare_rejects_live_and_dangling_output_leaf_symlinks(
+    tmp_path: Path,
+    tiny_official_dir: Path,
+    replace: bool,
+    target_exists: bool,
+) -> None:
+    target = tmp_path / "target.zip"
+    original = b"live symlink target"
+    if target_exists:
+        target.write_bytes(original)
+    output = tmp_path / "input.zip"
+    output.symlink_to(target)
+    original_link = os.readlink(output)
+
+    with pytest.raises(PortfolioInputError, match="symlink"):
+        prepare_input_archive(tiny_official_dir, output, replace=replace)
+
+    assert output.is_symlink()
+    assert os.readlink(output) == original_link
+    assert target.exists() is target_exists
+    if target_exists:
+        assert target.read_bytes() == original
+    assert not list(tmp_path.glob(".temporal-portfolio-stage-*"))
