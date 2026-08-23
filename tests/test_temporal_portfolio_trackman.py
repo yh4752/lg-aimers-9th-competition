@@ -169,6 +169,81 @@ def test_pitcher_trackman_lookup_and_identity_are_row_order_deterministic() -> N
     assert dict(expected.bundle_sha256) == dict(replay.bundle_sha256)
 
 
+@pytest.mark.parametrize(
+    ("column", "conflicting_value"),
+    [
+        ("pitcher_hand", 2),
+        ("pitcher_team_id", 8),
+        ("asof_pitcher_fastball_rate", 0.25),
+        ("asof_pitcher_breaking_rate", 0.50),
+        ("asof_pitcher_offspeed_rate", 0.25),
+    ],
+)
+def test_pitcher_trackman_rejects_conflicting_maximum_main_signatures_in_any_order(
+    column: str, conflicting_value: object
+) -> None:
+    main = _main()
+    tied = main.iloc[[0]].copy(deep=True)
+    assert tied.iloc[0]["asof_pitcher_n"] == main.iloc[0]["asof_pitcher_n"]
+    tied.loc[:, column] = conflicting_value
+    conflicting = pd.concat([main, tied], ignore_index=True)
+
+    for ordered in (
+        conflicting,
+        conflicting.iloc[::-1].reset_index(drop=True),
+    ):
+        with pytest.raises(
+            PitcherTrackmanError,
+            match="conflicting maximum.*signature",
+        ):
+            fit_pitcher_trackman(ordered, _history(), cutoff_year=2023)
+
+
+@pytest.mark.parametrize("nan_rate", [False, True])
+def test_pitcher_trackman_allows_equivalent_maximum_main_signatures(
+    nan_rate: bool,
+) -> None:
+    main = _main()
+    if nan_rate:
+        main.loc[0, "asof_pitcher_fastball_rate"] = np.nan
+    tied = main.iloc[[0]].copy(deep=True)
+    duplicated = pd.concat([main, tied], ignore_index=True)
+
+    expected = fit_pitcher_trackman(duplicated, _history(), cutoff_year=2023)
+    shuffled = fit_pitcher_trackman(
+        duplicated.iloc[::-1].reset_index(drop=True),
+        _history(),
+        cutoff_year=2023,
+    )
+
+    pd.testing.assert_frame_equal(expected.lookup, shuffled.lookup)
+    assert expected.lookup_sha256 == shuffled.lookup_sha256
+    assert dict(expected.bundle_sha256) == dict(shuffled.bundle_sha256)
+
+
+def test_pitcher_trackman_ignores_future_maximum_signature_conflicts() -> None:
+    main = _main()
+    future_tie = main.loc[
+        main["season"].eq(2024) & main["pitcher_id"].eq(11)
+    ].copy(deep=True)
+    future_tie.loc[:, "pitcher_hand"] = 2
+    future_tie.loc[:, "pitcher_team_id"] = 8
+    future_tie.loc[:, "asof_pitcher_fastball_rate"] = 0.25
+    future_tie.loc[:, "asof_pitcher_breaking_rate"] = 0.50
+    future_tie.loc[:, "asof_pitcher_offspeed_rate"] = 0.25
+    conflicting = pd.concat([main, future_tie], ignore_index=True)
+
+    expected = fit_pitcher_trackman(main, _history(), cutoff_year=2023)
+    replay = fit_pitcher_trackman(
+        conflicting.iloc[::-1].reset_index(drop=True),
+        _history(),
+        cutoff_year=2023,
+    )
+
+    pd.testing.assert_frame_equal(expected.lookup, replay.lookup)
+    assert expected.lookup_sha256 == replay.lookup_sha256
+
+
 def test_pitcher_trackman_state_and_exposed_frames_are_immutable() -> None:
     state = fit_pitcher_trackman(_main(), _history(), cutoff_year=2023)
     expected_lookup = state.lookup

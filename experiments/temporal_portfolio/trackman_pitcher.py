@@ -75,6 +75,12 @@ _HISTORY_COLUMNS = (
     "pitcher_team",
     *PHYSICAL_COLUMNS,
 )
+_MAIN_SIGNATURE_COLUMNS = (
+    "pitcher_hand",
+    "pitcher_team_id",
+    "asof_pitcher_n",
+    *MAIN_RATE_COLUMNS,
+)
 
 
 def _selected_names(
@@ -368,6 +374,38 @@ def _validate_train_prefix(frame: pd.DataFrame) -> None:
     _validate_scalar_values(frame["pitcher_team_id"], "pitcher_team_id")
     for column in MAIN_RATE_COLUMNS:
         _validate_numeric_values(frame[column], column, allow_nan=True)
+    _validate_maximum_main_signatures(frame)
+
+
+def _validate_maximum_main_signatures(frame: pd.DataFrame) -> None:
+    canonical = frame.loc[
+        :, ["pitcher_id", "season", *_MAIN_SIGNATURE_COLUMNS]
+    ].copy(deep=True)
+    canonical["pitcher_id"] = [int(value) for value in canonical["pitcher_id"]]
+    canonical["season"] = [int(value) for value in canonical["season"]]
+    canonical["asof_pitcher_n"] = [
+        int(value) for value in canonical["asof_pitcher_n"]
+    ]
+    for column in MAIN_RATE_COLUMNS:
+        canonical[column] = [
+            np.nan if bool(pd.isna(value)) else float(value)
+            for value in canonical[column]
+        ]
+
+    group_keys = ["pitcher_id", "season"]
+    maximum_count = canonical.groupby(group_keys, sort=False)[
+        "asof_pitcher_n"
+    ].transform("max")
+    maximum_rows = canonical.loc[
+        canonical["asof_pitcher_n"].eq(maximum_count)
+    ]
+    distinct = maximum_rows.groupby(group_keys, sort=False)[
+        list(_MAIN_SIGNATURE_COLUMNS)
+    ].nunique(dropna=False)
+    if distinct.gt(1).any(axis=None):
+        raise PitcherTrackmanError(
+            "TrackMan train has conflicting maximum asof pitcher signatures"
+        )
 
 
 def _validate_history_prefix(frame: pd.DataFrame) -> None:
