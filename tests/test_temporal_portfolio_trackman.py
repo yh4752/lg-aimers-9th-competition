@@ -10,6 +10,7 @@ import pytest
 import experiments.temporal_portfolio.trackman_pitcher as pitcher_module
 from experiments.independent_dl.feature_sources.trackman import (
     PITCHER_LOOKUP_COLUMNS,
+    PITCH_GROUPS,
     TrackmanBuildResult,
 )
 from experiments.temporal_portfolio.trackman_pitcher import (
@@ -757,6 +758,56 @@ def test_matchup_is_invariant_to_other_evaluation_rows_and_current_pitch_values(
 
     pd.testing.assert_series_equal(
         expected.loc["r1"], replay.loc["r1"], check_names=False
+    )
+
+
+@pytest.mark.parametrize("composition", ["B1", "P2", "B1+P2"])
+def test_matchup_composes_after_b1_and_p2_without_trusting_attached_values(
+    composition: str,
+) -> None:
+    batter_state = fit_batter_trackman(
+        _batter_main(), _batter_history(), cutoff_year=2023
+    )
+    pitcher_state = fit_pitcher_trackman(_main(), _history(), cutoff_year=2023)
+    rows = _matchup_rows()
+    if "B1" in composition:
+        rows = attach_batter_exposure(rows, batter_state)
+    if "P2" in composition:
+        p2 = pitcher_state.bundles["P2"].set_index("pitcher_id")
+        for column in p2.columns:
+            rows[column] = rows["pitcher_id"].map(p2[column])
+    original = rows.copy(deep=True)
+
+    result = build_matchup_features(
+        rows, pitcher_state=pitcher_state, batter_state=batter_state
+    )
+
+    assert result.index.equals(original.index)
+    assert result.columns.is_unique
+    assert tuple(result.columns[: len(original.columns)]) == tuple(original.columns)
+    pd.testing.assert_frame_equal(result.loc[:, original.columns], original)
+    added = tuple(result.columns[len(original.columns) :])
+    assert added
+    assert all(column.startswith("tm_matchup_") for column in added)
+
+    changed = original.copy(deep=True)
+    source_columns = [
+        column
+        for column in changed
+        if column.startswith("tm_batter_")
+        or column.startswith("tm_history_")
+        or (
+            column.startswith("tm_")
+            and any(f"_{group}_" in column for group in PITCH_GROUPS)
+        )
+    ]
+    changed.loc[:, source_columns] = -9999.0
+    replay = build_matchup_features(
+        changed, pitcher_state=pitcher_state, batter_state=batter_state
+    )
+
+    pd.testing.assert_frame_equal(
+        result.loc[:, list(added)], replay.loc[:, list(added)]
     )
 
 

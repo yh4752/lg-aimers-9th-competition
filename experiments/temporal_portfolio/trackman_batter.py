@@ -243,23 +243,43 @@ def build_matchup_features(
         )
     except Exception as error:
         raise BatterTrackmanError("pitcher TrackMan state is invalid") from error
-    pitcher_columns = tuple(pitcher_lookup.columns)
-    _reject_collisions(result, pitcher_columns)
-    for column in pitcher_columns:
-        result[column] = pitcher_ids.map(pitcher_lookup[column])
-    result = attach_batter_exposure(result, batter_state)
+    pitcher_features = pd.DataFrame(index=result.index)
+    for column in pitcher_lookup.columns:
+        pitcher_features[column] = pitcher_ids.map(pitcher_lookup[column])
+    batter_lookup = _validated_state_frames(batter_state)[1].set_index("batter_id")
+    batter_features = pd.DataFrame(index=result.index)
+    for column in batter_lookup.columns:
+        batter_features[column] = batter_ids.map(batter_lookup[column])
+    batter_features["tm_batter_match_confidence"] = batter_features[
+        "tm_batter_match_confidence"
+    ].fillna(0.0)
+    batter_features["tm_batter_match_missing"] = batter_features[
+        "tm_batter_match_missing"
+    ].fillna(1)
 
     matchup: dict[str, pd.Series] = {}
     for group in PITCH_GROUPS:
         matchup[f"tm_matchup_{group}_rate_gap"] = (
-            result[f"tm_history_{group}_rate"]
-            - result[f"tm_batter_seen_{group}_rate"]
+            pitcher_features[f"tm_history_{group}_rate"]
+            - batter_features[f"tm_batter_seen_{group}_rate"]
         )
         for metric in _METRICS:
             matchup[f"tm_matchup_{group}_{metric}_gap"] = (
-                result[f"tm_{group}_{metric}_mean"]
-                - result[f"tm_batter_seen_{group}_{metric}_mean"]
+                pitcher_features[f"tm_{group}_{metric}_mean"]
+                - batter_features[f"tm_batter_seen_{group}_{metric}_mean"]
             )
+    pitcher_confidence = pitcher_features["tm_match_confidence"].fillna(0.0)
+    matchup["tm_matchup_mapping_confidence_min"] = pd.Series(
+        np.minimum(
+            pitcher_confidence.to_numpy(dtype="float64"),
+            batter_features["tm_batter_match_confidence"].to_numpy(dtype="float64"),
+        ),
+        index=result.index,
+    )
+    matchup["tm_matchup_mapping_missing"] = (
+        pitcher_features["tm_match_accepted"].fillna(0).ne(1)
+        | batter_features["tm_batter_match_missing"].eq(1)
+    ).astype("int8")
     pitcher_hand = result["pitcher_hand"].astype("int64")
     batter_hand = result["batter_hand"].astype("int64")
     for pitcher_code, pitcher_name in ((1, "left"), (2, "right")):
