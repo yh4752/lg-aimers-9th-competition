@@ -36,7 +36,7 @@ class _FrozenList(tuple[object, ...]):
     """
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, init=False)
 class TrainingIdentity:
     payload: Mapping[str, object]
     sha256: str
@@ -45,16 +45,22 @@ class TrainingIdentity:
     def from_payload(cls, payload: Mapping[str, object]) -> TrainingIdentity:
         normalized = _normalize_payload(payload)
         canonical_bytes = _canonical_json_bytes(normalized)
-        return cls(
-            payload=_freeze_json(normalized),
-            sha256=hashlib.sha256(canonical_bytes).hexdigest(),
-        )
+        identity = object.__new__(cls)
+        object.__setattr__(identity, "payload", _freeze_json(normalized))
+        object.__setattr__(identity, "sha256", hashlib.sha256(canonical_bytes).hexdigest())
+        return identity
 
 
 def audit_duplicate(identity: TrainingIdentity, completed: Mapping[str, str]) -> str | None:
     """Return a prior completed path for the exact identity, if one exists."""
-    if not isinstance(identity, TrainingIdentity) or not _is_sha256(identity.sha256):
-        raise PortfolioIdentityError("identity has an invalid SHA-256")
+    if not isinstance(identity, TrainingIdentity):
+        raise PortfolioIdentityError("identity has an invalid type")
+    try:
+        verified = TrainingIdentity.from_payload(identity.payload)
+    except (AttributeError, PortfolioIdentityError) as error:
+        raise PortfolioIdentityError("identity has an invalid payload") from error
+    if type(identity.sha256) is not str or identity.sha256 != verified.sha256:
+        raise PortfolioIdentityError("identity payload and SHA-256 differ")
     if not isinstance(completed, Mapping):
         raise PortfolioIdentityError("completed jobs must be a mapping")
     for digest, path in completed.items():

@@ -33,6 +33,20 @@ def test_training_identity_changes_only_for_semantic_changes() -> None:
     assert audit_duplicate(base, {base.sha256: "jobs/old"}) == "jobs/old"
 
 
+def test_training_identity_cannot_be_directly_constructed_with_unbound_state() -> None:
+    with pytest.raises(TypeError):
+        TrainingIdentity(payload={"mutable": []}, sha256="a" * 64)
+
+
+def test_audit_duplicate_rejects_forged_identity_with_mismatched_payload_and_digest() -> None:
+    forged = object.__new__(TrainingIdentity)
+    object.__setattr__(forged, "payload", _payload())
+    object.__setattr__(forged, "sha256", "b" * 64)
+
+    with pytest.raises(ValueError):
+        audit_duplicate(forged, {"b" * 64: "jobs/unrelated"})
+
+
 @pytest.mark.parametrize(
     "payload",
     (
@@ -125,3 +139,41 @@ def test_audit_duplicate_returns_none_when_no_identity_matches() -> None:
     identity = TrainingIdentity.from_payload(_payload())
 
     assert audit_duplicate(identity, {"b" * 64: "jobs/other"}) is None
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    (
+        ("train_seasons", []),
+        ("train_seasons", [True]),
+        ("train_seasons", [2021, 2021]),
+        ("train_seasons", [2022, 2021]),
+        ("train_seasons", [1899]),
+        ("valid_year", True),
+        ("valid_year", 2101),
+        ("valid_year", 2021),
+        ("decay", 0.55),
+        ("decay", "0.99"),
+        ("decay", "0.5"),
+        ("features", []),
+        ("features", ["base", "base"]),
+        ("features", [""]),
+        ("features", [1]),
+        ("model", {}),
+        ("model", {"blob": b"x"}),
+        ("model", {"values": frozenset({1})}),
+        ("model", {1: "value"}),
+        ("loss", "logloss"),
+        ("seed", -1),
+    ),
+)
+def test_training_identity_rejects_invalid_spec_boundary(field: str, value: object) -> None:
+    with pytest.raises(ValueError):
+        TrainingIdentity.from_payload(_payload(**{field: value}))
+
+
+def test_audit_duplicate_requires_a_mapping_for_completed_jobs() -> None:
+    identity = TrainingIdentity.from_payload(_payload())
+
+    with pytest.raises(ValueError):
+        audit_duplicate(identity, [(identity.sha256, "jobs/old")])
