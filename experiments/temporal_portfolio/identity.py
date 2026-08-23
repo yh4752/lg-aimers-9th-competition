@@ -1,0 +1,180 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+import hashlib
+import json
+import math
+from types import MappingProxyType
+from typing import Mapping
+
+
+class PortfolioIdentityError(ValueError):
+    """Raised when a training identity cannot be represented canonically."""
+
+
+_ROOT_FIELDS = frozenset(
+    {
+        "data_rows",
+        "train_seasons",
+        "valid_year",
+        "decay",
+        "features",
+        "model",
+        "loss",
+        "seed",
+    }
+)
+_DECAYS = frozenset({"0.40", "0.55", "0.70", "1.00"})
+_LOSSES = frozenset({"bce", "brier"})
+
+
+class _FrozenList(tuple[object, ...]):
+    """Private marker for list values frozen by this module.
+
+    A normal tuple is deliberately not accepted as JSON input.  This marker
+    allows ``dict(identity.payload)`` to be fed back to ``from_payload``.
+    """
+
+
+@dataclass(frozen=True)
+class TrainingIdentity:
+    payload: Mapping[str, object]
+    sha256: str
+
+    @classmethod
+    def from_payload(cls, payload: Mapping[str, object]) -> TrainingIdentity:
+        normalized = _normalize_payload(payload)
+        canonical_bytes = _canonical_json_bytes(normalized)
+        return cls(
+            payload=_freeze_json(normalized),
+            sha256=hashlib.sha256(canonical_bytes).hexdigest(),
+        )
+
+
+def audit_duplicate(identity: TrainingIdentity, completed: Mapping[str, str]) -> str | None:
+    """Return a prior completed path for the exact identity, if one exists."""
+    if not isinstance(identity, TrainingIdentity) or not _is_sha256(identity.sha256):
+        raise PortfolioIdentityError("identity has an invalid SHA-256")
+    if not isinstance(completed, Mapping):
+        raise PortfolioIdentityError("completed jobs must be a mapping")
+    for digest, path in completed.items():
+        if not _is_sha256(digest) or type(path) is not str:
+            raise PortfolioIdentityError("completed jobs contain an invalid hash or path")
+    path = completed.get(identity.sha256)
+    return None if path is None else str(path)
+
+
+def _normalize_payload(payload: Mapping[str, object]) -> dict[str, object]:
+    if not isinstance(payload, Mapping):
+        raise PortfolioIdentityError("training identity payload must be a mapping")
+    if set(payload) != _ROOT_FIELDS:
+        raise PortfolioIdentityError("training identity fields differ")
+
+    data_rows = payload["data_rows"]
+    if not _is_sha256(data_rows):
+        raise PortfolioIdentityError("data_rows must be a lowercase SHA-256")
+
+    train_seasons = _list(payload["train_seasons"], "train_seasons")
+    if not train_seasons or any(type(year) is not int or not _is_year(year) for year in train_seasons):
+        raise PortfolioIdentityError("train_seasons must contain four-digit integer years")
+    if any(left >= right for left, right in zip(train_seasons, train_seasons[1:])):
+        raise PortfolioIdentityError("train_seasons must be strictly increasing")
+
+    valid_year = payload["valid_year"]
+    if type(valid_year) is not int or not _is_year(valid_year) or valid_year <= train_seasons[-1]:
+        raise PortfolioIdentityError("valid_year must follow all training seasons")
+
+    decay = payload["decay"]
+    if decay is not None and (type(decay) is not str or decay not in _DECAYS):
+        raise PortfolioIdentityError("decay must be an approved decimal string or null")
+
+    features = _list(payload["features"], "features")
+    if (
+        not features
+        or any(type(feature) is not str or not feature for feature in features)
+        or len(set(features)) != len(features)
+    ):
+        raise PortfolioIdentityError("features must be unique non-empty strings")
+
+    model = payload["model"]
+    if not isinstance(model, Mapping) or not model:
+        raise PortfolioIdentityError("model must be a non-empty object")
+
+    loss = payload["loss"]
+    if type(loss) is not str or loss not in _LOSSES:
+        raise PortfolioIdentityError("loss is not approved")
+
+    seed = payload["seed"]
+    if type(seed) is not int or seed < 0:
+        raise PortfolioIdentityError("seed must be a non-negative integer")
+
+    return {
+        "data_rows": data_rows,
+        "train_seasons": train_seasons,
+        "valid_year": valid_year,
+        "decay": decay,
+        "features": features,
+        "model": _normalize_json(model, "model"),
+        "loss": loss,
+        "seed": seed,
+    }
+
+
+def _list(value: object, label: str) -> list[object]:
+    if type(value) is list:
+        return list(value)
+    if isinstance(value, _FrozenList):
+        return list(value)
+    raise PortfolioIdentityError(f"{label} must be a JSON array")
+
+
+def _normalize_json(value: object, label: str) -> object:
+    if value is None or type(value) is bool or type(value) is str or type(value) is int:
+        return value
+    if type(value) is float:
+        if not math.isfinite(value):
+            raise PortfolioIdentityError(f"{label} contains a non-finite number")
+        return value
+    if isinstance(value, Mapping):
+        normalized: dict[str, object] = {}
+        for key, nested in value.items():
+            if type(key) is not str:
+                raise PortfolioIdentityError(f"{label} has a non-string object key")
+            normalized[key] = _normalize_json(nested, f"{label}.{key}")
+        return normalized
+    if type(value) is list or isinstance(value, _FrozenList):
+        return [_normalize_json(item, label) for item in value]
+    raise PortfolioIdentityError(f"{label} contains an unsupported JSON value")
+
+
+def _freeze_json(value: object) -> object:
+    if isinstance(value, dict):
+        return MappingProxyType({key: _freeze_json(nested) for key, nested in value.items()})
+    if type(value) is list:
+        return _FrozenList(_freeze_json(item) for item in value)
+    return value
+
+
+def _canonical_json_bytes(payload: Mapping[str, object]) -> bytes:
+    try:
+        return json.dumps(
+            payload,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            allow_nan=False,
+        ).encode("utf-8")
+    except (TypeError, ValueError) as error:
+        raise PortfolioIdentityError("payload cannot be represented as canonical JSON") from error
+
+
+def _is_sha256(value: object) -> bool:
+    return (
+        type(value) is str
+        and len(value) == 64
+        and all(character in "0123456789abcdef" for character in value)
+    )
+
+
+def _is_year(value: int) -> bool:
+    return 1900 <= value <= 2100
