@@ -18,6 +18,7 @@ from experiments.independent_dl.models import common as model_common
 from experiments.independent_dl.models.common import attach_progress_reporter
 from experiments.independent_dl.models.tabm import SUPPORTED_NUM_EMBEDDINGS
 from experiments.independent_dl.progress import ProgressReporter
+from experiments.independent_dl import training as training_module
 from experiments.independent_dl.training import (
     BackendAttemptResult,
     TrainRequest,
@@ -419,6 +420,164 @@ def test_training_loss_passes_fold_training_row_indices() -> None:
 
     assert result == "loss"
     assert adapter.row_indices.tolist() == [7, 3]
+
+
+def test_legacy_adapter_window_loss_retains_microbatch_scaling() -> None:
+    class LegacyAdapter:
+        loss_value = 6.0
+
+        def loss(self, model, x_num, x_cat, y, *, row_indices):
+            self.row_indices = row_indices
+            return self.loss_value
+
+    adapter = LegacyAdapter()
+    row_indices = np.array([1, 3], dtype="int64")
+
+    result = training_module.call_adapter_window_loss(
+        adapter,
+        object(),
+        "num",
+        "cat",
+        "target",
+        row_indices=row_indices,
+        window_indices=np.array([1, 3, 4, 7], dtype="int64"),
+        microbatch_count=3,
+    )
+
+    assert result == adapter.loss_value / 3
+    assert adapter.row_indices is row_indices
+
+
+def test_optional_window_loss_receives_complete_window_indices(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    torch = pytest.importorskip("torch")
+
+    class CpuRuntime:
+        cuda = SimpleNamespace(
+            is_available=lambda: True,
+            device_count=lambda: 0,
+            manual_seed_all=lambda seed: None,
+            get_rng_state_all=lambda: [],
+            max_memory_allocated=lambda: 0,
+            max_memory_reserved=lambda: 0,
+        )
+
+        def __getattr__(self, name: str):
+            return getattr(torch, name)
+
+        @staticmethod
+        def as_tensor(values, *, dtype, device=None):
+            return torch.as_tensor(values, dtype=dtype)
+
+        @staticmethod
+        def load(path, **kwargs):
+            return torch.load(
+                path,
+                map_location="cpu",
+                weights_only=kwargs["weights_only"],
+            )
+
+    runtime = CpuRuntime()
+    monkeypatch.setattr(training_module, "import_runtime_module", lambda name: runtime)
+    monkeypatch.setattr(
+        training_module.np.random,
+        "default_rng",
+        lambda seed: SimpleNamespace(permutation=lambda size: np.arange(size)),
+    )
+
+    class Model(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.bias = torch.nn.Parameter(torch.tensor(0.0))
+
+        def forward(self, x_num):
+            return self.bias.expand(len(x_num))
+
+    class WindowRecordingAdapter:
+        def __init__(self) -> None:
+            self.windows: list[tuple[int, ...]] = []
+            self.window_tensors: list[object] = []
+
+        @staticmethod
+        def build(model_config, metadata, device):
+            return Model()
+
+        def loss_for_window(
+            self,
+            model,
+            x_num,
+            x_cat,
+            y,
+            *,
+            row_indices,
+            window_indices,
+        ):
+            self.window_tensors.append(window_indices)
+            window = tuple(window_indices.tolist())
+            if not self.windows or self.windows[-1] != window:
+                self.windows.append(window)
+            assert set(row_indices.tolist()) <= set(window)
+            return torch.mean((model(x_num) - y) ** 2)
+
+        @staticmethod
+        def optimizer(model, training_config):
+            return torch.optim.SGD(
+                model.parameters(), lr=float(training_config["learning_rate"])
+            )
+
+        @staticmethod
+        def probabilities(model, x_num, x_cat):
+            return torch.sigmoid(model(x_num))
+
+    class SilentReporter:
+        @staticmethod
+        def emit(event: str, **fields: object) -> None:
+            pass
+
+        @staticmethod
+        def should_emit(*, completed_rows: int, stream: str) -> bool:
+            return False
+
+    train = FeatureBatch(
+        row_id=np.array(["0", "1", "2", "3", "4"]),
+        season=np.full(5, 2024, dtype="int64"),
+        game_type=np.full(5, "R"),
+        x_num=np.zeros((5, 1), dtype="float32"),
+        x_cat=np.zeros((5, 1), dtype="int64"),
+        y=np.zeros(5, dtype="float32"),
+    )
+    request = TrainRequest(
+        candidate_id="window-loss-test",
+        family="test",
+        seed=0,
+        epochs=1,
+        model_config={},
+        training_config={
+            "scheduler": "constant",
+            "learning_rate": 0.1,
+            "amp": False,
+            "patience": 1,
+        },
+        train=train,
+        valid=train,
+    )
+    adapter = WindowRecordingAdapter()
+
+    TorchTrainingBackend().run_attempt(
+        request=request,
+        adapter=adapter,
+        output_dir=tmp_path,
+        micro_batch_size=2,
+        accumulation_steps=2,
+        activation_checkpointing=False,
+        resume_epoch=0,
+        reporter=SilentReporter(),
+    )
+
+    assert adapter.windows == [(0, 1, 2, 3), (4,)]
+    assert adapter.window_tensors[0] is adapter.window_tensors[1]
+    assert adapter.window_tensors[1] is not adapter.window_tensors[2]
 
 
 def test_training_prepares_optional_retrieval_context() -> None:
