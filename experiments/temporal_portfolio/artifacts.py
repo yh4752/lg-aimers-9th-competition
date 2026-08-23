@@ -4,11 +4,16 @@ Discovery deliberately searches at most ``_MAX_DISCOVERY_DEPTH`` directory level
 ``_MAX_DISCOVERY_ENTRIES`` entries, and ``_MAX_DISCOVERY_INSPECTED_BYTES`` bytes of
 regular-file candidates.  It never extracts archives and treats every manifest-
 bearing candidate as untrusted until all candidates have been verified.
+
+Recursive discovery roots must be owner-controlled or protected by sticky-directory
+permissions.  Every file read and publication commit is descriptor-relative and
+inode-checked, but recursive ``scandir`` traversal is not an authorization boundary.
 """
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
+import fcntl
 from hashlib import sha256
 import io
 from itertools import islice
@@ -16,9 +21,9 @@ import json
 import math
 import os
 from pathlib import Path, PurePosixPath
+import secrets
 import stat
 import struct
-import tempfile
 from types import MappingProxyType
 from typing import BinaryIO
 from zipfile import BadZipFile, ZIP_DEFLATED, ZipFile, ZipInfo
@@ -334,24 +339,79 @@ def _reject_symlink_components(path: Path, *, include_final: bool = True) -> Non
             raise PortfolioArtifactError(f"symlink path component is not allowed: {current}")
 
 
-def _open_safe_file(path: Path, label: str) -> _SafeFile:
+def _open_directory_components(path: Path, *, create: bool = False) -> int:
+    """Bind an absolute directory one non-symlink component at a time."""
+
     absolute = _absolute_path(path)
-    _reject_symlink_components(absolute)
-    before = os.lstat(absolute)
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    directory = os.open(absolute.anchor, flags)
+    try:
+        for component in absolute.parts[1:]:
+            try:
+                child = os.open(component, flags, dir_fd=directory)
+            except FileNotFoundError:
+                if not create:
+                    raise
+                os.mkdir(component, 0o755, dir_fd=directory)
+                child = os.open(component, flags, dir_fd=directory)
+            metadata = os.fstat(child)
+            if not stat.S_ISDIR(metadata.st_mode):
+                os.close(child)
+                raise PortfolioArtifactError(
+                    f"path component is not a real directory: {component}"
+                )
+            os.close(directory)
+            directory = child
+        return directory
+    except PortfolioArtifactError:
+        os.close(directory)
+        raise
+    except OSError as error:
+        os.close(directory)
+        raise PortfolioArtifactError(
+            f"path component is a symlink or not a directory: {absolute}"
+        ) from error
+
+
+def _open_safe_file_at(
+    directory: int, name: str, path: Path, label: str
+) -> _SafeFile:
+    try:
+        before = os.stat(name, dir_fd=directory, follow_symlinks=False)
+    except FileNotFoundError:
+        raise
     if not stat.S_ISREG(before.st_mode):
         raise PortfolioArtifactError(f"{label} must be a regular non-symlink file")
     if before.st_size > _MAX_ARCHIVE_BYTES and label == "handoff":
         raise PortfolioArtifactError("handoff exceeds the archive size limit")
-    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
-    descriptor = os.open(absolute, flags)
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    descriptor = os.open(name, flags, dir_fd=directory)
     try:
         opened = os.fstat(descriptor)
         if not _same_file(before, opened):
             raise PortfolioArtifactError(f"{label} changed before it could be opened")
-        return _SafeFile(absolute, os.fdopen(descriptor, "rb", buffering=0), opened)
+        return _SafeFile(path, os.fdopen(descriptor, "rb", buffering=0), opened)
     except Exception:
         os.close(descriptor)
         raise
+
+
+def _open_safe_file(path: Path, label: str) -> _SafeFile:
+    absolute = _absolute_path(path)
+    directory = _open_directory_components(absolute.parent)
+    try:
+        return _open_safe_file_at(directory, absolute.name, absolute, label)
+    finally:
+        os.close(directory)
 
 
 def _read_safe_file(
@@ -514,17 +574,9 @@ def _prepare_output_root(root: str | Path) -> Path:
         absolute = _absolute_path(root)
     except (TypeError, ValueError, OSError) as error:
         raise PortfolioArtifactError("handoff output root is invalid") from error
-    _reject_symlink_components(absolute)
     try:
-        if absolute.exists():
-            metadata = absolute.lstat()
-            if stat.S_ISLNK(metadata.st_mode):
-                raise PortfolioArtifactError("handoff output root must not be a symlink")
-            if not stat.S_ISDIR(metadata.st_mode):
-                raise PortfolioArtifactError("handoff output root must be a directory")
-        else:
-            _reject_symlink_components(absolute, include_final=False)
-            absolute.mkdir(parents=True, exist_ok=False)
+        directory = _open_directory_components(absolute, create=True)
+        os.close(directory)
         return absolute
     except PortfolioArtifactError:
         raise
@@ -532,42 +584,112 @@ def _prepare_output_root(root: str | Path) -> Path:
         raise PortfolioArtifactError("cannot create handoff output root") from error
 
 
-def _atomic_publish(path: Path, payload: bytes) -> None:
-    if path.exists() or path.is_symlink():
-        metadata = path.lstat()
-        if stat.S_ISLNK(metadata.st_mode):
-            raise PortfolioArtifactError("handoff output must not be a symlink")
-        if not stat.S_ISREG(metadata.st_mode):
-            raise PortfolioArtifactError("handoff output must be a regular file")
-    descriptor, temporary_name = tempfile.mkstemp(
-        prefix=f".{path.name}-", suffix=".tmp", dir=path.parent
-    )
-    temporary = Path(temporary_name)
+def _existing_handoff_at(directory: int, path: Path) -> VerifiedHandoff | None:
     try:
+        metadata = os.stat(path.name, dir_fd=directory, follow_symlinks=False)
+    except FileNotFoundError:
+        return None
+    if not stat.S_ISREG(metadata.st_mode):
+        raise PortfolioArtifactError("handoff output must be a regular non-symlink file")
+    return _verify_handoff_at(directory, path.name, path)
+
+
+def _checkpoint_lineage_identity(lineage: Lineage) -> tuple[object, ...]:
+    return (
+        lineage.campaign_id,
+        lineage.training_sha256,
+        lineage.state_schema_version,
+        lineage.runtime_sha256,
+    )
+
+
+def _require_monotonic_successor(
+    existing: VerifiedHandoff, evidence: StageEvidence
+) -> None:
+    if existing.bindings != evidence.bindings:
+        raise PortfolioArtifactError("handoff publication bindings conflict")
+    if (
+        existing.stage != evidence.stage
+        or _checkpoint_lineage_identity(existing.lineage)
+        != _checkpoint_lineage_identity(evidence.lineage)
+    ):
+        raise PortfolioArtifactError("handoff publication lineage identity conflicts")
+    if evidence.lineage.sequence != existing.sequence + 1:
+        raise PortfolioArtifactError("handoff publication sequence would conflict or rollback")
+    if evidence.lineage.parent_manifest_sha256 != existing.manifest_sha256:
+        raise PortfolioArtifactError("handoff publication parent is disconnected")
+
+
+def _create_temporary_at(directory: int, path: Path) -> tuple[int, str]:
+    flags = (
+        os.O_WRONLY
+        | os.O_CREAT
+        | os.O_EXCL
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    for _ in range(128):
+        name = f".{path.name}-{secrets.token_hex(12)}.tmp"
+        try:
+            return os.open(name, flags, 0o600, dir_fd=directory), name
+        except FileExistsError:
+            continue
+    raise PortfolioArtifactError("cannot allocate a unique handoff temporary file")
+
+
+def _atomic_publish(
+    path: Path, payload: bytes, evidence: StageEvidence
+) -> VerifiedHandoff:
+    directory = _open_directory_components(path.parent)
+    temporary_name: str | None = None
+    locked = False
+    try:
+        fcntl.flock(directory, fcntl.LOCK_EX)
+        locked = True
+        existing = _existing_handoff_at(directory, path)
+        payload_sha256 = sha256(payload).hexdigest()
+        if existing is not None and existing.sha256 == payload_sha256:
+            return existing
+        if existing is not None:
+            _require_monotonic_successor(existing, evidence)
+
+        descriptor, temporary_name = _create_temporary_at(directory, path)
         with os.fdopen(descriptor, "wb") as handle:
             handle.write(payload)
             handle.flush()
             os.fsync(handle.fileno())
-        _verify_handoff_file(temporary)
-        if path.exists() or path.is_symlink():
-            current = path.lstat()
-            if stat.S_ISLNK(current.st_mode):
-                raise PortfolioArtifactError("handoff output became a symlink")
-            if not stat.S_ISREG(current.st_mode):
-                raise PortfolioArtifactError("handoff output is not a regular file")
-        os.replace(temporary, path)
-        directory = os.open(path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        temporary_path = path.parent / temporary_name
+        candidate = _verify_handoff_at(directory, temporary_name, temporary_path)
+        if candidate.sha256 != payload_sha256:
+            raise PortfolioArtifactError("temporary handoff bytes changed")
+
+        current = _existing_handoff_at(directory, path)
+        if (existing is None) != (current is None) or (
+            existing is not None
+            and current is not None
+            and current.sha256 != existing.sha256
+        ):
+            raise PortfolioArtifactError("handoff output changed during publication")
+        os.replace(
+            temporary_name,
+            path.name,
+            src_dir_fd=directory,
+            dst_dir_fd=directory,
+        )
+        temporary_name = None
+        os.fsync(directory)
+        return _verify_handoff_at(directory, path.name, path)
+    finally:
+        if temporary_name is not None:
+            try:
+                os.unlink(temporary_name, dir_fd=directory)
+            except FileNotFoundError:
+                pass
         try:
-            os.fsync(directory)
+            if locked:
+                fcntl.flock(directory, fcntl.LOCK_UN)
         finally:
             os.close(directory)
-        _verify_handoff_file(path)
-    except Exception:
-        try:
-            temporary.unlink()
-        except FileNotFoundError:
-            pass
-        raise
 
 
 def write_handoff(root: str | Path, evidence: StageEvidence) -> HandoffPath:
@@ -594,8 +716,7 @@ def write_handoff(root: str | Path, evidence: StageEvidence) -> HandoffPath:
         )
         output_root = _prepare_output_root(root)
         path = output_root / f"temporal_portfolio_stage_{evidence.stage}_handoff.zip"
-        _atomic_publish(path, payload)
-        verified = _verify_handoff_file(path)
+        verified = _atomic_publish(path, payload, evidence)
         if verified.sha256 is None:
             raise PortfolioArtifactError("published handoff has no file SHA-256")
         return HandoffPath(path, verified.sha256)
@@ -973,32 +1094,44 @@ def _verify_handoff_values(
     )
 
 
+def _verify_opened_handoff(source: _SafeFile) -> VerifiedHandoff:
+    digest = sha256()
+    while chunk := source.handle.read(_CHUNK_SIZE):
+        digest.update(chunk)
+    source.require_unchanged()
+    source.handle.seek(0)
+    _preflight_zip_structure(source.handle, source.initial_stat.st_size, "handoff")
+    with ZipFile(source.handle, "r") as archive:
+        infos = _inspect_zip_metadata(
+            archive,
+            label="handoff",
+            required_manifest="handoff_manifest.json",
+            exact_names=_OUTER_MEMBERS,
+        )
+        values = {
+            name: _read_zip_member(archive, info, "handoff")
+            for name, info in infos.items()
+        }
+    source.require_unchanged()
+    return _verify_handoff_values(
+        values, path=source.path, archive_sha256=digest.hexdigest()
+    )
+
+
+def _verify_handoff_at(
+    directory: int, name: str, path: Path
+) -> VerifiedHandoff:
+    source = _open_safe_file_at(directory, name, path, "handoff")
+    try:
+        return _verify_opened_handoff(source)
+    finally:
+        source.handle.close()
+
+
 def _verify_handoff_file(path: Path) -> VerifiedHandoff:
     source = _open_safe_file(Path(path), "handoff")
     try:
-        digest = sha256()
-        while chunk := source.handle.read(_CHUNK_SIZE):
-            digest.update(chunk)
-        source.require_unchanged()
-        source.handle.seek(0)
-        _preflight_zip_structure(
-            source.handle, source.initial_stat.st_size, "handoff"
-        )
-        with ZipFile(source.handle, "r") as archive:
-            infos = _inspect_zip_metadata(
-                archive,
-                label="handoff",
-                required_manifest="handoff_manifest.json",
-                exact_names=_OUTER_MEMBERS,
-            )
-            values = {
-                name: _read_zip_member(archive, info, "handoff")
-                for name, info in infos.items()
-            }
-        source.require_unchanged()
-        return _verify_handoff_values(
-            values, path=source.path, archive_sha256=digest.hexdigest()
-        )
+        return _verify_opened_handoff(source)
     finally:
         source.handle.close()
 
@@ -1077,7 +1210,25 @@ def _zip_declares_handoff_manifest(
                 declares_manifest = any(
                     info.filename == "handoff_manifest.json" for info in infos
                 )
-        except BadZipFile:
+        except (BadZipFile, PortfolioArtifactError) as error:
+            original_offset = source.handle.tell()
+            try:
+                tail_size = min(
+                    source.initial_stat.st_size,
+                    _MAX_CENTRAL_DIRECTORY_BYTES + 22 + 0xFFFF + 20,
+                )
+                source.handle.seek(source.initial_stat.st_size - tail_size)
+                manifest_bearing = (
+                    b"handoff_manifest.json" in source.handle.read(tail_size)
+                )
+            finally:
+                source.handle.seek(original_offset)
+            if manifest_bearing:
+                if isinstance(error, PortfolioArtifactError):
+                    raise
+                raise PortfolioArtifactError(
+                    "discovery found a malformed manifest-bearing ZIP archive"
+                ) from error
             declares_manifest = False
         source.require_unchanged()
         return declares_manifest
@@ -1134,12 +1285,7 @@ def _discover_candidates(root: Path, budget: _DiscoveryBudget) -> list[Path]:
 
 
 def _lineage_identity(value: VerifiedHandoff) -> tuple[object, ...]:
-    return (
-        value.lineage.campaign_id,
-        value.lineage.training_sha256,
-        value.lineage.state_schema_version,
-        value.lineage.runtime_sha256,
-    )
+    return _checkpoint_lineage_identity(value.lineage)
 
 
 def discover_handoffs(roots: Iterable[str | Path]) -> tuple[VerifiedHandoff, ...]:

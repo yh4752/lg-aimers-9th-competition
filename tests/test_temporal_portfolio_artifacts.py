@@ -858,6 +858,51 @@ def test_internal_manifest_candidate_that_fails_verification_poisons_discovery(
         discover_handoffs([scan])
 
 
+def test_discovery_ignores_structurally_malformed_unrelated_zip(
+    tmp_path: Path,
+) -> None:
+    source = write_handoff(tmp_path / "source", _evidence()).path
+    scan = tmp_path / "scan"
+    scan.mkdir()
+    source.replace(scan / "valid-opaque")
+    unrelated = _zip_bytes([("unrelated.txt", b"data")])
+    (scan / "broken-unrelated").write_bytes(
+        _patch_eocd(unrelated, 4, "<H", 1)
+    )
+
+    found = discover_handoffs([scan])
+
+    assert found[0].path.name == "valid-opaque"
+
+
+def test_discovery_fails_closed_for_structurally_malformed_manifest_zip(
+    tmp_path: Path,
+) -> None:
+    source = write_handoff(tmp_path / "source", _evidence()).path
+    scan = tmp_path / "scan"
+    scan.mkdir()
+    source.replace(scan / "valid-opaque")
+    manifest_zip = _zip_bytes([("handoff_manifest.json", b"{}")])
+    (scan / "broken-manifest").write_bytes(
+        _patch_eocd(manifest_zip, 4, "<H", 1)
+    )
+
+    with pytest.raises(PortfolioArtifactError, match="multi-disk"):
+        discover_handoffs([scan])
+
+
+def test_discovery_fails_closed_for_manifest_zip_missing_eocd(tmp_path: Path) -> None:
+    source = write_handoff(tmp_path / "source", _evidence()).path
+    scan = tmp_path / "scan"
+    scan.mkdir()
+    source.replace(scan / "valid-opaque")
+    manifest_zip = _zip_bytes([("handoff_manifest.json", b"{}")])
+    (scan / "missing-eocd").write_bytes(manifest_zip[:-22])
+
+    with pytest.raises(PortfolioArtifactError, match="manifest-bearing"):
+        discover_handoffs([scan])
+
+
 def test_discovery_bounds_total_archive_bytes_inspected(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1018,17 +1063,161 @@ def test_atomic_publish_rejects_output_symlink_and_preserves_target(tmp_path: Pa
     assert not list(output.glob(".*.tmp"))
 
 
+def test_publication_is_idempotent_for_identical_handoff_bytes(tmp_path: Path) -> None:
+    first = write_handoff(tmp_path, _evidence())
+    before = first.path.stat()
+
+    second = write_handoff(tmp_path, _evidence())
+    after = second.path.stat()
+
+    assert second.sha256 == first.sha256
+    assert (after.st_dev, after.st_ino, after.st_mtime_ns) == (
+        before.st_dev,
+        before.st_ino,
+        before.st_mtime_ns,
+    )
+
+
+def test_publication_accepts_only_next_connected_same_identity_sequence(
+    tmp_path: Path,
+) -> None:
+    first = write_handoff(tmp_path, _evidence()).path
+    first_verified = verify_handoff(first)
+    successor = _evidence(
+        lineage=_lineage(
+            sequence=2,
+            parent=first_verified.manifest_sha256,
+        ),
+        marker="successor",
+    )
+
+    second = write_handoff(tmp_path, successor)
+
+    assert verify_handoff(second.path).sequence == 2
+
+
+def test_publication_holds_and_releases_interprocess_directory_lock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    original_flock = artifact_module.fcntl.flock
+    operations: list[int] = []
+
+    def recording_flock(descriptor: int, operation: int) -> None:
+        operations.append(operation)
+        original_flock(descriptor, operation)
+
+    monkeypatch.setattr(artifact_module.fcntl, "flock", recording_flock)
+
+    write_handoff(tmp_path, _evidence())
+
+    assert operations == [artifact_module.fcntl.LOCK_EX, artifact_module.fcntl.LOCK_UN]
+
+
+@pytest.mark.parametrize("conflict", ["equal", "rollback", "parent", "bindings"])
+def test_publication_rejects_conflicting_rollback_and_disconnected_overwrite(
+    tmp_path: Path, conflict: str
+) -> None:
+    first = write_handoff(tmp_path, _evidence()).path
+    first_verified = verify_handoff(first)
+    if conflict == "rollback":
+        successor = _evidence(
+            lineage=_lineage(
+                sequence=2, parent=first_verified.manifest_sha256
+            ),
+            marker="successor",
+        )
+        write_handoff(tmp_path, successor)
+        candidate = _evidence(marker="rollback")
+    elif conflict == "equal":
+        candidate = _evidence(marker="conflicting-equal")
+    elif conflict == "parent":
+        candidate = _evidence(
+            lineage=_lineage(sequence=2, parent="9" * 64), marker="disconnected"
+        )
+    else:
+        candidate = _evidence(
+            bindings=_bindings("5"),
+            lineage=_lineage(
+                sequence=2, parent=first_verified.manifest_sha256
+            ),
+            marker="different-bindings",
+        )
+    before = first.read_bytes() if conflict != "rollback" else (tmp_path / first.name).read_bytes()
+
+    with pytest.raises(PortfolioArtifactError, match="rollback|conflict|parent|bindings|sequence|identity"):
+        write_handoff(tmp_path, candidate)
+
+    assert (tmp_path / first.name).read_bytes() == before
+
+
+def test_safe_file_open_does_not_follow_ancestor_swapped_after_old_check(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    parent = tmp_path / "safe"
+    parent.mkdir()
+    source = parent / "checkpoint.bin"
+    source.write_bytes(b"trusted")
+    moved = tmp_path / "moved-safe"
+    attacker = tmp_path / "attacker"
+    attacker.mkdir()
+    (attacker / source.name).write_bytes(b"attacker")
+    original_check = artifact_module._reject_symlink_components
+    swapped = False
+
+    def check_then_swap(path: Path, *, include_final: bool = True) -> None:
+        nonlocal swapped
+        original_check(path, include_final=include_final)
+        if Path(path) == source and not swapped:
+            swapped = True
+            parent.rename(moved)
+            parent.symlink_to(attacker, target_is_directory=True)
+
+    monkeypatch.setattr(
+        artifact_module, "_reject_symlink_components", check_then_swap
+    )
+
+    bound = bind_file(source)
+
+    assert bound.sha256 == sha256(b"trusted").hexdigest()
+
+
+def test_publication_rejects_output_ancestor_swap_before_atomic_commit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    output = tmp_path / "output"
+    moved = tmp_path / "moved-output"
+    attacker = tmp_path / "attacker"
+    attacker.mkdir()
+    original_prepare = artifact_module._prepare_output_root
+    swapped = False
+
+    def prepare_then_swap(root: str | Path) -> Path:
+        nonlocal swapped
+        prepared = original_prepare(root)
+        if not swapped:
+            swapped = True
+            prepared.rename(moved)
+            prepared.symlink_to(attacker, target_is_directory=True)
+        return prepared
+
+    monkeypatch.setattr(artifact_module, "_prepare_output_root", prepare_then_swap)
+
+    with pytest.raises(PortfolioArtifactError, match="symlink|directory"):
+        write_handoff(output, _evidence())
+    assert not list(attacker.iterdir())
+
+
 def test_atomic_publish_leaves_no_partial_file_when_self_verification_fails(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    original = artifact_module._verify_handoff_file
+    original = artifact_module._verify_handoff_at
 
-    def fail_verification(path: Path):
-        if path.name.startswith(".temporal_portfolio"):
+    def fail_verification(directory: int, name: str, path: Path):
+        if name.startswith(".temporal_portfolio"):
             raise PortfolioArtifactError("fixture verification failure")
-        return original(path)
+        return original(directory, name, path)
 
-    monkeypatch.setattr(artifact_module, "_verify_handoff_file", fail_verification)
+    monkeypatch.setattr(artifact_module, "_verify_handoff_at", fail_verification)
     output = tmp_path / "output"
     with pytest.raises(PortfolioArtifactError, match="fixture"):
         write_handoff(output, _evidence())
