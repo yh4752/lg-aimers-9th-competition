@@ -330,24 +330,26 @@ def build_stage_jobs(contract: PortfolioContract, stage: str) -> tuple[JobSpec, 
         raise PortfolioContractError("campaign identity differs")
     if stage != "T1":
         raise PortfolioContractError("stage is not authorized")
+    if contract != load_contract():
+        raise PortfolioContractError("contract authorization differs")
 
     recent = tuple(
         JobSpec(
-            job_id=f"t1__recent__va{fold.valid_year}__s3407",
+            job_id=f"t1__recent__va{fold.valid_year}__s{contract.screen_seed}",
             expert="recent",
             fold=fold,
             decay=None,
-            seed=3407,
+            seed=contract.screen_seed,
         )
         for fold in contract.folds
     )
     multi = tuple(
         JobSpec(
-            job_id=f"t1__multi_d{str(decay).replace('.', 'p')}__va{fold.valid_year}__s3407",
+            job_id=f"t1__multi_d{str(decay).replace('.', 'p')}__va{fold.valid_year}__s{contract.screen_seed}",
             expert="multi",
             fold=fold,
             decay=decay,
-            seed=3407,
+            seed=contract.screen_seed,
         )
         for decay in contract.decays
         for fold in contract.folds
