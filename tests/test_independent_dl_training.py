@@ -480,10 +480,15 @@ def test_optional_window_loss_receives_complete_window_indices(
 
     runtime = CpuRuntime()
     monkeypatch.setattr(training_module, "import_runtime_module", lambda name: runtime)
+
+    def fixed_permutation(size: int) -> np.ndarray:
+        assert size == 5
+        return np.array([3, 0, 4, 1, 2], dtype="int64")
+
     monkeypatch.setattr(
         training_module.np.random,
         "default_rng",
-        lambda seed: SimpleNamespace(permutation=lambda size: np.arange(size)),
+        lambda seed: SimpleNamespace(permutation=fixed_permutation),
     )
 
     class Model(torch.nn.Module):
@@ -575,7 +580,7 @@ def test_optional_window_loss_receives_complete_window_indices(
         reporter=SilentReporter(),
     )
 
-    assert adapter.windows == [(0, 1, 2, 3), (4,)]
+    assert adapter.windows == [(3, 0, 4, 1), (2,)]
     assert adapter.window_tensors[0] is adapter.window_tensors[1]
     assert adapter.window_tensors[1] is not adapter.window_tensors[2]
 
