@@ -56,6 +56,9 @@ def test_contract_is_fail_closed() -> None:
         {"folds": lambda contract: contract.folds[:1]},
         {"decays": lambda contract: (Decimal("0.99"),)},
         {"screen_seed": lambda contract: 99},
+        {"screen_seed": lambda contract: 3407.0},
+        {"schema_version": lambda contract: True},
+        {"decays": lambda contract: (Decimal("0.4"), *contract.decays[1:])},
     ),
 )
 def test_stage_jobs_reject_mutated_contract_authorization(changed: dict[str, object]) -> None:

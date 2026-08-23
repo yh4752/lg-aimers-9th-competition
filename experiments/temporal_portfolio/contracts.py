@@ -129,6 +129,41 @@ class JobSpec:
     seed: int
 
 
+def _contract_values_match_exactly(left: object, right: object) -> bool:
+    """Compare contract values without numeric coercion or Decimal normalization."""
+    if type(left) is not type(right):
+        return False
+    if isinstance(left, Decimal):
+        return left.as_tuple() == right.as_tuple()
+    if isinstance(left, tuple):
+        return len(left) == len(right) and all(
+            _contract_values_match_exactly(left_item, right_item)
+            for left_item, right_item in zip(left, right)
+        )
+    if isinstance(left, Mapping):
+        if len(left) != len(right):
+            return False
+        unmatched = list(right.items())
+        for left_key, left_value in left.items():
+            for index, (right_key, right_value) in enumerate(unmatched):
+                if _contract_values_match_exactly(left_key, right_key):
+                    if not _contract_values_match_exactly(left_value, right_value):
+                        return False
+                    del unmatched[index]
+                    break
+            else:
+                return False
+        return not unmatched
+    if isinstance(left, (TemporalFold, PortfolioContract)):
+        return all(
+            _contract_values_match_exactly(
+                getattr(left, field_name), getattr(right, field_name)
+            )
+            for field_name in left.__dataclass_fields__
+        )
+    return left == right
+
+
 def _object_no_duplicates(pairs: list[tuple[str, object]]) -> dict[str, object]:
     result: dict[str, object] = {}
     for key, value in pairs:
@@ -330,7 +365,7 @@ def build_stage_jobs(contract: PortfolioContract, stage: str) -> tuple[JobSpec, 
         raise PortfolioContractError("campaign identity differs")
     if stage != "T1":
         raise PortfolioContractError("stage is not authorized")
-    if contract != load_contract():
+    if not _contract_values_match_exactly(contract, load_contract()):
         raise PortfolioContractError("contract authorization differs")
 
     recent = tuple(
