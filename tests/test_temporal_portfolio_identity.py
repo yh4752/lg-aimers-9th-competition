@@ -41,6 +41,44 @@ class _ItemsSnapshotMapping(Mapping[str, object]):
         return self._items
 
 
+class _OneViewMapping(Mapping[str, object]):
+    def __init__(self, items: tuple[tuple[str, object], ...]) -> None:
+        self._items = items
+        self.read_count = 0
+
+    def __getitem__(self, key: str) -> object:
+        raise RuntimeError("source access")
+
+    def __iter__(self):
+        raise RuntimeError("source access")
+
+    def __len__(self) -> int:
+        raise RuntimeError("source access")
+
+    def items(self):
+        self.read_count += 1
+        if self.read_count > 1:
+            raise RuntimeError("second source access")
+        return self._items
+
+
+class _MalformedItemsMapping(Mapping[str, object]):
+    def __init__(self, item: object) -> None:
+        self._item = item
+
+    def __getitem__(self, key: str) -> object:
+        raise KeyError(key)
+
+    def __iter__(self):
+        return iter(())
+
+    def __len__(self) -> int:
+        return 1
+
+    def items(self):
+        return (self._item,)
+
+
 def test_training_identity_changes_only_for_semantic_changes() -> None:
     base = TrainingIdentity.from_payload({
         "data_rows": "a" * 64, "train_seasons": [2021], "valid_year": 2022,
@@ -81,6 +119,23 @@ def test_audit_duplicate_rejects_mutable_forged_payload_with_correct_digest() ->
 
     with pytest.raises(ValueError, match="frozen representation"):
         audit_duplicate(forged, {verified.sha256: "jobs/unrelated"})
+
+
+def test_audit_duplicate_thaws_a_frozen_one_view_mapping_once() -> None:
+    verified = TrainingIdentity.from_payload(_payload())
+    source = _OneViewMapping(tuple(verified.payload.items()))
+    forged = object.__new__(TrainingIdentity)
+    object.__setattr__(forged, "payload", MappingProxyType(source))
+    object.__setattr__(forged, "sha256", verified.sha256)
+
+    assert audit_duplicate(forged, {verified.sha256: "jobs/old"}) == "jobs/old"
+    assert source.read_count == 1
+
+
+@pytest.mark.parametrize("item", ("ab", ["a", "b"]))
+def test_training_identity_rejects_malformed_nested_mapping_items(item: object) -> None:
+    with pytest.raises(ValueError, match="malformed item"):
+        TrainingIdentity.from_payload(_payload(model=_MalformedItemsMapping(item)))
 
 
 @pytest.mark.parametrize(

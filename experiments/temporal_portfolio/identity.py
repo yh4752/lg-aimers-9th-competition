@@ -61,11 +61,9 @@ def audit_duplicate(identity: TrainingIdentity, completed: Mapping[str, str]) ->
     try:
         supplied_payload = identity.payload
         supplied_sha256 = identity.sha256
-        verified = TrainingIdentity.from_payload(supplied_payload)
-    except (AttributeError, PortfolioIdentityError) as error:
+    except AttributeError as error:
         raise PortfolioIdentityError("identity has an invalid payload") from error
-    if not _same_frozen_json(supplied_payload, verified.payload):
-        raise PortfolioIdentityError("identity payload is not the frozen representation")
+    verified = TrainingIdentity.from_payload(_thaw_frozen_json(supplied_payload, "identity payload"))
     if type(supplied_sha256) is not str or supplied_sha256 != verified.sha256:
         raise PortfolioIdentityError("identity payload and SHA-256 differ")
     completed_snapshot = _snapshot_mapping(completed, "completed jobs")
@@ -163,6 +161,8 @@ def _snapshot_mapping(value: object, label: str) -> dict[str, object]:
     snapshot: dict[str, object] = {}
     try:
         for item in value.items():
+            if type(item) is not tuple or len(item) != 2:
+                raise PortfolioIdentityError(f"{label} has a malformed item")
             key, nested = item
             if type(key) is not str:
                 raise PortfolioIdentityError(f"{label} has a non-string object key")
@@ -176,27 +176,28 @@ def _snapshot_mapping(value: object, label: str) -> dict[str, object]:
     return snapshot
 
 
+def _thaw_frozen_json(value: object, label: str) -> object:
+    if type(value) is MappingProxyType:
+        snapshot = _snapshot_mapping(value, label)
+        return {
+            key: _thaw_frozen_json(nested, f"{label}.{key}")
+            for key, nested in snapshot.items()
+        }
+    if type(value) is _FrozenList:
+        return [_thaw_frozen_json(item, label) for item in value]
+    if value is None or type(value) is bool or type(value) is str or type(value) is int:
+        return value
+    if type(value) is float and math.isfinite(value):
+        return value
+    raise PortfolioIdentityError("identity payload is not the frozen representation")
+
+
 def _freeze_json(value: object) -> object:
     if isinstance(value, dict):
         return MappingProxyType({key: _freeze_json(nested) for key, nested in value.items()})
     if type(value) is list:
         return _FrozenList(_freeze_json(item) for item in value)
     return value
-
-
-def _same_frozen_json(left: object, right: object) -> bool:
-    if type(left) is not type(right):
-        return False
-    if type(left) is MappingProxyType:
-        return left.keys() == right.keys() and all(
-            _same_frozen_json(left[key], right[key]) for key in left
-        )
-    if type(left) is _FrozenList:
-        return len(left) == len(right) and all(
-            _same_frozen_json(left_item, right_item)
-            for left_item, right_item in zip(left, right)
-        )
-    return left == right
 
 
 def _canonical_json_bytes(payload: Mapping[str, object]) -> bytes:
