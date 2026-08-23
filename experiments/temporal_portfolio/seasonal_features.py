@@ -52,6 +52,7 @@ _TRANSFORM_COLUMNS = (
     *_RECENT_COLUMNS,
 )
 _POSITION_COLUMN = "__s1_input_position__"
+_TRAIN_POSITION_COLUMN = "__s1_training_position__"
 _PITCHER_SNAPSHOT_COLUMNS = (
     "pitcher_id",
     "snapshot_pitcher_success_n",
@@ -251,6 +252,101 @@ def transform_s1(rows: pd.DataFrame, state: S1State) -> pd.DataFrame:
     numeric = result.select_dtypes(include="number")
     if not np.isfinite(numeric.to_numpy(dtype="float64")).all():
         raise SeasonalFeatureError("S1 transform produced non-finite features")
+    result.attrs["categorical_columns"] = tuple(categorical)
+    return result
+
+
+def build_training_s1(
+    train: pd.DataFrame, *, valid_year: int
+) -> tuple[S1State, pd.DataFrame]:
+    """Build leakage-safe S1 columns for training rows and the validation state.
+
+    Every non-earliest season is transformed against a snapshot ending in the
+    immediately preceding season.  The earliest season has no eligible labeled
+    history, so it uses an empty snapshot and the neutral binary prior.  The
+    returned state alone is fitted through ``valid_year - 1`` and is intended
+    for validation/inference rows.
+    """
+
+    _validate_valid_year(valid_year)
+    prepared = _validated_frame(
+        train,
+        required=(*_FIT_COLUMNS, *_RECENT_COLUMNS),
+        label="S1 training",
+    )
+    seasons = _validated_seasons(prepared["season"])
+    if not seasons:
+        raise SeasonalFeatureError("S1 training rows are empty")
+    if any(season >= valid_year for season in seasons):
+        raise SeasonalFeatureError("S1 training rows reach validation season")
+    if max(seasons) != valid_year - 1:
+        raise SeasonalFeatureError(
+            "S1 training rows must include the immediate previous season"
+        )
+    _validate_entities(prepared)
+    _validate_numeric_columns(prepared, _SNAPSHOT_NUMERIC_COLUMNS)
+    _validated_target(prepared[TARGET_COLUMN])
+
+    outputs: list[pd.DataFrame] = []
+    unique_years = tuple(sorted(set(seasons)))
+    positions = np.arange(len(prepared), dtype="int64")
+    for season in unique_years:
+        mask = prepared["season"].eq(season).to_numpy()
+        selected = prepared.iloc[np.flatnonzero(mask)]
+        unlabeled = selected.drop(columns=TARGET_COLUMN)
+        prior_rows = prepared.loc[prepared["season"].lt(season)]
+        if prior_rows.empty:
+            snapshot = SeasonalSnapshot(
+                cutoff_year=season - 1,
+                pitcher=pd.DataFrame(columns=_PITCHER_SNAPSHOT_COLUMNS),
+                batter=pd.DataFrame(columns=_BATTER_SNAPSHOT_COLUMNS),
+            )
+            added = _attach_with_snapshot(
+                unlabeled, snapshot=snapshot, prior_rate=0.5
+            )
+        else:
+            if int(prior_rows["season"].max()) != season - 1:
+                raise SeasonalFeatureError(
+                    "S1 training seasons must be contiguous for prior snapshots"
+                )
+            season_state = fit_s1_state(prior_rows, valid_year=season)
+            added = transform_s1(unlabeled, season_state)
+        added[_TRAIN_POSITION_COLUMN] = positions[mask]
+        outputs.append(added)
+
+    combined = pd.concat(outputs, axis=0, ignore_index=True)
+    combined = combined.sort_values(_TRAIN_POSITION_COLUMN, kind="stable")
+    if not np.array_equal(
+        combined[_TRAIN_POSITION_COLUMN].to_numpy(dtype="int64"), positions
+    ):
+        raise SeasonalFeatureError("S1 training composition changed row identity")
+    combined = combined.drop(columns=_TRAIN_POSITION_COLUMN)
+    combined.index = train.index
+    combined.attrs["categorical_columns"] = (
+        "season_pitcher_n_bucket",
+        "season_batter_n_bucket",
+    )
+    return fit_s1_state(prepared, valid_year=valid_year), combined
+
+
+def _attach_with_snapshot(
+    rows: pd.DataFrame, *, snapshot: SeasonalSnapshot, prior_rate: float
+) -> pd.DataFrame:
+    working = rows.copy(deep=True)
+    working[_POSITION_COLUMN] = np.arange(len(working), dtype="int64")
+    try:
+        transformed, categorical = attach_seasonal_features(
+            working, snapshot, prior_rate=prior_rate
+        )
+    except (KeyError, TypeError, ValueError, OverflowError) as error:
+        raise SeasonalFeatureError("S1 cold-start transform failed") from error
+    transformed = transformed.sort_values(_POSITION_COLUMN, kind="stable")
+    transformed.index = rows.index
+    added = [column for column in transformed.columns if column not in working.columns]
+    result = transformed.loc[:, added].copy(deep=True)
+    numeric = result.select_dtypes(include="number")
+    if not np.isfinite(numeric.to_numpy(dtype="float64")).all():
+        raise SeasonalFeatureError("S1 cold-start produced non-finite features")
     result.attrs["categorical_columns"] = tuple(categorical)
     return result
 

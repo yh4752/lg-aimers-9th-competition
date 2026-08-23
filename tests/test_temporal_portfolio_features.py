@@ -14,6 +14,329 @@ from experiments.temporal_portfolio.seasonal_features import (
 )
 
 
+def test_training_s1_is_strictly_past_fitted_per_season() -> None:
+    from experiments.temporal_portfolio.seasonal_features import build_training_s1
+
+    train, _ = _fit_and_valid()
+    state, first = build_training_s1(train, valid_year=2024)
+    mutated = train.copy(deep=True)
+    later = mutated["season"].eq(2023)
+    mutated.loc[later, "control_success"] = 1 - mutated.loc[later, "control_success"]
+    mutated.loc[later, "asof_pitcher_success_rate"] = 0.99
+    replay_state, second = build_training_s1(mutated, valid_year=2024)
+
+    early = train["season"].eq(2022).to_numpy()
+    pd.testing.assert_frame_equal(first.loc[early], second.loc[early])
+    assert state.valid_year == replay_state.valid_year == 2024
+    assert state.snapshot.cutoff_year == replay_state.snapshot.cutoff_year == 2023
+
+
+def test_training_s1_preserves_interleaved_rows_with_duplicate_index() -> None:
+    from experiments.temporal_portfolio.seasonal_features import build_training_s1
+
+    train, _ = _fit_and_valid()
+    reordered = train.iloc[[1, 0, 2]].copy(deep=True)
+    reordered.index = [7, 7, 2]
+
+    _, result = build_training_s1(reordered, valid_year=2024)
+
+    assert result.index.tolist() == [7, 7, 2]
+    assert len(result) == len(reordered)
+    assert result.iloc[0]["season_pitcher_n"] != result.iloc[1]["season_pitcher_n"]
+
+
+def test_portfolio_composition_and_transform_are_row_stable(tmp_path) -> None:
+    from experiments.temporal_portfolio.feature_cache import materialize_fold_cache
+    from experiments.temporal_portfolio.features import (
+        PortfolioFeatureSpec,
+        fit_portfolio_features,
+        transform_portfolio_features,
+    )
+
+    train, valid = _fit_and_valid()
+    valid = valid.assign(row_id=["v0", "v1", "v2"])
+    spec = PortfolioFeatureSpec(("base", "S1"), "dl_standard")
+    state, batch = fit_portfolio_features(
+        train, pd.DataFrame(), spec=spec, valid_year=2024
+    )
+    assert state.spec == spec
+    assert state.history_cutoff_year == 2023
+    assert batch.row_id.tolist() == train["row_id"].astype(str).tolist()
+    assert batch.x_num.dtype == np.float32
+    assert batch.x_cat.dtype == np.int64
+    assert np.isfinite(batch.x_num).all()
+
+    whole = transform_portfolio_features(valid, state)
+    shuffled_rows = valid.iloc[[2, 0, 1]]
+    shuffled = transform_portfolio_features(shuffled_rows, state)
+    by_id = {str(row_id): row for row_id, row in zip(whole.row_id, whole.x_num)}
+    for row_id, row in zip(shuffled.row_id, shuffled.x_num):
+        np.testing.assert_array_equal(row, by_id[str(row_id)])
+
+    cached = materialize_fold_cache(
+        tmp_path / "cache",
+        train=train,
+        valid=valid,
+        history=pd.DataFrame(),
+        spec=spec,
+        valid_year=2024,
+    )
+    assert cached.reused is False
+    replay = materialize_fold_cache(
+        tmp_path / "cache",
+        train=train,
+        valid=valid,
+        history=pd.DataFrame(),
+        spec=spec,
+        valid_year=2024,
+    )
+    assert replay.reused is True
+    assert replay.train.x_num.flags.writeable is False
+    assert replay.valid.x_num.flags.writeable is False
+
+
+def test_portfolio_rejects_invalid_spec_chronology_and_inference_target() -> None:
+    from experiments.temporal_portfolio.features import (
+        PortfolioFeatureError,
+        PortfolioFeatureSpec,
+        fit_portfolio_features,
+        transform_portfolio_features,
+    )
+
+    train, valid = _fit_and_valid()
+    valid = valid.assign(row_id=["v0", "v1", "v2"])
+    with pytest.raises(PortfolioFeatureError, match="base"):
+        fit_portfolio_features(
+            train,
+            pd.DataFrame(),
+            spec=PortfolioFeatureSpec(("S1",), "dl_standard"),
+            valid_year=2024,
+        )
+    with pytest.raises(PortfolioFeatureError, match="tree_native"):
+        fit_portfolio_features(
+            train,
+            pd.DataFrame(),
+            spec=PortfolioFeatureSpec(("base",), "tree_native"),
+            valid_year=2024,
+        )
+    with pytest.raises(PortfolioFeatureError, match="immediate previous season"):
+        fit_portfolio_features(
+            train.loc[train["season"].eq(2022)],
+            pd.DataFrame(),
+            spec=PortfolioFeatureSpec(("base",), "dl_standard"),
+            valid_year=2024,
+        )
+
+    state, _ = fit_portfolio_features(
+        train,
+        pd.DataFrame(),
+        spec=PortfolioFeatureSpec(("base",), "dl_standard"),
+        valid_year=2024,
+        inference_mode=True,
+    )
+    with pytest.raises(PortfolioFeatureError, match="target"):
+        transform_portfolio_features(valid.assign(control_success=0), state)
+
+
+def test_portfolio_spec_normalizes_exact_bundle_order_and_rejects_duplicates() -> None:
+    from experiments.temporal_portfolio.features import (
+        PortfolioFeatureError,
+        PortfolioFeatureSpec,
+        normalize_feature_spec,
+    )
+
+    normalized = normalize_feature_spec(
+        PortfolioFeatureSpec(("base", "M1", "P2", "S1"), "dl_selective_transform")
+    )
+    assert normalized == PortfolioFeatureSpec(
+        ("base", "S1", "P2", "M1"), "dl_selective_transform"
+    )
+    with pytest.raises(PortfolioFeatureError, match="unique"):
+        normalize_feature_spec(
+            PortfolioFeatureSpec(("base", "S1", "S1"), "dl_standard")
+        )
+
+
+def test_portfolio_evaluation_row_is_unchanged_by_other_row_mutation() -> None:
+    from experiments.temporal_portfolio.features import (
+        PortfolioFeatureSpec,
+        fit_portfolio_features,
+        transform_portfolio_features,
+    )
+
+    train, valid = _fit_and_valid()
+    valid = valid.assign(row_id=["v0", "v1", "v2"])
+    state, _ = fit_portfolio_features(
+        train,
+        pd.DataFrame(),
+        spec=PortfolioFeatureSpec(("base", "S1"), "dl_standard"),
+        valid_year=2024,
+    )
+    expected = transform_portfolio_features(valid, state)
+    changed = valid.copy(deep=True)
+    column = changed.columns.get_loc("asof_pitcher_success_rate")
+    changed.iloc[1:, column] = [0.01, 0.99]
+    actual = transform_portfolio_features(changed, state)
+
+    np.testing.assert_array_equal(actual.x_num[0], expected.x_num[0])
+    np.testing.assert_array_equal(actual.x_cat[0], expected.x_cat[0])
+
+
+def test_portfolio_b1_insufficient_mapping_is_explicitly_skippable(monkeypatch) -> None:
+    import experiments.temporal_portfolio.features as feature_module
+    from experiments.temporal_portfolio.features import (
+        PortfolioFeatureError,
+        PortfolioFeatureSpec,
+        fit_portfolio_features,
+    )
+    from experiments.temporal_portfolio.trackman_batter import BatterTrackmanState
+
+    train, _ = _fit_and_valid()
+    fake = object.__new__(BatterTrackmanState)
+    object.__setattr__(fake, "status", "insufficient_mapping")
+    monkeypatch.setattr(feature_module, "fit_batter_trackman", lambda *_a, **_k: fake)
+
+    with pytest.raises(PortfolioFeatureError, match="skippable insufficient_mapping"):
+        fit_portfolio_features(
+            train,
+            pd.DataFrame(),
+            spec=PortfolioFeatureSpec(("base", "B1"), "dl_standard"),
+            valid_year=2024,
+        )
+
+
+@pytest.mark.parametrize("bad_season", [True, "2022", 2022.5])
+def test_portfolio_rejects_non_numeric_or_non_integral_training_season(
+    bad_season,
+) -> None:
+    from experiments.temporal_portfolio.features import (
+        PortfolioFeatureError,
+        PortfolioFeatureSpec,
+        fit_portfolio_features,
+    )
+
+    train, _ = _fit_and_valid()
+    train["season"] = train["season"].astype(object)
+    train.iloc[0, train.columns.get_loc("season")] = bad_season
+    with pytest.raises(PortfolioFeatureError, match="season"):
+        fit_portfolio_features(
+            train,
+            pd.DataFrame(),
+            spec=PortfolioFeatureSpec(("base",), "dl_standard"),
+            valid_year=2024,
+        )
+
+
+def test_portfolio_rejects_string_target_and_non_boolean_inference_flag() -> None:
+    from experiments.temporal_portfolio.features import (
+        PortfolioFeatureError,
+        PortfolioFeatureSpec,
+        fit_portfolio_features,
+    )
+
+    train, _ = _fit_and_valid()
+    string_target = train.copy(deep=True)
+    string_target["control_success"] = string_target["control_success"].astype(str)
+    with pytest.raises(PortfolioFeatureError, match="target"):
+        fit_portfolio_features(
+            string_target,
+            pd.DataFrame(),
+            spec=PortfolioFeatureSpec(("base",), "dl_standard"),
+            valid_year=2024,
+        )
+    with pytest.raises(PortfolioFeatureError, match="inference_mode"):
+        fit_portfolio_features(
+            train,
+            pd.DataFrame(),
+            spec=PortfolioFeatureSpec(("base",), "dl_standard"),
+            valid_year=2024,
+            inference_mode="yes",  # type: ignore[arg-type]
+        )
+
+
+def test_portfolio_cache_detects_tampering_and_input_mismatch(tmp_path) -> None:
+    from experiments.temporal_portfolio.feature_cache import (
+        PortfolioFeatureCacheError,
+        materialize_fold_cache,
+    )
+    from experiments.temporal_portfolio.features import PortfolioFeatureSpec
+
+    train, valid = _fit_and_valid()
+    valid = valid.assign(row_id=["v0", "v1", "v2"])
+    kwargs = dict(
+        train=train,
+        valid=valid,
+        history=pd.DataFrame(),
+        spec=PortfolioFeatureSpec(("base",), "dl_standard"),
+        valid_year=2024,
+    )
+    cached = materialize_fold_cache(tmp_path / "cache", **kwargs)
+    target = cached.root / "train" / "x_num.npy"
+    target.write_bytes(target.read_bytes() + b"tampered")
+    with pytest.raises(PortfolioFeatureCacheError, match="hash"):
+        materialize_fold_cache(tmp_path / "cache", **kwargs)
+
+    other = tmp_path / "other"
+    materialize_fold_cache(other, **kwargs)
+    changed = train.copy(deep=True)
+    changed.loc[changed.index[0], "asof_pitcher_n"] += 1
+    with pytest.raises(PortfolioFeatureCacheError, match="identity"):
+        materialize_fold_cache(other, **{**kwargs, "train": changed})
+
+
+def test_portfolio_cache_hashes_arrays_without_path_read_bytes(
+    tmp_path, monkeypatch
+) -> None:
+    from pathlib import Path
+
+    from experiments.temporal_portfolio.feature_cache import _file_sha256
+
+    path = tmp_path / "array.npy"
+    np.save(path, np.arange(1000, dtype="float32"), allow_pickle=False)
+
+    def forbidden(_self):
+        raise AssertionError("array hashing must stream")
+
+    monkeypatch.setattr(Path, "read_bytes", forbidden)
+    assert len(_file_sha256(path)) == 64
+
+
+def test_portfolio_cache_rejects_hash_consistent_invalid_batch_shape(tmp_path) -> None:
+    import hashlib
+    import json
+
+    from experiments.temporal_portfolio.feature_cache import (
+        PortfolioFeatureCacheError,
+        materialize_fold_cache,
+    )
+    from experiments.temporal_portfolio.features import PortfolioFeatureSpec
+
+    train, valid = _fit_and_valid()
+    valid = valid.assign(row_id=["v0", "v1", "v2"])
+    kwargs = dict(
+        train=train,
+        valid=valid,
+        history=pd.DataFrame(),
+        spec=PortfolioFeatureSpec(("base",), "dl_standard"),
+        valid_year=2024,
+    )
+    cached = materialize_fold_cache(tmp_path / "cache", **kwargs)
+    path = cached.root / "train" / "x_num.npy"
+    np.save(path, np.zeros((1, 1), dtype="float32"), allow_pickle=False)
+    manifest_path = cached.root / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["members"]["train/x_num.npy"] = hashlib.sha256(
+        path.read_bytes()
+    ).hexdigest()
+    manifest_path.write_text(
+        json.dumps(manifest, sort_keys=True, separators=(",", ":")),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(PortfolioFeatureCacheError, match="shape|row count"):
+        materialize_fold_cache(tmp_path / "cache", **kwargs)
+
+
 def _s1_frame() -> pd.DataFrame:
     return pd.DataFrame(
         {
