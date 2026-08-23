@@ -1,0 +1,227 @@
+from __future__ import annotations
+
+import csv
+from hashlib import sha256
+import json
+from pathlib import Path
+import subprocess
+import sys
+from zipfile import ZipFile
+
+import pytest
+
+from experiments.temporal_portfolio.inputs import (
+    PortfolioInputError,
+    prepare_input_archive,
+    verify_official_data,
+)
+
+
+def _write_csv(path: Path, rows: list[list[str]]) -> None:
+    with path.open("w", encoding="utf-8", newline="") as handle:
+        csv.writer(handle).writerows(rows)
+
+
+@pytest.fixture
+def tiny_official_dir(tmp_path: Path) -> Path:
+    root = tmp_path / "official"
+    root.mkdir()
+    _write_csv(
+        root / "train.csv",
+        [["row_id", "feature", "control_success"], ["train-1", "a", "1"], ["train-2", "b", "0"], ["train-3", "c", "1"]],
+    )
+    _write_csv(root / "test.csv", [["row_id", "feature"], ["test-1", "x"], ["test-2", "y"]])
+    _write_csv(root / "trackman_history.csv", [["pitcher_id", "velocity"], ["p1", "90"]])
+    _write_csv(root / "sample_submission.csv", [["row_id", "control_success"], ["test-1", "0.5"], ["test-2", "0.5"]])
+    return root
+
+
+def test_verify_data_requires_exact_official_members(tiny_official_dir: Path) -> None:
+    verified = verify_official_data(tiny_official_dir)
+    assert verified.train.name == "train.csv"
+    assert verified.test.name == "test.csv"
+    assert verified.history.name == "trackman_history.csv"
+    assert verified.train_rows > verified.test_rows > 0
+
+
+def test_prepare_input_archive_contains_data_identity_not_submission(
+    tmp_path: Path, tiny_official_dir: Path
+) -> None:
+    result = prepare_input_archive(tiny_official_dir, tmp_path / "input.zip")
+    with ZipFile(result.path) as archive:
+        assert set(archive.namelist()) == {
+            "manifest.json",
+            "data/train.csv",
+            "data/test.csv",
+            "data/trackman_history.csv",
+            "data/sample_submission.csv",
+        }
+        assert "submission.csv" not in archive.namelist()
+
+
+def test_verify_rejects_unrelated_top_level_member(tiny_official_dir: Path) -> None:
+    (tiny_official_dir / "notes.txt").write_text("not official", encoding="utf-8")
+
+    with pytest.raises(PortfolioInputError, match="top-level members"):
+        verify_official_data(tiny_official_dir)
+
+
+@pytest.mark.parametrize(
+    ("name", "rows", "message"),
+    [
+        ("train.csv", [["row_id", "feature"], ["train-1", "a"]], "control_success"),
+        (
+            "test.csv",
+            [["row_id", "feature", "control_success"], ["test-1", "x", "0"]],
+            "must not contain control_success",
+        ),
+    ],
+)
+def test_verify_enforces_train_test_target_boundary(
+    tiny_official_dir: Path, name: str, rows: list[list[str]], message: str
+) -> None:
+    _write_csv(tiny_official_dir / name, rows)
+
+    with pytest.raises(PortfolioInputError, match=message):
+        verify_official_data(tiny_official_dir)
+
+
+def test_verify_wraps_missing_row_id_as_portfolio_input_error(
+    tiny_official_dir: Path,
+) -> None:
+    _write_csv(tiny_official_dir / "test.csv", [["feature"], ["x"], ["y"]])
+    _write_csv(
+        tiny_official_dir / "sample_submission.csv",
+        [["row_id", "control_success"], ["test-1", "0.5"], ["test-2", "0.5"]],
+    )
+
+    with pytest.raises(PortfolioInputError, match="row_id"):
+        verify_official_data(tiny_official_dir)
+
+
+def test_verify_requires_sample_row_ids_to_match_test(tiny_official_dir: Path) -> None:
+    _write_csv(
+        tiny_official_dir / "sample_submission.csv",
+        [["row_id", "control_success"], ["test-2", "0.5"], ["test-1", "0.5"]],
+    )
+
+    with pytest.raises(PortfolioInputError, match="row_id sequence"):
+        verify_official_data(tiny_official_dir)
+
+
+@pytest.mark.parametrize("name", ["train.csv", "test.csv", "sample_submission.csv"])
+def test_verify_rejects_duplicate_row_id(tiny_official_dir: Path, name: str) -> None:
+    if name == "train.csv":
+        _write_csv(
+            tiny_official_dir / name,
+            [["row_id", "feature", "control_success"], ["same", "a", "1"], ["same", "b", "0"], ["third", "c", "1"]],
+        )
+    elif name == "test.csv":
+        _write_csv(tiny_official_dir / name, [["row_id", "feature"], ["same", "x"], ["same", "y"]])
+        _write_csv(tiny_official_dir / "sample_submission.csv", [["row_id", "control_success"], ["same", "0.5"], ["same", "0.5"]])
+    else:
+        _write_csv(tiny_official_dir / name, [["row_id", "control_success"], ["test-1", "0.5"], ["test-1", "0.5"]])
+
+    with pytest.raises(PortfolioInputError, match="duplicate row_id"):
+        verify_official_data(tiny_official_dir)
+
+
+def test_verify_rejects_malformed_row_and_nonfinite_sample_placeholder(
+    tiny_official_dir: Path,
+) -> None:
+    _write_csv(tiny_official_dir / "trackman_history.csv", [["pitcher_id", "velocity"], ["p1"]])
+    with pytest.raises(PortfolioInputError, match="malformed row"):
+        verify_official_data(tiny_official_dir)
+
+    _write_csv(tiny_official_dir / "trackman_history.csv", [["pitcher_id", "velocity"], ["p1", "90"]])
+    _write_csv(tiny_official_dir / "sample_submission.csv", [["row_id", "control_success"], ["test-1", "nan"], ["test-2", "0.5"]])
+    with pytest.raises(PortfolioInputError, match="finite numeric"):
+        verify_official_data(tiny_official_dir)
+
+
+def test_verify_rejects_symlink_source(tiny_official_dir: Path, tmp_path: Path) -> None:
+    linked = tmp_path / "linked-official"
+    linked.symlink_to(tiny_official_dir, target_is_directory=True)
+
+    with pytest.raises(PortfolioInputError, match="symlink"):
+        verify_official_data(linked)
+
+
+def test_prepare_is_deterministic_and_manifest_binds_exact_members(
+    tmp_path: Path, tiny_official_dir: Path
+) -> None:
+    first = prepare_input_archive(tiny_official_dir, tmp_path / "first.zip")
+    second = prepare_input_archive(tiny_official_dir, tmp_path / "second.zip")
+
+    assert first.sha256 == second.sha256
+    assert first.path.read_bytes() == second.path.read_bytes()
+    assert first.size_bytes == len(first.path.read_bytes())
+    with ZipFile(first.path) as archive:
+        assert archive.namelist() == [
+            "manifest.json",
+            "data/train.csv",
+            "data/test.csv",
+            "data/trackman_history.csv",
+            "data/sample_submission.csv",
+        ]
+        manifest = json.loads(archive.read("manifest.json"))
+        assert manifest["schema_version"] == 1
+        assert manifest["artifact_kind"] == "temporal_portfolio_input_v1"
+        assert manifest["campaign_id"] == "temporal_portfolio_v1"
+        assert manifest["submission_package"] is False
+        assert manifest["train_rows"] == 3
+        assert manifest["test_rows"] == 2
+        assert manifest["contract_sha256"] == sha256(
+            (Path(__file__).parents[1] / "experiments/temporal_portfolio/contract.json").read_bytes()
+        ).hexdigest()
+        for name, evidence in manifest["members"].items():
+            assert isinstance(evidence["size"], int)
+            assert evidence["size"] == archive.getinfo(name).file_size
+            assert evidence["sha256"] == sha256(archive.read(name)).hexdigest()
+
+
+def test_prepare_rejects_existing_output_without_replace(
+    tmp_path: Path, tiny_official_dir: Path
+) -> None:
+    output = tmp_path / "input.zip"
+    output.write_bytes(b"existing")
+
+    with pytest.raises(PortfolioInputError, match="output already exists"):
+        prepare_input_archive(tiny_official_dir, output)
+
+    prepared = prepare_input_archive(tiny_official_dir, output, replace=True)
+    assert prepared.path == output.absolute()
+    assert prepared.path.read_bytes() != b"existing"
+
+
+def test_prepare_detects_source_mutation_after_copy(
+    tmp_path: Path, tiny_official_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import experiments.temporal_portfolio.inputs as module
+
+    original = module._copy_source
+
+    def mutate_after_copy(source: Path, destination: object) -> None:
+        original(source, destination)
+        if source.name == "train.csv":
+            source.write_text(
+                "row_id,feature,control_success\\nchanged,a,1\\nchanged-2,b,0\\nchanged-3,c,1\\n",
+                encoding="utf-8",
+            )
+
+    monkeypatch.setattr(module, "_copy_source", mutate_after_copy)
+    with pytest.raises(PortfolioInputError, match="source changed"):
+        prepare_input_archive(tiny_official_dir, tmp_path / "input.zip")
+
+
+def test_prepare_cli_help() -> None:
+    command = [
+        sys.executable,
+        "tools/prepare_temporal_portfolio_input.py",
+        "--help",
+    ]
+    completed = subprocess.run(command, capture_output=True, text=True, check=False)
+
+    assert completed.returncode == 0
+    assert "--data-dir" in completed.stdout
+    assert "--output" in completed.stdout
