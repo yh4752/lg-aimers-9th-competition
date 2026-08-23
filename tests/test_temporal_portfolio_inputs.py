@@ -487,6 +487,33 @@ def test_archive_verifier_rejects_duplicate_tampered_member(
         module._verify_archive(result.path, manifest, verified)
 
 
+def test_archive_verifier_wraps_corrupt_deflate_payload(
+    tmp_path: Path, tiny_official_dir: Path
+) -> None:
+    import experiments.temporal_portfolio.inputs as module
+
+    result = prepare_input_archive(tiny_official_dir, tmp_path / "input.zip")
+    verified = verify_official_data(tiny_official_dir)
+    manifest = module._canonical_manifest(verified)
+    with ZipFile(result.path) as archive:
+        info = archive.getinfo("data/train.csv")
+    payload = bytearray(result.path.read_bytes())
+    name_size = int.from_bytes(
+        payload[info.header_offset + 26 : info.header_offset + 28], "little"
+    )
+    extra_size = int.from_bytes(
+        payload[info.header_offset + 28 : info.header_offset + 30], "little"
+    )
+    start = info.header_offset + 30 + name_size + extra_size
+    payload[start : start + min(8, info.compress_size)] = b"\xff" * min(
+        8, info.compress_size
+    )
+    result.path.write_bytes(payload)
+
+    with pytest.raises(PortfolioInputError, match="prepared ZIP"):
+        module._verify_archive(result.path, manifest, verified)
+
+
 @pytest.mark.parametrize(
     "name", ["train.csv", "test.csv", "trackman_history.csv", "sample_submission.csv"]
 )

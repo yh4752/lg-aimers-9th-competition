@@ -16,6 +16,7 @@ from tempfile import mkdtemp
 from types import MappingProxyType
 from typing import BinaryIO, Iterator, Mapping
 from zipfile import BadZipFile, ZIP_DEFLATED, ZipFile, ZipInfo
+import zlib
 
 from .contracts import PortfolioContractError, _SEALED_CONTRACT_SHA256, load_contract
 
@@ -441,7 +442,14 @@ def _verify_archive(path: Path, manifest_bytes: bytes, verified: VerifiedOfficia
             source.require_unchanged("prepared staging ZIP")
     except PortfolioInputError:
         raise
-    except (BadZipFile, OSError, KeyError, TypeError, json.JSONDecodeError) as error:
+    except (
+        BadZipFile,
+        OSError,
+        KeyError,
+        TypeError,
+        json.JSONDecodeError,
+        zlib.error,
+    ) as error:
         raise PortfolioInputError(f"cannot verify prepared ZIP: {error}") from error
 
 
