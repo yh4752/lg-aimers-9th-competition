@@ -364,8 +364,8 @@ def _to_batch(
     )
     y = None
     if _TARGET in original:
-        y = pd.to_numeric(original[_TARGET], errors="raise").to_numpy(dtype="float32")
-        if not np.isin(y, (0.0, 1.0)).all():
+        y = pd.to_numeric(original[_TARGET], errors="raise").to_numpy(dtype="int8")
+        if not np.isin(y, (0, 1)).all():
             raise PortfolioFeatureError("target must be binary")
     game_type = (
         original["game_type"]

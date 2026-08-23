@@ -417,7 +417,7 @@ def _validate_loaded_batch(
     if target_required and batch.y is None:
         raise PortfolioFeatureCacheError(f"cached {label} target is missing")
     if batch.y is not None:
-        if batch.y.ndim != 1 or len(batch.y) != count or batch.y.dtype != np.dtype("float32"):
+        if batch.y.ndim != 1 or len(batch.y) != count or batch.y.dtype != np.dtype("int8"):
             raise PortfolioFeatureCacheError(f"cached {label} target shape or dtype differs")
         if not np.isin(batch.y, (0.0, 1.0)).all():
             raise PortfolioFeatureCacheError(f"cached {label} target values differ")

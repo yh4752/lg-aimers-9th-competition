@@ -27,6 +27,7 @@ from experiments.temporal_portfolio.identity import TrainingIdentity
 from experiments.temporal_portfolio.lupi_teacher import TeacherOOF
 from experiments.temporal_portfolio.tabm_training import TemporalTabMAdapter
 from experiments.temporal_portfolio.worker import (
+    WorkerBudgetIncomplete,
     WorkerPublicationError,
     WorkerBackendDispatcher,
     publish_worker_result,
@@ -852,6 +853,64 @@ def test_tabm_checkpoint_traversal_is_rejected(tmp_path: Path) -> None:
             ),
         )
     assert not (output / "worker_result.json").exists()
+
+
+def test_budget_stop_keeps_restartable_checkpoint_without_closing_worker(
+    tmp_path: Path,
+) -> None:
+    job = _tabm_job(expert="tabm")
+
+    def stopped(request, adapter, output_dir, *, backend):
+        del request, adapter, backend
+        root = Path(output_dir)
+        checkpoint = root / "checkpoint.pt"
+        checkpoint.write_bytes(b"checkpoint")
+        (root / "best_checkpoint.pt").write_bytes(b"best")
+        (root / "checkpoint_meta.json").write_text(
+            json.dumps(
+                {
+                    "candidate_id": job.job_id,
+                    "epoch": 0,
+                    "checkpoint": "checkpoint.pt",
+                    "checkpoint_binding": dict(job.train_request.checkpoint_binding),
+                }
+            ),
+            encoding="utf-8",
+        )
+        (root / "progress.jsonl").write_text("{}\n", encoding="utf-8")
+        return SimpleNamespace(
+            predictions=np.array([0.6, 0.4]), checkpoint=checkpoint,
+            best_epoch=0, best_brier=0.24, budget_reached=True,
+        )
+
+    with pytest.raises(WorkerBudgetIncomplete, match="resume"):
+        run_worker(
+            job,
+            tmp_path,
+            backend=WorkerBackendDispatcher(
+                tabm_backend=object(), fit_function=stopped
+            ),
+        )
+    assert not (tmp_path / "worker_result.json").exists()
+
+    def completed(request, adapter, output_dir, *, backend):
+        del request, adapter, backend
+        return SimpleNamespace(
+            predictions=np.array([0.6, 0.4]),
+            checkpoint=Path(output_dir) / "checkpoint.pt",
+            best_epoch=1,
+            best_brier=0.23,
+            budget_reached=False,
+        )
+
+    result = run_worker(
+        job,
+        tmp_path,
+        backend=WorkerBackendDispatcher(
+            tabm_backend=object(), fit_function=completed
+        ),
+    )
+    assert verify_worker_result(result.parent)["status"] == "completed"
 
 
 def _tabm_job(*, expert: str, teacher: TeacherOOF | None = None) -> TemporalTrainingJob:

@@ -31,6 +31,10 @@ class WorkerPublicationError(RuntimeError):
     """Raised when worker output is incomplete, unsafe, or unbound."""
 
 
+class WorkerBudgetIncomplete(RuntimeError):
+    """The last complete epoch is safe, but this worker still needs a resume."""
+
+
 FINAL_WORKER_STATUSES = (
     "completed",
     "budget_inconclusive",
@@ -67,8 +71,9 @@ def run_worker(
     except ValueError as error:
         raise WorkerPublicationError("worker job seal validation failed") from error
     root = _safe_root(output_dir)
-    if any(root.iterdir()):
-        raise WorkerPublicationError("worker output directory must start empty")
+    existing = tuple(root.iterdir())
+    if existing:
+        _validate_restartable_output(root, existing, job)
     dispatcher = backend if type(backend) is WorkerBackendDispatcher else None
 
     if job.expert == "catboost":
@@ -121,6 +126,10 @@ def run_worker(
             teacher_lambda=job.teacher_lambda,
         )
         trained = fit_function(job.train_request, adapter, root, backend=runtime)
+        if getattr(trained, "budget_reached", False) is True:
+            raise WorkerBudgetIncomplete(
+                f"worker {job.job_id} requires resume from its last complete epoch"
+            )
         predictions = _finite_probabilities(
             getattr(trained, "predictions", None), job.valid_rows
         )
@@ -158,6 +167,34 @@ def run_worker(
         if path.is_file() or path.is_symlink()
     )
     return publish_worker_result(root, job, artifacts, status="completed")
+
+
+def _validate_restartable_output(
+    root: Path, existing: tuple[Path, ...], job: TemporalTrainingJob
+) -> None:
+    if job.expert == "catboost":
+        raise WorkerPublicationError("CatBoost worker output directory must start empty")
+    allowed = {
+        "checkpoint.pt",
+        "best_checkpoint.pt",
+        "checkpoint_meta.json",
+        "progress.jsonl",
+    }
+    names = {path.name for path in existing}
+    if not {"checkpoint.pt", "checkpoint_meta.json"}.issubset(names):
+        raise WorkerPublicationError("restartable worker checkpoint is incomplete")
+    if not names.issubset(allowed):
+        raise WorkerPublicationError("restartable worker contains unexpected files")
+    if any(path.is_symlink() or not path.is_file() for path in existing):
+        raise WorkerPublicationError("restartable worker files are unsafe")
+    metadata = _read_json(root / "checkpoint_meta.json", "checkpoint metadata")
+    if (
+        metadata.get("candidate_id") != job.job_id
+        or metadata.get("checkpoint") != "checkpoint.pt"
+        or metadata.get("checkpoint_binding")
+        != dict(job.train_request.checkpoint_binding)
+    ):
+        raise WorkerPublicationError("restartable worker checkpoint binding differs")
 
 
 def publish_worker_result(
