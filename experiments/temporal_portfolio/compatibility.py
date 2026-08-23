@@ -10,6 +10,9 @@ class CompatibilityError(ValueError):
     """Raised when checkpoint and current runtime identities are incompatible."""
 
 
+STATE_SCHEMA_VERSION = 1
+
+
 @dataclass(frozen=True)
 class CheckpointIdentity:
     training_sha256: str
@@ -28,7 +31,21 @@ def validate_runtime(
     *,
     current_training_sha256: str,
     current_runtime_sha256: str,
-    migrations: Mapping[tuple[str, str], int] = COMPATIBLE_RUNTIME_MIGRATIONS,
+) -> None:
+    _validate_runtime_with_migrations(
+        checkpoint,
+        current_training_sha256=current_training_sha256,
+        current_runtime_sha256=current_runtime_sha256,
+        migrations=COMPATIBLE_RUNTIME_MIGRATIONS,
+    )
+
+
+def _validate_runtime_with_migrations(
+    checkpoint: CheckpointIdentity,
+    *,
+    current_training_sha256: str,
+    current_runtime_sha256: str,
+    migrations: Mapping[tuple[str, str], int],
 ) -> None:
     if type(checkpoint) is not CheckpointIdentity:
         raise CompatibilityError("checkpoint identity has an invalid type")
@@ -39,11 +56,13 @@ def validate_runtime(
         raise CompatibilityError("current runtime SHA-256 is invalid")
     if checkpoint.training_sha256 != current_training_sha256:
         raise CompatibilityError("checkpoint training identity differs")
+    if checkpoint.state_schema_version != STATE_SCHEMA_VERSION:
+        raise CompatibilityError("checkpoint state schema version is unsupported")
     migration_snapshot = _snapshot_migrations(migrations)
     if checkpoint.runtime_sha256 == current_runtime_sha256:
         return
     key = (checkpoint.runtime_sha256, current_runtime_sha256)
-    if migration_snapshot.get(key) != checkpoint.state_schema_version:
+    if migration_snapshot.get(key) != STATE_SCHEMA_VERSION:
         raise CompatibilityError(
             "checkpoint runtime differs without an exact tested migration"
         )

@@ -31,6 +31,7 @@ ALLOWED_STATUS = (
 
 _CAMPAIGN_ID = "temporal_portfolio_v1"
 _STAGE_RANK = {stage: rank for rank, stage in enumerate(ALLOWED_STAGE_ORDER)}
+_RETRYABLE_STATUS = frozenset({"budget_inconclusive", "failed"})
 
 
 @dataclass(frozen=True)
@@ -96,21 +97,20 @@ class CampaignState:
         *,
         stage: str,
         status: str,
-        parent_manifest_sha256: str,
-        expected_parent_manifest_sha256: str,
+        verified_parent_manifest_sha256: str,
     ) -> CampaignState:
         _validate_state(self)
         candidate = CampaignState(
             stage,
             status,
             self.sequence + 1,
-            parent_manifest_sha256,
+            verified_parent_manifest_sha256,
             self.bindings,
         )
         validate_transition(
             self,
             candidate,
-            expected_parent_manifest_sha256=expected_parent_manifest_sha256,
+            expected_parent_manifest_sha256=verified_parent_manifest_sha256,
         )
         return candidate
 
@@ -139,8 +139,35 @@ def validate_transition(
         raise PortfolioStateError("state parent differs from the verified manifest")
     if new.sequence != old.sequence + 1:
         raise PortfolioStateError("state sequence must increase by exactly one")
-    if _STAGE_RANK[new.stage] < _STAGE_RANK[old.stage]:
+    if old.status == "rule_blocked":
+        raise PortfolioStateError("rule_blocked state has no successor")
+
+    old_rank = _STAGE_RANK[old.stage]
+    new_rank = _STAGE_RANK[new.stage]
+    if new_rank < old_rank:
         raise PortfolioStateError("state stage moved backward")
+    if old.stage == "fresh":
+        if new.stage != "T1":
+            raise PortfolioStateError("fresh state must enter stage T1")
+        return
+    if new_rank == old_rank:
+        if old.status == "active":
+            return
+        if old.status in _RETRYABLE_STATUS:
+            if new.status != "active":
+                raise PortfolioStateError(
+                    "retryable state must become active before another terminal status"
+                )
+            return
+        if old.status == "completed":
+            if new.status != "completed":
+                raise PortfolioStateError(
+                    "completed state may only remain completed on the same stage"
+                )
+            return
+        raise PortfolioStateError("state status transition is not allowed")
+    if old.status != "completed":
+        raise PortfolioStateError("only a completed state may move to a later stage")
 
 
 def _validate_bindings(value: object) -> None:

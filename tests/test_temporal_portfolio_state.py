@@ -6,8 +6,10 @@ import pytest
 
 from experiments.temporal_portfolio.compatibility import (
     COMPATIBLE_RUNTIME_MIGRATIONS,
+    STATE_SCHEMA_VERSION,
     CheckpointIdentity,
     CompatibilityError,
+    _validate_runtime_with_migrations,
     validate_runtime,
 )
 from experiments.temporal_portfolio.state import (
@@ -91,6 +93,7 @@ def test_allowed_state_values_are_exactly_sealed() -> None:
     assert ALLOWED_STATUS == (
         "fresh", "active", "completed", "budget_inconclusive", "failed", "rule_blocked"
     )
+    assert STATE_SCHEMA_VERSION == 1
 
 
 def test_fresh_state_has_zero_sequence_and_preserves_bindings(bindings: Bindings) -> None:
@@ -105,8 +108,7 @@ def test_state_sequence_and_parent_are_monotonic(bindings: Bindings) -> None:
     next_state = fresh.advance(
         stage="T1",
         status="active",
-        parent_manifest_sha256=SHA_B,
-        expected_parent_manifest_sha256=SHA_B,
+        verified_parent_manifest_sha256=SHA_B,
     )
     assert next_state.sequence == 1
     assert next_state.parent_manifest_sha256 == bindings.input_manifest_sha256
@@ -121,25 +123,148 @@ def test_state_can_progress_within_a_stage_and_skip_forward(bindings: Bindings) 
     active = CampaignState.fresh(bindings).advance(
         stage="T1",
         status="active",
-        parent_manifest_sha256=SHA_B,
-        expected_parent_manifest_sha256=SHA_B,
+        verified_parent_manifest_sha256=SHA_B,
     )
     completed = active.advance(
         stage="T1",
         status="completed",
-        parent_manifest_sha256=SHA_D,
-        expected_parent_manifest_sha256=SHA_D,
+        verified_parent_manifest_sha256=SHA_D,
     )
     skipped = completed.advance(
         stage="T3A",
         status="active",
-        parent_manifest_sha256=SHA_A,
-        expected_parent_manifest_sha256=SHA_A,
+        verified_parent_manifest_sha256=SHA_A,
     )
 
     assert completed.sequence == 2
     assert skipped.stage == "T3A"
     assert skipped.sequence == 3
+
+
+@pytest.mark.parametrize(
+    "status", ("active", "completed", "budget_inconclusive", "failed", "rule_blocked")
+)
+def test_fresh_state_enters_t1_with_active_or_immediate_terminal_status(
+    bindings: Bindings, status: str
+) -> None:
+    state = CampaignState.fresh(bindings).advance(
+        stage="T1",
+        status=status,
+        verified_parent_manifest_sha256=bindings.input_manifest_sha256,
+    )
+
+    assert (state.stage, state.status) == ("T1", status)
+
+
+def test_fresh_state_cannot_skip_t1(bindings: Bindings) -> None:
+    with pytest.raises(PortfolioStateError, match="T1"):
+        CampaignState.fresh(bindings).advance(
+            stage="T2A",
+            status="active",
+            verified_parent_manifest_sha256=bindings.input_manifest_sha256,
+        )
+
+
+@pytest.mark.parametrize(
+    "status", ("active", "completed", "budget_inconclusive", "failed", "rule_blocked")
+)
+def test_active_state_may_stay_active_or_finish_same_stage(
+    bindings: Bindings, status: str
+) -> None:
+    active = CampaignState("T1", "active", 1, SHA_B, bindings)
+
+    successor = active.advance(
+        stage="T1", status=status, verified_parent_manifest_sha256=SHA_C
+    )
+
+    assert successor.status == status
+
+
+@pytest.mark.parametrize("retry_status", ("budget_inconclusive", "failed"))
+def test_inconclusive_or_failed_state_retries_same_stage_before_finishing(
+    bindings: Bindings, retry_status: str
+) -> None:
+    stopped = CampaignState("T2A", retry_status, 2, SHA_B, bindings)
+
+    active = stopped.advance(
+        stage="T2A", status="active", verified_parent_manifest_sha256=SHA_C
+    )
+    completed = active.advance(
+        stage="T2A", status="completed", verified_parent_manifest_sha256=SHA_D
+    )
+
+    assert (active.status, completed.status) == ("active", "completed")
+
+
+@pytest.mark.parametrize("retry_status", ("budget_inconclusive", "failed"))
+@pytest.mark.parametrize(
+    "next_status", ("completed", "budget_inconclusive", "failed", "rule_blocked")
+)
+def test_retryable_state_cannot_jump_directly_to_a_terminal_status(
+    bindings: Bindings, retry_status: str, next_status: str
+) -> None:
+    stopped = CampaignState("T2A", retry_status, 2, SHA_B, bindings)
+
+    with pytest.raises(PortfolioStateError, match="retry"):
+        stopped.advance(
+            stage="T2A",
+            status=next_status,
+            verified_parent_manifest_sha256=SHA_C,
+        )
+
+
+def test_completed_state_may_only_remain_completed_on_same_stage(
+    bindings: Bindings,
+) -> None:
+    completed = CampaignState("T2A", "completed", 2, SHA_B, bindings)
+
+    repeated = completed.advance(
+        stage="T2A", status="completed", verified_parent_manifest_sha256=SHA_C
+    )
+    assert repeated.status == "completed"
+    with pytest.raises(PortfolioStateError, match="completed"):
+        completed.advance(
+            stage="T2A", status="active", verified_parent_manifest_sha256=SHA_C
+        )
+
+
+@pytest.mark.parametrize(
+    "status", ("active", "completed", "budget_inconclusive", "failed", "rule_blocked")
+)
+def test_completed_state_may_advance_to_immediate_outcome(
+    bindings: Bindings, status: str
+) -> None:
+    completed = CampaignState("T1", "completed", 2, SHA_B, bindings)
+
+    successor = completed.advance(
+        stage="T3A", status=status, verified_parent_manifest_sha256=SHA_C
+    )
+
+    assert (successor.stage, successor.status) == ("T3A", status)
+
+
+@pytest.mark.parametrize("status", ("active", "budget_inconclusive", "failed"))
+def test_noncompleted_state_cannot_move_forward(
+    bindings: Bindings, status: str
+) -> None:
+    state = CampaignState("T1", status, 1, SHA_B, bindings)
+
+    with pytest.raises(PortfolioStateError, match="completed"):
+        state.advance(
+            stage="T2A", status="active", verified_parent_manifest_sha256=SHA_C
+        )
+
+
+def test_rule_blocked_state_has_no_successor(bindings: Bindings) -> None:
+    blocked = CampaignState("T1", "rule_blocked", 1, SHA_B, bindings)
+
+    for stage in ("T1", "T2A"):
+        with pytest.raises(PortfolioStateError, match="rule_blocked"):
+            blocked.advance(
+                stage=stage,
+                status="completed",
+                verified_parent_manifest_sha256=SHA_C,
+            )
 
 
 def test_state_rejects_backtracking(bindings: Bindings) -> None:
@@ -149,8 +274,7 @@ def test_state_rejects_backtracking(bindings: Bindings) -> None:
         later.advance(
             stage="T2B",
             status="active",
-            parent_manifest_sha256=SHA_D,
-            expected_parent_manifest_sha256=SHA_D,
+            verified_parent_manifest_sha256=SHA_D,
         )
 
 
@@ -179,15 +303,7 @@ def test_transition_rejects_parent_unrelated_to_verified_manifest(
         fresh.advance(
             stage="T1",
             status="active",
-            parent_manifest_sha256=SHA_C,
-            expected_parent_manifest_sha256=bindings.input_manifest_sha256,
-        )
-    with pytest.raises(PortfolioStateError, match="parent"):
-        fresh.advance(
-            stage="T1",
-            status="active",
-            parent_manifest_sha256=SHA_C,
-            expected_parent_manifest_sha256=SHA_C,
+            verified_parent_manifest_sha256=SHA_C,
         )
 
 
@@ -317,8 +433,7 @@ def test_advance_validates_forged_receiver_before_sequence_arithmetic(
         forged.advance(
             stage="T2A",
             status="active",
-            parent_manifest_sha256=SHA_D,
-            expected_parent_manifest_sha256=SHA_D,
+            verified_parent_manifest_sha256=SHA_D,
         )
 
 
@@ -353,8 +468,7 @@ def test_nonfresh_lineage_represents_all_required_manifest_identity_fields(
     state = CampaignState.fresh(bindings).advance(
         stage="T1",
         status="active",
-        parent_manifest_sha256=SHA_B,
-        expected_parent_manifest_sha256=SHA_B,
+        verified_parent_manifest_sha256=SHA_B,
     )
 
     lineage = state.lineage(checkpoint)
@@ -431,12 +545,6 @@ def test_runtime_same_hash_needs_no_migration() -> None:
         checkpoint,
         current_training_sha256=SHA_A,
         current_runtime_sha256=SHA_B,
-        migrations={},
-    )
-    validate_runtime(
-        checkpoint,
-        current_training_sha256=SHA_A,
-        current_runtime_sha256=SHA_B,
     )
 
 
@@ -448,7 +556,25 @@ def test_runtime_rejects_changed_training_identity_even_when_runtime_matches() -
             checkpoint,
             current_training_sha256=SHA_C,
             current_runtime_sha256=SHA_B,
-            migrations={},
+        )
+
+
+def test_checkpoint_parses_positive_but_production_rejects_unsupported_schema() -> None:
+    checkpoint = CheckpointIdentity(SHA_A, SHA_B, 2)
+
+    assert checkpoint.state_schema_version == 2
+    with pytest.raises(CompatibilityError, match="schema"):
+        validate_runtime(
+            checkpoint,
+            current_training_sha256=SHA_A,
+            current_runtime_sha256=SHA_B,
+        )
+    with pytest.raises(CompatibilityError, match="schema"):
+        _validate_runtime_with_migrations(
+            checkpoint,
+            current_training_sha256=SHA_A,
+            current_runtime_sha256=SHA_C,
+            migrations={(SHA_B, SHA_C): 2},
         )
 
 
@@ -459,9 +585,8 @@ def test_runtime_change_needs_explicit_compatibility() -> None:
             checkpoint,
             current_training_sha256=SHA_A,
             current_runtime_sha256=SHA_C,
-            migrations={},
         )
-    validate_runtime(
+    _validate_runtime_with_migrations(
         checkpoint,
         current_training_sha256=SHA_A,
         current_runtime_sha256=SHA_C,
@@ -482,7 +607,7 @@ def test_runtime_rejects_migration_pair_or_schema_mismatch(
     checkpoint = CheckpointIdentity(SHA_A, SHA_B, 1)
 
     with pytest.raises(CompatibilityError, match="runtime"):
-        validate_runtime(
+        _validate_runtime_with_migrations(
             checkpoint,
             current_training_sha256=SHA_A,
             current_runtime_sha256=SHA_C,
@@ -494,7 +619,7 @@ def test_runtime_snapshots_caller_mapping_exactly_once() -> None:
     checkpoint = CheckpointIdentity(SHA_A, SHA_B, 1)
     migrations = _OneViewMapping((((SHA_B, SHA_C), 1),))
 
-    validate_runtime(
+    _validate_runtime_with_migrations(
         checkpoint,
         current_training_sha256=SHA_A,
         current_runtime_sha256=SHA_C,
@@ -522,7 +647,7 @@ def test_runtime_rejects_invalid_migration_entries(
     checkpoint = CheckpointIdentity(SHA_A, SHA_B, 1)
 
     with pytest.raises(CompatibilityError, match="migration"):
-        validate_runtime(
+        _validate_runtime_with_migrations(
             checkpoint,
             current_training_sha256=SHA_A,
             current_runtime_sha256=SHA_C,
@@ -535,7 +660,7 @@ def test_runtime_rejects_malformed_mapping_items(item: object) -> None:
     checkpoint = CheckpointIdentity(SHA_A, SHA_B, 1)
 
     with pytest.raises(CompatibilityError, match="migration"):
-        validate_runtime(
+        _validate_runtime_with_migrations(
             checkpoint,
             current_training_sha256=SHA_A,
             current_runtime_sha256=SHA_C,
@@ -547,7 +672,7 @@ def test_runtime_rejects_mapping_snapshot_failures() -> None:
     checkpoint = CheckpointIdentity(SHA_A, SHA_B, 1)
 
     with pytest.raises(CompatibilityError, match="snapshot"):
-        validate_runtime(
+        _validate_runtime_with_migrations(
             checkpoint,
             current_training_sha256=SHA_A,
             current_runtime_sha256=SHA_C,
@@ -559,7 +684,7 @@ def test_runtime_validates_migrations_even_when_runtime_matches() -> None:
     checkpoint = CheckpointIdentity(SHA_A, SHA_B, 1)
 
     with pytest.raises(CompatibilityError, match="migration"):
-        validate_runtime(
+        _validate_runtime_with_migrations(
             checkpoint,
             current_training_sha256=SHA_A,
             current_runtime_sha256=SHA_B,
@@ -575,28 +700,30 @@ def test_runtime_rejects_invalid_call_types() -> None:
             object(),
             current_training_sha256=SHA_A,
             current_runtime_sha256=SHA_B,
-            migrations={},
         )
     with pytest.raises(CompatibilityError, match="current training"):
         validate_runtime(
             checkpoint,
             current_training_sha256=b"a" * 64,
             current_runtime_sha256=SHA_B,
-            migrations={},
         )
     with pytest.raises(CompatibilityError, match="current runtime"):
         validate_runtime(
             checkpoint,
             current_training_sha256=SHA_A,
             current_runtime_sha256=b"b" * 64,
-            migrations={},
         )
-    with pytest.raises(CompatibilityError, match="mapping"):
+
+
+def test_public_runtime_validator_does_not_accept_caller_migrations() -> None:
+    checkpoint = CheckpointIdentity(SHA_A, SHA_B, STATE_SCHEMA_VERSION)
+
+    with pytest.raises(TypeError, match="migrations"):
         validate_runtime(
             checkpoint,
             current_training_sha256=SHA_A,
-            current_runtime_sha256=SHA_B,
-            migrations=[],
+            current_runtime_sha256=SHA_C,
+            migrations={(SHA_B, SHA_C): STATE_SCHEMA_VERSION},
         )
 
 
