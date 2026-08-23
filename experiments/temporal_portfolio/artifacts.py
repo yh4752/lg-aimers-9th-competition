@@ -784,12 +784,66 @@ def _preflight_zip_structure(
             raise PortfolioArtifactError(
                 f"{label} central directory offset or size is invalid"
             )
-        if total_entries:
-            source.seek(central_offset)
-            if source.read(4) != b"PK\x01\x02":
+        central_end = central_offset + central_size
+        cursor = central_offset
+        actual_count = 0
+        while cursor < central_end:
+            if central_end - cursor < 46:
                 raise PortfolioArtifactError(
-                    f"{label} central directory signature is invalid"
+                    f"{label} central directory record is truncated"
                 )
+            source.seek(cursor)
+            fixed_header = source.read(46)
+            if len(fixed_header) != 46:
+                raise PortfolioArtifactError(
+                    f"{label} central directory record is truncated"
+                )
+            fields = struct.unpack("<4s6H3L5H2L", fixed_header)
+            if fields[0] != b"PK\x01\x02":
+                raise PortfolioArtifactError(
+                    f"{label} central directory record signature is invalid"
+                )
+            compressed_size = fields[8]
+            uncompressed_size = fields[9]
+            filename_size = fields[10]
+            extra_size = fields[11]
+            comment_size = fields[12]
+            disk_start = fields[13]
+            local_header_offset = fields[16]
+            if (
+                compressed_size == 0xFFFFFFFF
+                or uncompressed_size == 0xFFFFFFFF
+                or disk_start == 0xFFFF
+                or local_header_offset == 0xFFFFFFFF
+            ):
+                raise PortfolioArtifactError(
+                    f"{label} ZIP64 central directory fields are not supported"
+                )
+            if disk_start != 0:
+                raise PortfolioArtifactError(
+                    f"{label} multi-disk central directory records are not supported"
+                )
+            record_end = (
+                cursor + 46 + filename_size + extra_size + comment_size
+            )
+            if record_end > central_end:
+                raise PortfolioArtifactError(
+                    f"{label} central directory record exceeds its declared size"
+                )
+            actual_count += 1
+            if actual_count > _MAX_ZIP_ENTRIES:
+                raise PortfolioArtifactError(
+                    f"{label} ZIP entry count exceeds the limit"
+                )
+            cursor = record_end
+        if cursor != central_end:
+            raise PortfolioArtifactError(
+                f"{label} central directory size is not exactly consumed"
+            )
+        if actual_count != total_entries:
+            raise PortfolioArtifactError(
+                f"{label} central directory count differs from the ZIP end record"
+            )
     finally:
         source.seek(original_offset)
 

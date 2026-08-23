@@ -147,6 +147,12 @@ def _patch_eocd(value: bytes, offset: int, fmt: str, replacement: int) -> bytes:
     return bytes(patched)
 
 
+def _central_directory_offset(value: bytes) -> int:
+    eocd = value.rfind(b"PK\x05\x06")
+    assert eocd >= 0
+    return struct.unpack_from("<L", value, eocd + 16)[0]
+
+
 class _ItemsMapping(Mapping[str, object]):
     def __init__(self, items: list[object]) -> None:
         self._items = items
@@ -569,6 +575,111 @@ def test_nested_zip_is_subject_to_eocd_preflight(tmp_path: Path) -> None:
 
     with pytest.raises(PortfolioArtifactError, match="multi-disk"):
         verify_handoff(forged)
+
+
+@pytest.mark.parametrize("declared_count", [1, 6])
+def test_eocd_preflight_counts_actual_central_records_before_zipfile(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    declared_count: int,
+) -> None:
+    source = write_handoff(tmp_path / "source", _evidence()).path
+    forged_bytes = _patch_eocd(source.read_bytes(), 8, "<H", declared_count)
+    forged_bytes = _patch_eocd(forged_bytes, 10, "<H", declared_count)
+    forged = tmp_path / f"declared-{declared_count}.zip"
+    forged.write_bytes(forged_bytes)
+
+    def forbidden_zipfile(*args, **kwargs):
+        raise AssertionError("ZipFile allocated before central record validation")
+
+    monkeypatch.setattr(artifact_module, "ZipFile", forbidden_zipfile)
+
+    with pytest.raises(PortfolioArtifactError, match="central.*count|entry count"):
+        verify_handoff(forged)
+
+
+def test_eocd_preflight_rejects_central_variable_length_spill_before_zipfile(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = write_handoff(tmp_path / "source", _evidence()).path
+    forged_bytes = bytearray(source.read_bytes())
+    central_offset = _central_directory_offset(forged_bytes)
+    struct.pack_into("<H", forged_bytes, central_offset + 28, 0xFFFF)
+    forged = tmp_path / "length-spill.zip"
+    forged.write_bytes(forged_bytes)
+
+    def forbidden_zipfile(*args, **kwargs):
+        raise AssertionError("ZipFile allocated before central record validation")
+
+    monkeypatch.setattr(artifact_module, "ZipFile", forbidden_zipfile)
+
+    with pytest.raises(PortfolioArtifactError, match="central.*record|central.*size"):
+        verify_handoff(forged)
+
+
+@pytest.mark.parametrize(
+    ("field_offset", "fmt", "sentinel"),
+    [
+        (20, "<L", 0xFFFFFFFF),
+        (24, "<L", 0xFFFFFFFF),
+        (34, "<H", 0xFFFF),
+        (42, "<L", 0xFFFFFFFF),
+    ],
+)
+def test_eocd_preflight_rejects_per_record_zip64_sentinels(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    field_offset: int,
+    fmt: str,
+    sentinel: int,
+) -> None:
+    source = write_handoff(tmp_path / "source", _evidence()).path
+    forged_bytes = bytearray(source.read_bytes())
+    central_offset = _central_directory_offset(forged_bytes)
+    struct.pack_into(fmt, forged_bytes, central_offset + field_offset, sentinel)
+    forged = tmp_path / f"zip64-record-{field_offset}.zip"
+    forged.write_bytes(forged_bytes)
+
+    def forbidden_zipfile(*args, **kwargs):
+        raise AssertionError("ZipFile allocated before central record validation")
+
+    monkeypatch.setattr(artifact_module, "ZipFile", forbidden_zipfile)
+
+    with pytest.raises(PortfolioArtifactError, match="ZIP64"):
+        verify_handoff(forged)
+
+
+def test_eocd_preflight_applies_limit_to_actual_not_only_declared_count(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = write_handoff(tmp_path / "source", _evidence()).path
+    forged_bytes = _patch_eocd(source.read_bytes(), 8, "<H", 4)
+    forged_bytes = _patch_eocd(forged_bytes, 10, "<H", 4)
+    forged = tmp_path / "actual-over-limit.zip"
+    forged.write_bytes(forged_bytes)
+    monkeypatch.setattr(artifact_module, "_MAX_ZIP_ENTRIES", 4)
+
+    def forbidden_zipfile(*args, **kwargs):
+        raise AssertionError("ZipFile allocated before central record validation")
+
+    monkeypatch.setattr(artifact_module, "ZipFile", forbidden_zipfile)
+
+    with pytest.raises(PortfolioArtifactError, match="entry count"):
+        verify_handoff(forged)
+
+
+def test_eocd_preflight_accepts_valid_empty_and_normal_central_directories(
+    tmp_path: Path,
+) -> None:
+    empty = _zip_bytes([])
+    artifact_module._preflight_zip_structure(
+        io.BytesIO(empty), len(empty), "empty fixture"
+    )
+    source = write_handoff(tmp_path / "source", _evidence()).path
+    with source.open("rb") as handle:
+        artifact_module._preflight_zip_structure(
+            handle, source.stat().st_size, "normal fixture"
+        )
 
 
 def test_metadata_size_compressed_size_ratio_and_zero_corner_are_bounded(
