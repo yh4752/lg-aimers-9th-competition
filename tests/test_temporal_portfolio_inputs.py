@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import re
+import errno
 import subprocess
 import sys
 from zipfile import ZipFile
@@ -305,20 +306,20 @@ def test_prepare_rejects_contract_bytes_that_fail_sealed_validation(
         prepare_input_archive(tiny_official_dir, tmp_path / "input.zip")
 
 
-def test_prepare_wraps_mkstemp_failure(
+def test_prepare_wraps_staging_creation_failure(
     tmp_path: Path, tiny_official_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     import experiments.temporal_portfolio.inputs as module
 
-    def broken_mkstemp(**kwargs: object) -> tuple[int, str]:
-        raise OSError("no temporary file")
+    def broken_mkdtemp(**kwargs: object) -> str:
+        raise OSError("no staging directory")
 
-    monkeypatch.setattr(module, "mkstemp", broken_mkstemp)
+    monkeypatch.setattr(module, "mkdtemp", broken_mkdtemp)
     output = tmp_path / "input.zip"
-    with pytest.raises(PortfolioInputError, match="temporary"):
+    with pytest.raises(PortfolioInputError, match="staging"):
         prepare_input_archive(tiny_official_dir, output)
     assert not output.exists()
-    assert not list(tmp_path.glob(".temporal-portfolio-input-*"))
+    assert not list(tmp_path.glob(".temporal-portfolio-stage-*"))
 
 
 @pytest.mark.parametrize(
@@ -486,44 +487,125 @@ def test_archive_verifier_rejects_duplicate_tampered_member(
         module._verify_archive(result.path, manifest, verified)
 
 
-def test_successful_publication_raises_when_owned_temp_unlink_initially_fails(
-    tmp_path: Path, tiny_official_dir: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize(
+    "name", ["train.csv", "test.csv", "trackman_history.csv", "sample_submission.csv"]
+)
+def test_prepare_rejects_output_equal_to_official_source_even_with_replace(
+    tiny_official_dir: Path, name: str
 ) -> None:
-    original = Path.unlink
-    failed_once = False
+    output = tiny_official_dir / name
+    original = output.read_bytes()
 
-    def fail_first_temp_unlink(path: Path, *args: object, **kwargs: object) -> None:
-        nonlocal failed_once
-        if path.name.startswith(".temporal-portfolio-input-") and not failed_once:
-            failed_once = True
-            raise OSError("temporary unlink denied")
-        original(path, *args, **kwargs)
-
-    monkeypatch.setattr(Path, "unlink", fail_first_temp_unlink)
-    output = tmp_path / "input.zip"
-    with pytest.raises(PortfolioInputError, match="remove.*temporary"):
-        prepare_input_archive(tiny_official_dir, output)
-    assert output.is_file()
-    assert not list(tmp_path.glob(".temporal-portfolio-input-*"))
-
-
-def test_replace_candidate_mkstemp_phase_failure_cleans_owned_staging(
-    tmp_path: Path, tiny_official_dir: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    original = Path.unlink
-    failed_once = False
-
-    def fail_candidate_unlink(path: Path, *args: object, **kwargs: object) -> None:
-        nonlocal failed_once
-        if path.name.startswith(".temporal-portfolio-publish-") and not failed_once:
-            failed_once = True
-            raise OSError("candidate unlink denied")
-        original(path, *args, **kwargs)
-
-    monkeypatch.setattr(Path, "unlink", fail_candidate_unlink)
-    output = tmp_path / "input.zip"
-    output.write_bytes(b"original destination")
-    with pytest.raises(PortfolioInputError, match="replacement input archive"):
+    with pytest.raises(PortfolioInputError, match="official data"):
         prepare_input_archive(tiny_official_dir, output, replace=True)
-    assert output.read_bytes() == b"original destination"
-    assert not list(tmp_path.glob(".temporal-portfolio-publish-*"))
+    assert output.read_bytes() == original
+
+
+def test_prepare_rejects_output_nested_inside_official_data_root(
+    tiny_official_dir: Path,
+) -> None:
+    output = tiny_official_dir / "nested" / "input.zip"
+
+    with pytest.raises(PortfolioInputError, match="official data"):
+        prepare_input_archive(tiny_official_dir, output)
+    assert not output.exists()
+
+
+def test_verify_accepts_intermediate_symlink_alias_but_rejects_root_leaf_symlink(
+    tmp_path: Path, tiny_official_dir: Path
+) -> None:
+    alias_parent = tmp_path / "alias-parent"
+    alias_parent.symlink_to(tmp_path, target_is_directory=True)
+    via_intermediate_alias = alias_parent / tiny_official_dir.name
+
+    assert verify_official_data(via_intermediate_alias).root == tiny_official_dir.resolve()
+
+    leaf_alias = tmp_path / "official-leaf-alias"
+    leaf_alias.symlink_to(tiny_official_dir, target_is_directory=True)
+    with pytest.raises(PortfolioInputError, match="symlink"):
+        verify_official_data(leaf_alias)
+
+
+@pytest.mark.parametrize("replace", [False, True])
+def test_post_commit_staging_cleanup_failure_does_not_change_success(
+    tmp_path: Path, tiny_official_dir: Path, monkeypatch: pytest.MonkeyPatch, replace: bool
+) -> None:
+    import experiments.temporal_portfolio.inputs as module
+
+    output = tmp_path / "input.zip"
+    if replace:
+        output.write_bytes(b"old output")
+
+    def fail_cleanup(staging: Path) -> None:
+        raise OSError("cleanup denied")
+
+    monkeypatch.setattr(module, "_cleanup_staging", fail_cleanup)
+    prepared = prepare_input_archive(tiny_official_dir, output, replace=replace)
+    assert prepared.path == output.absolute()
+    with ZipFile(output) as archive:
+        assert archive.namelist()[0] == "manifest.json"
+
+
+def test_no_file_validation_runs_after_atomic_commit(
+    tmp_path: Path, tiny_official_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import experiments.temporal_portfolio.inputs as module
+
+    committed = False
+    original_link = module.os.link
+    original_hash = module.file_sha256
+
+    def mark_commit(*args: object, **kwargs: object) -> None:
+        nonlocal committed
+        original_link(*args, **kwargs)
+        committed = True
+
+    def reject_post_commit_hash(path: Path, **kwargs: object) -> str:
+        if committed:
+            pytest.fail("no file validation may run after publication")
+        return original_hash(path, **kwargs)
+
+    monkeypatch.setattr(module.os, "link", mark_commit)
+    monkeypatch.setattr(module, "file_sha256", reject_post_commit_hash)
+    prepare_input_archive(tiny_official_dir, tmp_path / "input.zip")
+
+
+def test_csv_data_does_not_retain_row_id_tuples_and_still_checks_alignment(
+    tiny_official_dir: Path,
+) -> None:
+    import experiments.temporal_portfolio.inputs as module
+
+    assert "row_ids" not in module._CsvData.__dataclass_fields__
+    _write_csv(
+        tiny_official_dir / "sample_submission.csv",
+        [["row_id", "control_success"], ["test-2", "0.5"], ["test-1", "0.5"]],
+    )
+    with pytest.raises(PortfolioInputError, match="row_id sequence"):
+        verify_official_data(tiny_official_dir)
+
+
+def test_prepare_does_not_call_testzip(
+    tmp_path: Path, tiny_official_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import experiments.temporal_portfolio.inputs as module
+
+    def testzip_must_not_run(self: ZipFile) -> str:
+        pytest.fail("testzip must not run")
+
+    monkeypatch.setattr(module.ZipFile, "testzip", testzip_must_not_run)
+    prepare_input_archive(tiny_official_dir, tmp_path / "input.zip")
+
+
+def test_unsupported_hardlink_fails_before_no_replace_commit(
+    tmp_path: Path, tiny_official_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import experiments.temporal_portfolio.inputs as module
+
+    def unsupported_link(*args: object, **kwargs: object) -> None:
+        raise OSError(errno.ENOTSUP, "hardlink unsupported")
+
+    monkeypatch.setattr(module.os, "link", unsupported_link)
+    output = tmp_path / "input.zip"
+    with pytest.raises(PortfolioInputError, match="publish"):
+        prepare_input_archive(tiny_official_dir, output)
+    assert not output.exists()
