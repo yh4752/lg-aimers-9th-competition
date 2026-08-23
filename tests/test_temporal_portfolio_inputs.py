@@ -2,14 +2,16 @@ from __future__ import annotations
 
 import csv
 from hashlib import sha256
+import io
 import json
 import os
 from pathlib import Path
 import re
 import errno
+import stat
 import subprocess
 import sys
-from zipfile import ZipFile
+from zipfile import ZIP_DEFLATED, ZipFile, ZipInfo
 
 import pytest
 
@@ -18,11 +20,238 @@ from experiments.temporal_portfolio.inputs import (
     prepare_input_archive,
     verify_official_data,
 )
+from experiments.temporal_portfolio.state import CampaignState
 
 
 def _write_csv(path: Path, rows: list[list[str]]) -> None:
     with path.open("w", encoding="utf-8", newline="") as handle:
         csv.writer(handle).writerows(rows)
+
+
+def _prepared_members(path: Path) -> list[tuple[str | ZipInfo, bytes]]:
+    with ZipFile(path) as archive:
+        return [(info.filename, archive.read(info)) for info in archive.infolist()]
+
+
+def _write_prepared_zip(path: Path, members: list[tuple[str | ZipInfo, bytes]]) -> None:
+    with ZipFile(path, "w", compression=ZIP_DEFLATED) as archive:
+        for name, value in members:
+            archive.writestr(name, value)
+
+
+def test_public_prepared_archive_verifier_roundtrips_into_state_bindings(
+    tmp_path: Path, tiny_official_dir: Path
+) -> None:
+    import experiments.temporal_portfolio.inputs as module
+
+    created = prepare_input_archive(tiny_official_dir, tmp_path / "input.zip")
+    verified = module.verify_prepared_input_archive(
+        created.path, expected_archive_sha256=created.sha256
+    )
+
+    assert verified == created
+    assert verified.path == created.path.resolve()
+    assert verified.archive_sha256 == created.sha256
+    assert verified.size_bytes == created.size_bytes
+    assert verified.manifest_sha256 == created.manifest_sha256
+    assert verified.bindings == created.bindings
+    assert verified.bindings.input_manifest_sha256 == verified.manifest_sha256
+    assert verified.train_rows == 3
+    assert verified.test_rows == 2
+    assert set(verified.member_sha256) == {
+        "data/train.csv",
+        "data/test.csv",
+        "data/trackman_history.csv",
+        "data/sample_submission.csv",
+    }
+    assert CampaignState.fresh(verified.bindings).bindings == verified.bindings
+    with pytest.raises(TypeError):
+        verified.member_sha256["data/train.csv"] = "0" * 64
+
+
+@pytest.mark.parametrize("expected", ["0" * 64, "A" * 64, b"0" * 64])
+def test_public_prepared_archive_verifier_requires_exact_lowercase_outer_hash(
+    tmp_path: Path, tiny_official_dir: Path, expected: object
+) -> None:
+    import experiments.temporal_portfolio.inputs as module
+
+    created = prepare_input_archive(tiny_official_dir, tmp_path / "input.zip")
+    with pytest.raises(PortfolioInputError, match="archive SHA-256|expected"):
+        module.verify_prepared_input_archive(
+            created.path, expected_archive_sha256=expected
+        )
+
+
+def test_expected_outer_hash_blocks_self_consistent_forged_prepared_data(
+    tmp_path: Path, tiny_official_dir: Path
+) -> None:
+    import experiments.temporal_portfolio.inputs as module
+
+    created = prepare_input_archive(tiny_official_dir, tmp_path / "input.zip")
+    members = dict(_prepared_members(created.path))
+    members["data/train.csv"] += b"forged-row,x,1\n"
+    manifest = json.loads(members["manifest.json"])
+    manifest["members"]["data/train.csv"] = {
+        "size": len(members["data/train.csv"]),
+        "sha256": sha256(members["data/train.csv"]).hexdigest(),
+    }
+    members["manifest.json"] = json.dumps(
+        manifest, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+    ).encode("utf-8")
+    forged = tmp_path / "forged.zip"
+    _write_prepared_zip(forged, list(members.items()))
+
+    with pytest.raises(PortfolioInputError, match="archive SHA-256"):
+        module.verify_prepared_input_archive(
+            forged, expected_archive_sha256=created.sha256
+        )
+
+
+@pytest.mark.parametrize("attack", ["duplicate", "traversal", "symlink", "metadata_bomb"])
+def test_public_prepared_archive_verifier_rejects_hostile_zip_metadata(
+    tmp_path: Path,
+    tiny_official_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    attack: str,
+) -> None:
+    import experiments.temporal_portfolio.inputs as module
+
+    created = prepare_input_archive(tiny_official_dir, tmp_path / "input.zip")
+    members = _prepared_members(created.path)
+    hostile = tmp_path / f"{attack}.zip"
+    duplicate = False
+    if attack == "duplicate":
+        members.append(("data/train.csv", b"duplicate"))
+        duplicate = True
+    elif attack == "traversal":
+        members[1] = ("../train.csv", members[1][1])
+    elif attack == "symlink":
+        info = ZipInfo("data/train.csv")
+        info.create_system = 3
+        info.external_attr = (stat.S_IFLNK | 0o777) << 16
+        members[1] = (info, b"target")
+    else:
+        monkeypatch.setattr(module, "_MAX_PREPARED_MEMBER_UNCOMPRESSED_BYTES", 1)
+    if duplicate:
+        with pytest.warns(UserWarning, match="Duplicate name"):
+            _write_prepared_zip(hostile, members)
+    else:
+        _write_prepared_zip(hostile, members)
+    expected = sha256(hostile.read_bytes()).hexdigest()
+
+    with pytest.raises(PortfolioInputError, match="member|ZIP|size|path|regular|duplicate"):
+        module.verify_prepared_input_archive(
+            hostile, expected_archive_sha256=expected
+        )
+
+
+@pytest.mark.parametrize("attack", ["corrupt_deflate", "encrypted", "ratio"])
+def test_public_prepared_archive_verifier_rejects_corruption_encryption_and_ratio(
+    tmp_path: Path,
+    tiny_official_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    attack: str,
+) -> None:
+    import experiments.temporal_portfolio.inputs as module
+
+    created = prepare_input_archive(tiny_official_dir, tmp_path / "input.zip")
+    hostile = tmp_path / f"{attack}.zip"
+    if attack == "ratio":
+        members = dict(_prepared_members(created.path))
+        members["data/trackman_history.csv"] = b"x" * 8192
+        manifest = json.loads(members["manifest.json"])
+        manifest["members"]["data/trackman_history.csv"] = {
+            "size": len(members["data/trackman_history.csv"]),
+            "sha256": sha256(members["data/trackman_history.csv"]).hexdigest(),
+        }
+        members["manifest.json"] = json.dumps(
+            manifest, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+        ).encode("utf-8")
+        _write_prepared_zip(hostile, list(members.items()))
+        monkeypatch.setattr(module, "_MAX_PREPARED_COMPRESSION_RATIO", 2.0)
+    else:
+        payload = bytearray(created.path.read_bytes())
+        if attack == "encrypted":
+            central = payload.find(b"PK\x01\x02")
+            assert central >= 0
+            flags = int.from_bytes(payload[central + 8 : central + 10], "little") | 1
+            payload[central + 8 : central + 10] = flags.to_bytes(2, "little")
+        else:
+            with ZipFile(created.path) as archive:
+                info = archive.getinfo("data/train.csv")
+            name_size = int.from_bytes(
+                payload[info.header_offset + 26 : info.header_offset + 28], "little"
+            )
+            extra_size = int.from_bytes(
+                payload[info.header_offset + 28 : info.header_offset + 30], "little"
+            )
+            start = info.header_offset + 30 + name_size + extra_size
+            payload[start : start + min(8, info.compress_size)] = b"\xff" * min(
+                8, info.compress_size
+            )
+        hostile.write_bytes(payload)
+    expected = sha256(hostile.read_bytes()).hexdigest()
+
+    with pytest.raises(PortfolioInputError, match="prepared ZIP|encrypted|ratio"):
+        module.verify_prepared_input_archive(
+            hostile, expected_archive_sha256=expected
+        )
+
+
+@pytest.mark.parametrize("attack", ["noncanonical", "contract", "member_bytes"])
+def test_public_prepared_archive_verifier_rejects_manifest_and_member_tampering(
+    tmp_path: Path,
+    tiny_official_dir: Path,
+    attack: str,
+) -> None:
+    import experiments.temporal_portfolio.inputs as module
+
+    created = prepare_input_archive(tiny_official_dir, tmp_path / "input.zip")
+    members = dict(_prepared_members(created.path))
+    manifest = json.loads(members["manifest.json"])
+    if attack == "noncanonical":
+        members["manifest.json"] = json.dumps(manifest, indent=2).encode("utf-8")
+    elif attack == "contract":
+        manifest["contract_sha256"] = "0" * 64
+        members["manifest.json"] = json.dumps(
+            manifest, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+        ).encode("utf-8")
+    else:
+        members["data/test.csv"] += b"tampered"
+    hostile = tmp_path / f"{attack}.zip"
+    _write_prepared_zip(hostile, list(members.items()))
+    expected = sha256(hostile.read_bytes()).hexdigest()
+
+    with pytest.raises(PortfolioInputError, match="manifest|member evidence|identity"):
+        module.verify_prepared_input_archive(
+            hostile, expected_archive_sha256=expected
+        )
+
+
+def test_public_prepared_archive_preflight_runs_before_zipfile_parsing(
+    tmp_path: Path,
+    tiny_official_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import experiments.temporal_portfolio.inputs as module
+
+    created = prepare_input_archive(tiny_official_dir, tmp_path / "input.zip")
+    payload = bytearray(created.path.read_bytes())
+    eocd = payload.rfind(b"PK\x05\x06")
+    assert eocd >= 0
+    payload[eocd + 8 : eocd + 12] = (4).to_bytes(2, "little") * 2
+    malformed = tmp_path / "malformed-central-count.zip"
+    malformed.write_bytes(payload)
+
+    def forbidden_zipfile(*args: object, **kwargs: object) -> ZipFile:
+        pytest.fail("ZipFile was constructed before structural preflight completed")
+
+    monkeypatch.setattr(module, "ZipFile", forbidden_zipfile)
+    with pytest.raises(PortfolioInputError, match="central directory count"):
+        module.verify_prepared_input_archive(
+            malformed,
+            expected_archive_sha256=sha256(malformed.read_bytes()).hexdigest(),
+        )
 
 
 @pytest.fixture
