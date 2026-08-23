@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+from collections.abc import Iterator, Mapping
 from dataclasses import FrozenInstanceError
 from hashlib import sha256
 import io
+import itertools
 import json
 from pathlib import Path
 import struct
@@ -137,6 +139,33 @@ def _patch_encrypted_flags(value: bytes) -> bytes:
     return bytes(patched)
 
 
+def _patch_eocd(value: bytes, offset: int, fmt: str, replacement: int) -> bytes:
+    patched = bytearray(value)
+    eocd = patched.rfind(b"PK\x05\x06")
+    assert eocd >= 0
+    struct.pack_into(fmt, patched, eocd + offset, replacement)
+    return bytes(patched)
+
+
+class _ItemsMapping(Mapping[str, object]):
+    def __init__(self, items: list[object]) -> None:
+        self._items = items
+        self.items_calls = 0
+
+    def __getitem__(self, key: str) -> object:
+        raise KeyError(key)
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(())
+
+    def __len__(self) -> int:
+        return 0
+
+    def items(self):
+        self.items_calls += 1
+        return iter(self._items)
+
+
 def test_handoff_round_trip_is_deterministic_across_roots(tmp_path: Path) -> None:
     evidence = _evidence()
     first = write_handoff(tmp_path / "a", evidence)
@@ -222,6 +251,68 @@ def test_stage_evidence_and_return_values_are_immutable_snapshots(tmp_path: Path
         output.sha256 = "0" * 64  # type: ignore[misc]
 
 
+def test_stage_evidence_requires_authoritative_state_schema_version() -> None:
+    unsupported = Lineage(
+        "temporal_portfolio_v1",
+        "T1",
+        1,
+        "2" * 64,
+        "3" * 64,
+        2,
+        "4" * 64,
+    )
+
+    with pytest.raises(PortfolioArtifactError, match="schema"):
+        _evidence(lineage=unsupported)
+
+
+@pytest.mark.parametrize(
+    "items",
+    [
+        [("duplicate", 1), ("duplicate", 2)],
+        [["not", "a tuple"]],
+        [("too", "many", "values")],
+        ["not an item pair"],
+    ],
+)
+def test_stage_summary_snapshot_rejects_duplicate_and_malformed_mapping_items(
+    items: list[object],
+) -> None:
+    summary = _ItemsMapping(items)
+
+    with pytest.raises(PortfolioArtifactError, match="duplicate|malformed"):
+        StageEvidence(
+            "T1",
+            _bindings(),
+            _lineage(),
+            {"metrics.json": b"{}"},
+            {"state.json": b"{}"},
+            b"log",
+            summary,
+        )
+    assert summary.items_calls == 1
+
+
+def test_stage_summary_mapping_is_snapshotted_exactly_once(tmp_path: Path) -> None:
+    summary = _ItemsMapping([("score", 1)])
+    evidence = StageEvidence(
+        "T1",
+        _bindings(),
+        _lineage(),
+        {"metrics.json": b"{}"},
+        {"state.json": b"{}"},
+        b"log",
+        summary,
+    )
+    assert summary.items_calls == 1
+
+    output = write_handoff(tmp_path, evidence)
+
+    assert summary.items_calls == 1
+    with ZipFile(output.path) as archive:
+        assert archive.read("stage_summary.json") == b'{"score":1}'
+
+
 def test_bound_file_is_read_safely_and_rejects_changed_source(tmp_path: Path) -> None:
     checkpoint = tmp_path / "checkpoint.bin"
     checkpoint.write_bytes(b"first")
@@ -277,6 +368,46 @@ def test_modified_outer_member_is_rejected(tmp_path: Path) -> None:
     forged.write_bytes(_zip_bytes(list(members.items())))
 
     with pytest.raises(PortfolioArtifactError, match="SHA-256|size"):
+        verify_handoff(forged)
+
+
+@pytest.mark.parametrize(
+    "summary_bytes",
+    [
+        b"[]",
+        b'{\n  "score": 1\n}',
+        b"\xff",
+    ],
+)
+def test_stage_summary_must_be_a_canonical_utf8_json_object(
+    tmp_path: Path, summary_bytes: bytes
+) -> None:
+    source = write_handoff(tmp_path / "source", _evidence()).path
+    forged = _rewrite_outer(
+        source,
+        tmp_path / "forged.zip",
+        replace={"stage_summary.json": summary_bytes},
+    )
+
+    with pytest.raises(PortfolioArtifactError, match="summary|canonical|UTF-8|object"):
+        verify_handoff(forged)
+
+
+def test_manifest_lineage_rejects_unsupported_state_schema_version(
+    tmp_path: Path,
+) -> None:
+    source = write_handoff(tmp_path / "source", _evidence()).path
+
+    def unsupported_schema(manifest: dict[str, object]) -> None:
+        manifest["lineage"]["state_schema_version"] = 2  # type: ignore[index]
+
+    forged = _rewrite_outer(
+        source,
+        tmp_path / "schema-two.zip",
+        manifest_transform=unsupported_schema,
+    )
+
+    with pytest.raises(PortfolioArtifactError, match="schema"):
         verify_handoff(forged)
 
 
@@ -376,6 +507,68 @@ def test_outer_metadata_rejects_encryption_before_read(tmp_path: Path) -> None:
 
     with pytest.raises(PortfolioArtifactError, match="encrypted"):
         verify_handoff(encrypted)
+
+
+@pytest.mark.parametrize(
+    ("offset", "fmt", "replacement", "match"),
+    [
+        (4, "<H", 1, "multi-disk"),
+        (10, "<H", 0xFFFF, "ZIP64"),
+    ],
+)
+def test_eocd_preflight_rejects_multidisk_and_zip64_before_zipfile(
+    tmp_path: Path,
+    offset: int,
+    fmt: str,
+    replacement: int,
+    match: str,
+) -> None:
+    source = write_handoff(tmp_path / "source", _evidence()).path
+    forged = tmp_path / "forged.zip"
+    forged.write_bytes(_patch_eocd(source.read_bytes(), offset, fmt, replacement))
+
+    with pytest.raises(PortfolioArtifactError, match=match):
+        verify_handoff(forged)
+
+
+def test_eocd_preflight_bounds_entry_count_central_bytes_and_offsets(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = write_handoff(tmp_path / "source", _evidence()).path
+    monkeypatch.setattr(artifact_module, "_MAX_ZIP_ENTRIES", 4, raising=False)
+    with pytest.raises(PortfolioArtifactError, match="entry count"):
+        verify_handoff(source)
+
+    monkeypatch.setattr(artifact_module, "_MAX_ZIP_ENTRIES", 100)
+    monkeypatch.setattr(
+        artifact_module, "_MAX_CENTRAL_DIRECTORY_BYTES", 1, raising=False
+    )
+    with pytest.raises(PortfolioArtifactError, match="central directory"):
+        verify_handoff(source)
+
+    monkeypatch.setattr(artifact_module, "_MAX_CENTRAL_DIRECTORY_BYTES", 1024 * 1024)
+    with ZipFile(source) as archive:
+        central_offset = archive.start_dir
+    forged = tmp_path / "outside.zip"
+    forged.write_bytes(
+        _patch_eocd(source.read_bytes(), 16, "<L", central_offset + 1)
+    )
+    with pytest.raises(PortfolioArtifactError, match="central directory"):
+        verify_handoff(forged)
+
+
+def test_nested_zip_is_subject_to_eocd_preflight(tmp_path: Path) -> None:
+    source = write_handoff(tmp_path / "source", _evidence()).path
+    members = _zip_members(source)
+    malformed_review = _patch_eocd(members["review.zip"], 4, "<H", 1)
+    forged = _rewrite_outer(
+        source,
+        tmp_path / "nested-eocd.zip",
+        replace={"review.zip": malformed_review},
+    )
+
+    with pytest.raises(PortfolioArtifactError, match="multi-disk"):
+        verify_handoff(forged)
 
 
 def test_metadata_size_compressed_size_ratio_and_zero_corner_are_bounded(
@@ -600,7 +793,7 @@ def test_discovery_rejects_forks_and_disconnected_parents(tmp_path: Path) -> Non
         discover_handoffs([tmp_path])
 
 
-@pytest.mark.parametrize("conflict", ["bindings", "training", "runtime", "schema"])
+@pytest.mark.parametrize("conflict", ["bindings", "training", "runtime"])
 def test_discovery_rejects_binding_and_lineage_identity_conflicts(
     tmp_path: Path, conflict: str
 ) -> None:
@@ -613,16 +806,6 @@ def test_discovery_rejects_binding_and_lineage_identity_conflicts(
         training="6" * 64 if conflict == "training" else "3" * 64,
         runtime="7" * 64 if conflict == "runtime" else "4" * 64,
     )
-    if conflict == "schema":
-        lineage = Lineage(
-            lineage.campaign_id,
-            lineage.stage,
-            lineage.sequence,
-            lineage.parent_manifest_sha256,
-            lineage.training_sha256,
-            2,
-            lineage.runtime_sha256,
-        )
     write_handoff(tmp_path / "two", _evidence(bindings=bindings, lineage=lineage))
 
     with pytest.raises(PortfolioArtifactError, match="bindings|lineage"):
@@ -705,6 +888,57 @@ def test_discovery_bounds_manifest_bearing_candidate_count(
 
     with pytest.raises(PortfolioArtifactError, match="candidate limit"):
         discover_handoffs([scan])
+
+
+def test_discovery_snapshots_only_root_limit_plus_one(tmp_path: Path) -> None:
+    def too_many_roots():
+        for _ in range(artifact_module._MAX_DISCOVERY_ROOTS + 1):
+            yield tmp_path
+        raise AssertionError("discovery exhausted an arbitrary roots iterable")
+
+    with pytest.raises(PortfolioArtifactError, match="root limit"):
+        discover_handoffs(too_many_roots())
+
+
+def test_discovery_charges_direct_file_root_to_shared_byte_budget(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = write_handoff(tmp_path / "source", _evidence()).path
+    monkeypatch.setattr(
+        artifact_module,
+        "_MAX_DISCOVERY_INSPECTED_BYTES",
+        source.stat().st_size - 1,
+    )
+
+    with pytest.raises(PortfolioArtifactError, match="inspection byte limit"):
+        discover_handoffs([source])
+
+
+def test_discovery_charges_extracted_members_to_shared_byte_budget(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = write_handoff(tmp_path / "source", _evidence()).path
+    extracted = tmp_path / "extracted"
+    extracted.mkdir()
+    with ZipFile(source) as archive:
+        archive.extractall(extracted)
+    total = sum(path.stat().st_size for path in extracted.iterdir())
+    monkeypatch.setattr(
+        artifact_module, "_MAX_DISCOVERY_INSPECTED_BYTES", total - 1
+    )
+
+    with pytest.raises(PortfolioArtifactError, match="inspection byte limit"):
+        discover_handoffs([extracted])
+
+
+def test_discovery_shares_directory_inode_identities_across_roots(
+    tmp_path: Path,
+) -> None:
+    empty = tmp_path / "empty"
+    empty.mkdir()
+
+    with pytest.raises(PortfolioArtifactError, match="directory alias"):
+        discover_handoffs([empty, empty])
 
 
 def test_discovery_preflight_rejects_file_swap_after_directory_stat(

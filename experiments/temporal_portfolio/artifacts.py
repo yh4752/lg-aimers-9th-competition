@@ -11,17 +11,20 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from hashlib import sha256
 import io
+from itertools import islice
 import json
 import math
 import os
 from pathlib import Path, PurePosixPath
 import stat
+import struct
 import tempfile
 from types import MappingProxyType
 from typing import BinaryIO
 from zipfile import BadZipFile, ZIP_DEFLATED, ZipFile, ZipInfo
 import zlib
 
+from .compatibility import STATE_SCHEMA_VERSION
 from .state import ALLOWED_STAGE_ORDER, Bindings, Lineage
 
 
@@ -53,6 +56,8 @@ _MAX_DISCOVERY_ENTRIES = 4096
 _MAX_DISCOVERY_INSPECTED_BYTES = 2 * 1024 * 1024 * 1024
 _MAX_DISCOVERY_CANDIDATES = 128
 _MAX_DISCOVERY_ZIP_MEMBERS = 16384
+_MAX_ZIP_ENTRIES = 16384
+_MAX_CENTRAL_DIRECTORY_BYTES = 64 * 1024 * 1024
 _CHUNK_SIZE = 1024 * 1024
 _SHA256_LENGTH = 64
 
@@ -96,6 +101,8 @@ class StageEvidence:
             raise PortfolioArtifactError("evidence stage differs from its lineage")
         if self.bindings.campaign_id != self.lineage.campaign_id:
             raise PortfolioArtifactError("evidence campaign bindings differ")
+        if self.lineage.state_schema_version != STATE_SCHEMA_VERSION:
+            raise PortfolioArtifactError("evidence state schema version is unsupported")
         if type(self.run_log) is not bytes:
             raise PortfolioArtifactError("run log must be immutable bytes")
         object.__setattr__(
@@ -170,6 +177,7 @@ class _DiscoveryBudget:
     entries: int = 0
     inspected_bytes: int = 0
     candidates: int = 0
+    directory_identities: set[tuple[int, int]] = field(default_factory=set)
 
     def add_entries(self, count: int) -> None:
         self.entries += count
@@ -185,6 +193,12 @@ class _DiscoveryBudget:
         self.candidates += 1
         if self.candidates > _MAX_DISCOVERY_CANDIDATES:
             raise PortfolioArtifactError("discovery candidate limit exceeded")
+
+    def add_directory(self, metadata: os.stat_result) -> None:
+        identity = (metadata.st_dev, metadata.st_ino)
+        if identity in self.directory_identities:
+            raise PortfolioArtifactError("discovery encountered a directory alias")
+        self.directory_identities.add(identity)
 
 
 def _is_sha256(value: object) -> bool:
@@ -231,9 +245,19 @@ def _snapshot_json(value: object, label: str) -> object:
     if isinstance(value, Mapping):
         snapshot: dict[str, object] = {}
         try:
-            for key, item in value.items():
+            items = value.items()
+            for pair in items:
+                if type(pair) is not tuple or len(pair) != 2:
+                    raise PortfolioArtifactError(
+                        f"{label} has a malformed mapping item"
+                    )
+                key, item = pair
                 if type(key) is not str:
                     raise PortfolioArtifactError(f"{label} keys must be strings")
+                if key in snapshot:
+                    raise PortfolioArtifactError(
+                        f"{label} has a duplicate mapping key"
+                    )
                 snapshot[key] = _snapshot_json(item, label)
         except PortfolioArtifactError:
             raise
@@ -581,6 +605,74 @@ def write_handoff(root: str | Path, evidence: StageEvidence) -> HandoffPath:
         raise PortfolioArtifactError("cannot publish temporal portfolio handoff") from error
 
 
+def _preflight_zip_structure(
+    source: BinaryIO, size_bytes: int, label: str
+) -> None:
+    """Bound classic single-disk ZIP structure before ``ZipFile`` allocation."""
+
+    if type(size_bytes) is not int or size_bytes < 22:
+        raise BadZipFile(f"{label} has no ZIP end record")
+    original_offset = source.tell()
+    try:
+        tail_size = min(size_bytes, 22 + 0xFFFF + 20)
+        tail_offset = size_bytes - tail_size
+        source.seek(tail_offset)
+        tail = source.read(tail_size)
+        marker = tail.rfind(b"PK\x05\x06")
+        if marker < 0 or len(tail) - marker < 22:
+            raise BadZipFile(f"{label} has no ZIP end record")
+        eocd_offset = tail_offset + marker
+        (
+            signature,
+            disk_number,
+            central_disk,
+            disk_entries,
+            total_entries,
+            central_size,
+            central_offset,
+            comment_size,
+        ) = struct.unpack_from("<4s4H2LH", tail, marker)
+        if signature != b"PK\x05\x06":
+            raise BadZipFile(f"{label} has no ZIP end record")
+        if eocd_offset + 22 + comment_size != size_bytes:
+            raise BadZipFile(f"{label} ZIP end record is malformed")
+        if (
+            disk_entries == 0xFFFF
+            or total_entries == 0xFFFF
+            or central_size == 0xFFFFFFFF
+            or central_offset == 0xFFFFFFFF
+        ):
+            raise PortfolioArtifactError(f"{label} ZIP64 archives are not supported")
+        if eocd_offset >= 20:
+            source.seek(eocd_offset - 20)
+            if source.read(4) == b"PK\x06\x07":
+                raise PortfolioArtifactError(
+                    f"{label} ZIP64 archives are not supported"
+                )
+        if disk_number != 0 or central_disk != 0 or disk_entries != total_entries:
+            raise PortfolioArtifactError(
+                f"{label} multi-disk ZIP archives are not supported"
+            )
+        if total_entries > _MAX_ZIP_ENTRIES:
+            raise PortfolioArtifactError(f"{label} ZIP entry count exceeds the limit")
+        if central_size > _MAX_CENTRAL_DIRECTORY_BYTES:
+            raise PortfolioArtifactError(
+                f"{label} central directory exceeds the byte limit"
+            )
+        if central_offset + central_size != eocd_offset:
+            raise PortfolioArtifactError(
+                f"{label} central directory offset or size is invalid"
+            )
+        if total_entries:
+            source.seek(central_offset)
+            if source.read(4) != b"PK\x01\x02":
+                raise PortfolioArtifactError(
+                    f"{label} central directory signature is invalid"
+                )
+    finally:
+        source.seek(original_offset)
+
+
 def _inspect_zip_metadata(
     archive: ZipFile,
     *,
@@ -662,7 +754,10 @@ def _read_zip_member(archive: ZipFile, info: ZipInfo, label: str) -> bytes:
 def _decode_manifest(value: bytes, label: str) -> dict[str, object]:
     if len(value) > _MAX_MANIFEST_BYTES:
         raise PortfolioArtifactError(f"{label} manifest exceeds the size limit")
-    parsed = json.loads(value.decode("utf-8"))
+    try:
+        parsed = json.loads(value.decode("utf-8"))
+    except (json.JSONDecodeError, UnicodeError) as error:
+        raise PortfolioArtifactError(f"{label} is not valid UTF-8 JSON") from error
     if type(parsed) is not dict:
         raise PortfolioArtifactError(f"{label} manifest must be an object")
     if value != canonical_json(parsed):
@@ -682,12 +777,6 @@ def _parse_bindings(value: object, label: str) -> Bindings:
         frozenset({"campaign_id", "contract_sha256", "input_manifest_sha256"}),
         f"{label} bindings",
     )
-    if type(mapping["campaign_id"]) is not str:
-        raise PortfolioArtifactError(f"{label} campaign ID type is invalid")
-    if not _is_sha256(mapping["contract_sha256"]):
-        raise PortfolioArtifactError(f"{label} contract SHA-256 is invalid")
-    if not _is_sha256(mapping["input_manifest_sha256"]):
-        raise PortfolioArtifactError(f"{label} input manifest SHA-256 is invalid")
     try:
         return Bindings(
             mapping["campaign_id"],
@@ -714,21 +803,8 @@ def _parse_lineage(value: object, label: str) -> Lineage:
         ),
         f"{label} lineage",
     )
-    if type(mapping["campaign_id"]) is not str or type(mapping["stage"]) is not str:
-        raise PortfolioArtifactError(f"{label} lineage strings have invalid types")
-    if type(mapping["sequence"]) is not int or mapping["sequence"] <= 0:
-        raise PortfolioArtifactError(f"{label} sequence is invalid")
-    if type(mapping["state_schema_version"]) is not int or mapping["state_schema_version"] <= 0:
-        raise PortfolioArtifactError(f"{label} state schema version is invalid")
-    for field_name in (
-        "parent_manifest_sha256",
-        "training_sha256",
-        "runtime_sha256",
-    ):
-        if not _is_sha256(mapping[field_name]):
-            raise PortfolioArtifactError(f"{label} lineage SHA-256 is invalid")
     try:
-        return Lineage(
+        lineage = Lineage(
             mapping["campaign_id"],
             mapping["stage"],
             mapping["sequence"],
@@ -739,6 +815,9 @@ def _parse_lineage(value: object, label: str) -> Lineage:
         )
     except Exception as error:
         raise PortfolioArtifactError(f"{label} lineage is invalid") from error
+    if lineage.state_schema_version != STATE_SCHEMA_VERSION:
+        raise PortfolioArtifactError(f"{label} state schema version is unsupported")
+    return lineage
 
 
 def _parse_member_records(
@@ -788,7 +867,9 @@ def _verify_nested_bytes(
     value: bytes, *, kind: str, bindings: Bindings
 ) -> Mapping[str, str]:
     label = kind.removesuffix("_v1")
-    with ZipFile(io.BytesIO(value), "r") as archive:
+    source = io.BytesIO(value)
+    _preflight_zip_structure(source, len(value), label)
+    with ZipFile(source, "r") as archive:
         infos = _inspect_zip_metadata(
             archive, label=label, required_manifest="manifest.json"
         )
@@ -877,6 +958,7 @@ def _verify_handoff_values(
     resume_members = _verify_nested_bytes(
         payloads["resume.zip"], kind="temporal_resume_v1", bindings=bindings
     )
+    _decode_manifest(payloads["stage_summary.json"], "stage summary")
     return VerifiedHandoff(
         path,
         archive_sha256,
@@ -899,6 +981,9 @@ def _verify_handoff_file(path: Path) -> VerifiedHandoff:
             digest.update(chunk)
         source.require_unchanged()
         source.handle.seek(0)
+        _preflight_zip_structure(
+            source.handle, source.initial_stat.st_size, "handoff"
+        )
         with ZipFile(source.handle, "r") as archive:
             infos = _inspect_zip_metadata(
                 archive,
@@ -980,6 +1065,9 @@ def _zip_declares_handoff_manifest(
                 "discovery archive changed before metadata inspection"
             )
         try:
+            _preflight_zip_structure(
+                source.handle, source.initial_stat.st_size, "discovery archive"
+            )
             with ZipFile(source.handle, "r") as archive:
                 infos = archive.infolist()
                 if len(infos) > _MAX_DISCOVERY_ZIP_MEMBERS:
@@ -1004,6 +1092,7 @@ def _discover_candidates(root: Path, budget: _DiscoveryBudget) -> list[Path]:
     if stat.S_ISLNK(root_stat.st_mode):
         raise PortfolioArtifactError(f"discovery root must not be a symlink: {root}")
     if stat.S_ISREG(root_stat.st_mode):
+        budget.add_inspected_file(root_stat.st_size)
         budget.add_candidate()
         return [absolute]
     if not stat.S_ISDIR(root_stat.st_mode):
@@ -1011,18 +1100,18 @@ def _discover_candidates(root: Path, budget: _DiscoveryBudget) -> list[Path]:
 
     candidates: list[Path] = []
     queue: list[tuple[Path, int]] = [(absolute, 0)]
-    seen_directories: set[tuple[int, int]] = set()
     while queue:
         directory, depth = queue.pop(0)
         directory_stat = directory.lstat()
-        identity = (directory_stat.st_dev, directory_stat.st_ino)
-        if identity in seen_directories:
-            raise PortfolioArtifactError("discovery encountered a directory alias")
-        seen_directories.add(identity)
+        budget.add_directory(directory_stat)
         entries = sorted(os.scandir(directory), key=lambda entry: entry.name)
         budget.add_entries(len(entries))
         names = {entry.name for entry in entries}
         if "handoff_manifest.json" in names:
+            for entry in entries:
+                metadata = entry.stat(follow_symlinks=False)
+                if stat.S_ISREG(metadata.st_mode):
+                    budget.add_inspected_file(metadata.st_size)
             budget.add_candidate()
             candidates.append(directory)
             continue
@@ -1059,7 +1148,7 @@ def discover_handoffs(roots: Iterable[str | Path]) -> tuple[VerifiedHandoff, ...
     try:
         if isinstance(roots, (str, bytes, os.PathLike)):
             raise PortfolioArtifactError("discovery roots must be an iterable of paths")
-        root_snapshot = tuple(roots)
+        root_snapshot = tuple(islice(iter(roots), _MAX_DISCOVERY_ROOTS + 1))
         if not root_snapshot:
             raise PortfolioArtifactError("no discovery roots were provided")
         if len(root_snapshot) > _MAX_DISCOVERY_ROOTS:
