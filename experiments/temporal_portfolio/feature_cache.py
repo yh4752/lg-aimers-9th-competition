@@ -262,6 +262,11 @@ def _state_payload(state: PortfolioFeatureState) -> dict[str, object]:
 
 
 def _state_from_payload(payload: Mapping[str, object]) -> PortfolioFeatureState:
+    inference_mode = payload.get("inference_mode")
+    if type(inference_mode) is not bool:
+        raise PortfolioFeatureCacheError(
+            "cached inference_mode must be an exact bool"
+        )
     spec_payload = payload["spec"]
     spec = PortfolioFeatureSpec(tuple(spec_payload["bundles"]), spec_payload["profile"])
     p = payload["preprocessing"]
@@ -325,7 +330,7 @@ def _state_from_payload(payload: Mapping[str, object]) -> PortfolioFeatureState:
         },
         sources=sources,
         source_hashes={str(k): str(v) for k, v in payload["source_hashes"].items()},
-        inference_mode=bool(payload["inference_mode"]),
+        inference_mode=inference_mode,
     )
 
 

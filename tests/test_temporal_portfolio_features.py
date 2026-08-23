@@ -300,6 +300,31 @@ def test_portfolio_state_recomputes_and_binds_source_hashes() -> None:
         transform_portfolio_features(valid, forged)
 
 
+def test_cached_portfolio_state_rejects_non_boolean_inference_mode() -> None:
+    from experiments.temporal_portfolio.feature_cache import (
+        PortfolioFeatureCacheError,
+        _state_from_payload,
+        _state_payload,
+    )
+    from experiments.temporal_portfolio.features import (
+        PortfolioFeatureSpec,
+        fit_portfolio_features,
+    )
+
+    train, _ = _portfolio_fit_and_valid()
+    state, _ = fit_portfolio_features(
+        train,
+        pd.DataFrame(),
+        spec=PortfolioFeatureSpec(("base",), "dl_standard"),
+        valid_year=2024,
+    )
+    payload = _state_payload(state)
+    payload["inference_mode"] = "yes"
+
+    with pytest.raises(PortfolioFeatureCacheError, match="inference_mode"):
+        _state_from_payload(payload)
+
+
 @pytest.mark.parametrize("bad_season", [True, "2022", 2022.5])
 def test_portfolio_rejects_non_numeric_or_non_integral_training_season(
     bad_season,
