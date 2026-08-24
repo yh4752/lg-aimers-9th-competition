@@ -174,6 +174,7 @@ except Exception as error:
     try:
         from experiments.temporal_portfolio.t2a import build_phase_r_specs
         from experiments.temporal_portfolio.t2a_artifacts import write_t2a_bundles
+        from experiments.temporal_portfolio.t1_artifacts import verify_compact_result
         from experiments.temporal_portfolio.worker import verify_worker_result
         completed, pending = [], []
         roots = sorted((WORK_ROOT / "jobs").glob("t2a__*")) if (WORK_ROOT / "jobs").is_dir() else []
@@ -181,7 +182,12 @@ except Exception as error:
         known.update(path.name for path in roots)
         for job_id in sorted(known):
             try:
-                verify_worker_result(WORK_ROOT / "jobs" / job_id); completed.append(job_id)
+                job_root = WORK_ROOT / "jobs" / job_id
+                if (job_root / "worker_result.json").exists():
+                    verify_worker_result(job_root)
+                else:
+                    verify_compact_result(job_root)
+                completed.append(job_id)
             except Exception: pending.append(job_id)
         decision_sha = __import__("experiments.temporal_portfolio.t1_review", fromlist=["verify_t2a_input"]).verify_t2a_input(prepared).decision_sha256
         emergency_state = WORK_ROOT / "t2a_emergency_state.json"

@@ -157,10 +157,15 @@ def evaluate_feature_candidate(
         "leverage_bucket",
     )
     feature = feature_prediction.assign(valid_year=2024)
+    multi = (
+        fixed_multi
+        if "valid_year" in fixed_multi.columns
+        else fixed_multi.assign(valid_year=2024)
+    )
     aligned = align_oof(
         (
             ("baseline", anchor.loc[:, ("row_id", "valid_year", "target", "probability", *stable)]),
-            ("multi", fixed_multi.loc[:, ("row_id", "valid_year", "target", "probability", *stable)]),
+            ("multi", multi.loc[:, ("row_id", "valid_year", "target", "probability", *stable)]),
             ("feature", feature.loc[:, ("row_id", "valid_year", "target", "probability", *stable)]),
         ),
         segment_columns=stable,

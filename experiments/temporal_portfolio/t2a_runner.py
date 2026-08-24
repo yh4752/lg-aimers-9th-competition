@@ -25,6 +25,7 @@ from .t1_runner import (
     _stop_worker,
     require_two_t4_gpus,
 )
+from .t1_artifacts import verify_compact_result
 from .t2a import (
     T2AError,
     T2AJobSpec,
@@ -349,7 +350,10 @@ def _reference_frames(prepared: VerifiedT2AInput):
 
 
 def _prediction(root: Path) -> pd.DataFrame:
-    verify_worker_result(root)
+    if (root / "worker_result.json").exists():
+        verify_worker_result(root)
+    else:
+        verify_compact_result(root)
     return pd.read_csv(root / "predictions.csv")
 
 

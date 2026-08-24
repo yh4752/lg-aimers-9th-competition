@@ -24,7 +24,7 @@ from experiments.temporal_portfolio.identity import TrainingIdentity
 from experiments.temporal_portfolio.inputs import VerifiedOfficialData
 from experiments.temporal_portfolio.t1_review import VerifiedT2AInput
 from experiments.temporal_portfolio.t1_runner import _input_identity
-from experiments.temporal_portfolio.t2a_runner import run_t2a_stage
+from experiments.temporal_portfolio.t2a_runner import _prediction, run_t2a_stage
 
 
 def _train() -> pd.DataFrame:
@@ -173,6 +173,34 @@ def test_t2a_feature_evaluation_blends_with_fixed_t1_multi_and_beats_anchor() ->
     assert evidence["max_segment_regression"] == 0
 
 
+def test_t2a_feature_evaluation_accepts_worker_multi_prediction_without_valid_year() -> None:
+    target = [0, 1, 0, 1]
+    base = {
+        "row_id": ["a", "b", "c", "d"],
+        "valid_year": [2024] * 4,
+        "target": target,
+        "pitcher_id": [1, 2, 3, 4],
+        "batter_id": [11, 12, 13, 14],
+        "game_type": ["R"] * 4,
+        "pitcher_id_known": ["known"] * 4,
+        "batter_id_known": ["known"] * 4,
+        "trackman_available": ["available"] * 4,
+        "hand_matchup": ["R_R"] * 4,
+        "history_count_bucket": ["high"] * 4,
+        "runner_state": ["empty"] * 4,
+        "leverage_bucket": ["medium"] * 4,
+    }
+    anchor = pd.DataFrame({**base, "probability": [0.4, 0.6, 0.4, 0.6]})
+    multi_worker = pd.DataFrame({**base, "probability": [0.3, 0.7, 0.3, 0.7]}).drop(columns="valid_year")
+    recent_worker = pd.DataFrame({**base, "probability": [0.1, 0.9, 0.1, 0.9]}).drop(columns="valid_year")
+
+    evidence = evaluate_feature_candidate(
+        anchor, multi_worker, recent_worker, bootstrap_repeats=100
+    )
+
+    assert evidence["gain"] > 0
+
+
 def test_t2a_kaggle_cell_is_deterministic_small_and_single_handoff(tmp_path: Path) -> None:
     first = build_t2a_kaggle_cell(tmp_path / "first.py")
     second = build_t2a_kaggle_cell(tmp_path / "second.py")
@@ -182,6 +210,8 @@ def test_t2a_kaggle_cell_is_deterministic_small_and_single_handoff(tmp_path: Pat
     assert first.stat().st_size < 1_000_000
     assert "T2A_HANDOFF_READY" in text
     assert "temporal_t2a_handoff.zip" in text
+    assert "from experiments.temporal_portfolio.t1_artifacts import verify_compact_result" in text
+    assert "verify_compact_result(job_root)" in text
     compile(text, str(first), "exec")
 
 
@@ -282,3 +312,34 @@ def test_t2a_review_and_resume_are_compact_verified_bundles(tmp_path: Path) -> N
     assert manifest["completed"] == [job_id]
     restored = restore_t2a_resume_source(bundles.resume, tmp_path / "restored")
     assert verify_compact_result(restored / "jobs" / job_id)["training_identity_sha256"] == identity
+
+
+def test_t2a_prediction_accepts_restored_compact_result(tmp_path: Path) -> None:
+    root = tmp_path / "restored" / "jobs" / "t2a__r__s1__va2024__s3407"
+    root.mkdir(parents=True)
+    records = {}
+    for name, data in {
+        "predictions.csv": b"row_id,target,probability\na,1,0.8\n",
+        "metrics.json": b"{}",
+        "checkpoint_meta.json": b"{}",
+    }.items():
+        (root / name).write_bytes(data)
+        records[name] = {"size_bytes": len(data), "sha256": sha256(data).hexdigest()}
+    (root / "compact_result.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "job_id": root.name,
+                "status": "completed",
+                "training_identity_sha256": "d" * 64,
+                "members": records,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
+        encoding="utf-8",
+    )
+
+    prediction = _prediction(root)
+
+    assert prediction.loc[0, "probability"] == 0.8
