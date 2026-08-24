@@ -41,6 +41,18 @@ class T2CJobSpec:
     valid_year: int
 
 
+@dataclass(frozen=True)
+class T2CDecision:
+    candidate_id: str
+    status: str
+    reason: str
+    new_seed_weighted_gains: Mapping[int, float]
+    ensemble_weighted_gain: float | None
+    ensemble_latest_gain: float | None
+    ensemble_bootstrap_lower: float | None
+    ensemble_max_segment_regression: float | None
+
+
 NEW_SEEDS = (42, 2026)
 ALL_SEEDS = (3407, 42, 2026)
 VALID_YEARS = (2022, 2023, 2024)
@@ -281,6 +293,167 @@ def evaluate_gated_s1_oof(
             "bootstrap_upper": interval.upper,
             "max_segment_regression": float(maximum),
         }
+    )
+
+
+def decide_t2c(
+    *,
+    seed_evidence: Mapping[int, Mapping[int, Mapping[str, object]]],
+    ensemble: Mapping[str, object],
+) -> T2CDecision:
+    """Return promoted, rejected, or budget_inconclusive from sealed evidence."""
+
+    if not isinstance(seed_evidence, Mapping):
+        return _decision("rejected", "seed evidence is invalid")
+    keys = set(seed_evidence)
+    if not keys.issubset(set(NEW_SEEDS)):
+        return _decision("rejected", "seed evidence contains an unauthorized seed")
+    incomplete = keys != set(NEW_SEEDS)
+    weighted: dict[int, float] = {}
+    row_counts: dict[int, int] = {}
+    for seed in NEW_SEEDS:
+        folds = seed_evidence.get(seed)
+        if folds is None:
+            incomplete = True
+            continue
+        if not isinstance(folds, Mapping):
+            return _decision("rejected", f"seed {seed} evidence is invalid")
+        fold_keys = set(folds)
+        if not fold_keys.issubset(set(VALID_YEARS)):
+            return _decision("rejected", f"seed {seed} evidence has an unauthorized fold")
+        if fold_keys != set(VALID_YEARS):
+            incomplete = True
+        rows: list[int] = []
+        gains: list[float] = []
+        for year in VALID_YEARS:
+            item = folds.get(year)
+            if item is None or (
+                isinstance(item, Mapping) and item.get("status") in {"pending", "failed"}
+            ):
+                incomplete = True
+                continue
+            parsed = _parse_fold(item)
+            if parsed is None:
+                return _decision("rejected", f"seed {seed} fold {year} evidence is invalid")
+            row_count, gain, _ = parsed
+            rows.append(row_count)
+            gains.append(gain)
+        if len(rows) == len(VALID_YEARS):
+            weighted[seed] = float(np.average(gains, weights=rows))
+            row_counts[seed] = sum(rows)
+    if incomplete:
+        return _decision(
+            "budget_inconclusive",
+            "one or more authorized jobs are incomplete",
+            weighted=weighted,
+        )
+    if not isinstance(ensemble, Mapping) or set(ensemble) != {"folds", "combined"}:
+        return _decision("rejected", "ensemble evidence is incomplete", weighted=weighted)
+    folds = ensemble["folds"]
+    combined = ensemble["combined"]
+    if not isinstance(folds, Mapping) or set(folds) != set(VALID_YEARS):
+        return _decision("rejected", "ensemble fold coverage differs", weighted=weighted)
+    ensemble_rows: list[int] = []
+    ensemble_gains: list[float] = []
+    regressions: list[float] = []
+    for year in VALID_YEARS:
+        parsed = _parse_fold(folds[year])
+        if parsed is None:
+            return _decision(
+                "rejected", f"ensemble fold {year} evidence is invalid", weighted=weighted
+            )
+        row_count, gain, regression = parsed
+        if any(
+            int(seed_evidence[seed][year]["rows"]) != row_count for seed in NEW_SEEDS
+        ):
+            return _decision(
+                "rejected", f"ensemble fold {year} row count differs", weighted=weighted
+            )
+        ensemble_rows.append(row_count)
+        ensemble_gains.append(gain)
+        regressions.append(regression)
+    parsed_combined = _parse_combined(combined)
+    if parsed_combined is None:
+        return _decision("rejected", "combined evidence is invalid", weighted=weighted)
+    combined_rows, combined_gain, lower, combined_regression = parsed_combined
+    ensemble_weighted = float(np.average(ensemble_gains, weights=ensemble_rows))
+    if (
+        combined_rows != sum(ensemble_rows)
+        or not np.isclose(combined_gain, ensemble_weighted, rtol=0.0, atol=1e-12)
+    ):
+        return _decision("rejected", "combined evidence contradicts folds", weighted=weighted)
+    latest = ensemble_gains[-1]
+    maximum_regression = max(combined_regression, *regressions)
+    gates = (
+        all(weighted[seed] > 0.0 for seed in NEW_SEEDS),
+        ensemble_weighted >= 0.00005,
+        latest >= 0.00003,
+        lower > 0.0,
+        maximum_regression <= 0.00050,
+        all(gain >= -0.00003 for gain in ensemble_gains),
+    )
+    status = "promoted" if all(gates) else "rejected"
+    reason = "all preregistered gates passed" if status == "promoted" else "one or more preregistered gates failed"
+    return _decision(
+        status,
+        reason,
+        weighted=weighted,
+        ensemble_weighted=ensemble_weighted,
+        latest=latest,
+        lower=lower,
+        regression=maximum_regression,
+    )
+
+
+def _parse_fold(value: object) -> tuple[int, float, float] | None:
+    if not isinstance(value, Mapping) or value.get("status") != "completed":
+        return None
+    rows = value.get("rows")
+    if isinstance(rows, bool) or not isinstance(rows, (int, np.integer)) or int(rows) <= 0:
+        return None
+    try:
+        gain = float(value["gain"])
+        regression = float(value["max_segment_regression"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    if not np.isfinite((gain, regression)).all() or regression < 0.0:
+        return None
+    return int(rows), gain, regression
+
+
+def _parse_combined(value: object) -> tuple[int, float, float, float] | None:
+    parsed = _parse_fold(value)
+    if parsed is None or not isinstance(value, Mapping):
+        return None
+    try:
+        lower = float(value["bootstrap_lower"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    if not np.isfinite(lower):
+        return None
+    rows, gain, regression = parsed
+    return rows, gain, lower, regression
+
+
+def _decision(
+    status: str,
+    reason: str,
+    *,
+    weighted: Mapping[int, float] | None = None,
+    ensemble_weighted: float | None = None,
+    latest: float | None = None,
+    lower: float | None = None,
+    regression: float | None = None,
+) -> T2CDecision:
+    return T2CDecision(
+        CANDIDATE_ID,
+        status,
+        reason,
+        MappingProxyType(dict(weighted or {})),
+        ensemble_weighted,
+        latest,
+        lower,
+        regression,
     )
 
 

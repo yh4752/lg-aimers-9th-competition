@@ -395,3 +395,88 @@ def test_gated_oof_evaluation_returns_paired_brier_evidence() -> None:
     assert evidence["rows"] == 4
     assert evidence["gain"] > 0
     assert evidence["bootstrap_lower"] >= 0
+
+
+def _passing_seed_evidence() -> dict[int, dict[int, dict[str, object]]]:
+    return {
+        seed: {
+            year: {
+                "status": "completed",
+                "rows": 100 + year - 2022,
+                "gain": 0.00010,
+                "max_segment_regression": 0.00010,
+            }
+            for year in YEARS
+        }
+        for seed in (42, 2026)
+    }
+
+
+def _passing_ensemble() -> dict[str, object]:
+    folds = {
+        year: {
+            "status": "completed",
+            "rows": 100 + year - 2022,
+            "gain": 0.00010,
+            "max_segment_regression": 0.00010,
+        }
+        for year in YEARS
+    }
+    return {
+        "folds": folds,
+        "combined": {
+            "status": "completed",
+            "rows": sum(item["rows"] for item in folds.values()),
+            "gain": 0.00010,
+            "bootstrap_lower": 0.00002,
+            "max_segment_regression": 0.00010,
+        },
+    }
+
+
+def test_t2c_promotes_only_complete_reproducible_candidate() -> None:
+    from experiments.temporal_portfolio.t2c import decide_t2c
+
+    decision = decide_t2c(
+        seed_evidence=_passing_seed_evidence(), ensemble=_passing_ensemble()
+    )
+
+    assert decision.status == "promoted"
+    assert decision.candidate_id == "s1_game_type_f_fallback_v1"
+
+
+def test_t2c_rejects_when_one_new_seed_has_nonpositive_weighted_gain() -> None:
+    from experiments.temporal_portfolio.t2c import decide_t2c
+
+    evidence = _passing_seed_evidence()
+    for fold in evidence[42].values():
+        fold["gain"] = 0.0
+
+    assert (
+        decide_t2c(seed_evidence=evidence, ensemble=_passing_ensemble()).status
+        == "rejected"
+    )
+
+
+def test_t2c_marks_incomplete_jobs_budget_inconclusive() -> None:
+    from experiments.temporal_portfolio.t2c import decide_t2c
+
+    evidence = _passing_seed_evidence()
+    evidence[2026][2023] = {"status": "pending"}
+
+    decision = decide_t2c(seed_evidence=evidence, ensemble={})
+
+    assert decision.status == "budget_inconclusive"
+
+
+def test_t2c_rejects_extra_or_contradictory_evidence() -> None:
+    from experiments.temporal_portfolio.t2c import decide_t2c
+
+    evidence = _passing_seed_evidence()
+    evidence[3407] = evidence[42]
+    assert decide_t2c(seed_evidence=evidence, ensemble=_passing_ensemble()).status == "rejected"
+
+    evidence = _passing_seed_evidence()
+    ensemble = _passing_ensemble()
+    ensemble["combined"]["rows"] = 1
+    assert decide_t2c(seed_evidence=evidence, ensemble=ensemble).status == "rejected"
