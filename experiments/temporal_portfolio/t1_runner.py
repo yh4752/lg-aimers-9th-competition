@@ -367,7 +367,7 @@ def require_two_t4_gpus(
     *,
     log_prefix: str = "T1",
 ) -> tuple[str, ...]:
-    if log_prefix not in {"T1", "T2A", "T2B"}:
+    if log_prefix not in {"T1", "T2A", "T2B", "T2C"}:
         raise T1RunnerError("GPU log prefix is invalid")
     names = (probe or _nvidia_gpu_names)()
     if len(names) != 2 or any(name.casefold() != "tesla t4" for name in names):

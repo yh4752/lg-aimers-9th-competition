@@ -170,6 +170,7 @@ def _runtime_archive() -> bytes:
                     "KAGGLE_CELL.py",
                     "T2A_KAGGLE_CELL.py",
                     "T2B_KAGGLE_CELL.py",
+                    "T2C_KAGGLE_CELL.py",
                     "COLAB_RECOVERY_CELL.py",
                 }
                 and path.suffix in {".py", ".json"}

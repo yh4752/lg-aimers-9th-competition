@@ -776,3 +776,28 @@ def test_t2c_collected_evidence_is_canonical_json_serializable(
     )
     assert '"candidate_id":"s1_game_type_f_fallback_v1"' in encoded
     assert '"status":"rejected"' in encoded
+
+
+def test_t2c_kaggle_cell_is_deterministic_small_and_single_handoff(
+    tmp_path: Path,
+) -> None:
+    from experiments.temporal_portfolio.t2c_platform import build_t2c_kaggle_cell
+
+    first = build_t2c_kaggle_cell(tmp_path / "first.py")
+    second = build_t2c_kaggle_cell(tmp_path / "second.py")
+    text = first.read_text(encoding="utf-8")
+
+    assert first.read_bytes() == second.read_bytes()
+    assert first.stat().st_size < 1_000_000
+    assert "files.download" not in text
+    assert "temporal_t2c_handoff.zip" in text
+    assert "temporal_t2c_emergency_handoff.zip" in text
+    compile(text, str(first), "exec")
+
+
+def test_gpu_probe_accepts_t2c_log_prefix() -> None:
+    from experiments.temporal_portfolio.t1_runner import require_two_t4_gpus
+
+    assert require_two_t4_gpus(
+        lambda: ("Tesla T4", "Tesla T4"), log_prefix="T2C"
+    ) == ("Tesla T4", "Tesla T4")
