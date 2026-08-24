@@ -4,10 +4,14 @@ from hashlib import sha256
 import io
 import json
 from pathlib import Path
+from types import SimpleNamespace
 from zipfile import ZIP_DEFLATED, ZipFile
 
+import numpy as np
 import pandas as pd
 import pytest
+
+from experiments.independent_dl.features import FeatureBatch
 
 from experiments.temporal_portfolio.t2c_input import (
     EXPECTED_T2C_MEMBERS,
@@ -223,3 +227,171 @@ def test_t2c_input_rejects_tampered_seed_3407_prediction(tmp_path: Path) -> None
 
     with pytest.raises(T2CInputError, match="member differs"):
         verify_t2c_input(path)
+
+
+def _training_rows() -> pd.DataFrame:
+    rows = []
+    for year in (2019, 2020, 2021, 2022, 2023, 2024):
+        for index in range(4):
+            rows.append(
+                {
+                    "row_id": f"{year}_{index}",
+                    "season": year,
+                    "game_type": "R",
+                    "pitcher_id": 10 + index,
+                    "batter_id": 20 + index,
+                    "pitcher_hand": "R",
+                    "batter_hand": "L" if index % 2 else "R",
+                    "asof_pitcher_n": 10 + index,
+                    "asof_batter_n": 10 + index,
+                    "asof_pitcher_success_rate": 0.5,
+                    "asof_batter_success_rate": 0.5,
+                    "base_state": "empty",
+                    "li": 1.0,
+                    "numeric": float(index),
+                    "control_success": index % 2,
+                }
+            )
+    return pd.DataFrame(rows)
+
+
+def test_t2c_schedule_is_exactly_two_new_seeds_by_three_folds() -> None:
+    from experiments.temporal_portfolio.t2c import build_t2c_specs
+
+    specs = build_t2c_specs()
+
+    assert [(item.seed, item.valid_year) for item in specs] == [
+        (42, 2022),
+        (2026, 2022),
+        (42, 2023),
+        (2026, 2023),
+        (42, 2024),
+        (2026, 2024),
+    ]
+
+
+def test_t2c_materialization_uses_previous_season_and_cutoff_prefix(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from experiments.temporal_portfolio.t2c import T2CJobSpec, materialize_t2c_job
+
+    observed: dict[str, object] = {}
+
+    def materialize(cache_root, *, train, valid, feature_fit_rows, spec, **_kwargs):
+        observed.update(
+            train_seasons=tuple(sorted(train["season"].unique())),
+            context_seasons=tuple(sorted(feature_fit_rows["season"].unique())),
+            valid_seasons=tuple(sorted(valid["season"].unique())),
+            features=spec.bundles,
+        )
+
+        def batch(frame: pd.DataFrame, target: bool) -> FeatureBatch:
+            return FeatureBatch(
+                frame["row_id"].to_numpy(),
+                frame["season"].to_numpy(),
+                frame["game_type"].to_numpy(),
+                np.zeros((len(frame), 2), dtype="float32"),
+                np.zeros((len(frame), 1), dtype="int64"),
+                frame["control_success"].to_numpy(dtype="int8") if target else None,
+            )
+
+        return SimpleNamespace(
+            root=Path(cache_root),
+            train=batch(train, True),
+            valid=batch(valid, True),
+            identity_sha256="e" * 64,
+            state=SimpleNamespace(fitted_sources={}),
+        )
+
+    monkeypatch.setattr(
+        "experiments.temporal_portfolio.t2c.materialize_fold_cache", materialize
+    )
+    job = materialize_t2c_job(
+        T2CJobSpec("t2c__s1__va2022__s42", 42, 2022),
+        data_rows_sha256="a" * 64,
+        parent_sha256="b" * 64,
+        train=_training_rows(),
+        history=pd.DataFrame(),
+        cache_root=tmp_path / "cache",
+    )
+
+    assert observed == {
+        "train_seasons": (2021,),
+        "context_seasons": (2019, 2020, 2021),
+        "valid_seasons": (2022,),
+        "features": ("base", "S1"),
+    }
+    assert tuple(job.training.identity.payload["train_seasons"]) == (2021,)
+    assert tuple(job.training.identity.payload["features"]) == ("base", "S1")
+    job.training.validate_seals()
+
+
+def test_safety_gate_uses_anchor_only_for_exact_game_type_f() -> None:
+    from experiments.temporal_portfolio.t2c import build_gated_s1_oof
+
+    anchor = _oof(2024, (0.40, 0.60, 0.40, 0.60))
+    anchor.loc[2, "game_type"] = "f"
+    multi = anchor.copy(deep=True)
+    multi["probability"] = (0.30, 0.70, 0.30, 0.70)
+    recent = anchor.copy(deep=True)
+    recent["probability"] = (0.10, 0.90, 0.10, 0.90)
+
+    oof = build_gated_s1_oof(anchor, multi, (recent,), valid_year=2024)
+
+    exact_f = oof["game_type"].eq("F")
+    assert oof.loc[exact_f, "candidate"].equals(
+        oof.loc[exact_f, "baseline"]
+    )
+    assert oof.loc[~exact_f, "candidate"].ne(
+        oof.loc[~exact_f, "baseline"]
+    ).any()
+
+
+def test_recent_seed_ensemble_averages_logits_before_multi_blend() -> None:
+    from experiments.temporal_portfolio.t2c import build_gated_s1_oof
+
+    anchor = _oof(2024, (0.45, 0.55, 0.45, 0.55))
+    anchor["game_type"] = ("R", "F", "R", "F")
+    multi = anchor.copy(deep=True)
+    multi["probability"] = (0.25, 0.75, 0.35, 0.65)
+    recent_a = anchor.copy(deep=True)
+    recent_a["probability"] = (0.10, 0.90, 0.20, 0.80)
+    recent_b = anchor.copy(deep=True)
+    recent_b["probability"] = (0.30, 0.70, 0.40, 0.60)
+
+    actual = build_gated_s1_oof(
+        anchor, multi, (recent_a, recent_b), valid_year=2024
+    )
+
+    left = np.asarray(recent_a["probability"], dtype="float64")
+    right = np.asarray(recent_b["probability"], dtype="float64")
+    recent_logit = (
+        np.log(left / (1.0 - left)) + np.log(right / (1.0 - right))
+    ) / 2.0
+    recent_mean = 1.0 / (1.0 + np.exp(-recent_logit))
+    fixed = np.asarray(multi["probability"], dtype="float64")
+    expected_logit = (recent_logit + np.log(fixed / (1.0 - fixed))) / 2.0
+    expected = 1.0 / (1.0 + np.exp(-expected_logit))
+    non_f = ~actual["game_type"].eq("F").to_numpy()
+    np.testing.assert_allclose(actual.loc[non_f, "candidate"], expected[non_f])
+
+
+def test_gated_oof_evaluation_returns_paired_brier_evidence() -> None:
+    from experiments.temporal_portfolio.t2c import (
+        build_gated_s1_oof,
+        evaluate_gated_s1_oof,
+    )
+
+    anchor = _oof(2024, (0.40, 0.60, 0.40, 0.60))
+    multi = anchor.copy(deep=True)
+    multi["probability"] = (0.30, 0.70, 0.30, 0.70)
+    recent = anchor.copy(deep=True)
+    recent["probability"] = (0.05, 0.95, 0.05, 0.95)
+    oof = build_gated_s1_oof(anchor, multi, (recent,), valid_year=2024)
+
+    evidence = evaluate_gated_s1_oof(oof, bootstrap_repeats=50)
+
+    assert evidence["status"] == "completed"
+    assert evidence["rows"] == 4
+    assert evidence["gain"] > 0
+    assert evidence["bootstrap_lower"] >= 0
