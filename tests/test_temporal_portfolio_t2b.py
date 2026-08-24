@@ -743,6 +743,15 @@ def test_t2b_gpu_probe_accepts_exactly_two_t4_devices() -> None:
     ) == ("Tesla T4", "Tesla T4")
 
 
+def test_t2b_stops_new_jobs_twenty_five_minutes_before_deadline() -> None:
+    from experiments.temporal_portfolio.t2b_runner import (
+        _HANDOFF_RESERVE_SECONDS,
+        _STOP_NEW_SECONDS,
+    )
+
+    assert _STOP_NEW_SECONDS + _HANDOFF_RESERVE_SECONDS == 25 * 60
+
+
 def test_t2b_kaggle_cell_is_deterministic_small_and_single_handoff(
     tmp_path: Path,
 ) -> None:
