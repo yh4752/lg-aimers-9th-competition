@@ -765,7 +765,10 @@ def _validate_tabm_model_state(
         "model.output.weight",
         "model.output.bias",
     }
-    optional_keys = {"model.num_module.impl.mask"}
+    optional_keys = {
+        "model.num_module.impl.mask",
+        "model.num_module.impl.single_bin_mask",
+    }
     if not required_keys.issubset(state) or set(state) - required_keys - optional_keys:
         raise RowFeatureProxyError("checkpoint TabM model keys are invalid")
 
@@ -836,6 +839,19 @@ def _validate_tabm_model_state(
         or mask.untyped_storage().nbytes() < mask.numel()
     ):
         raise RowFeatureProxyError("checkpoint TabM embedding mask is invalid")
+    single_bin_mask = state.get("model.num_module.impl.single_bin_mask")
+    if single_bin_mask is not None and (
+        not isinstance(single_bin_mask, torch.Tensor)
+        or single_bin_mask.layout != torch.strided
+        or single_bin_mask.device.type != "cpu"
+        or single_bin_mask.dtype != torch.bool
+        or tuple(single_bin_mask.shape) != (n_num,)
+        or not single_bin_mask.is_contiguous()
+        or single_bin_mask.untyped_storage().nbytes() < single_bin_mask.numel()
+    ):
+        raise RowFeatureProxyError(
+            "checkpoint TabM single-bin embedding mask is invalid"
+        )
 
     parameter_names = [
         "model.num_module.linear0.weight",

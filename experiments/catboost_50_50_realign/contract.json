@@ -1,0 +1,57 @@
+{
+  "schema_version": 1,
+  "campaign_id": "catboost_50_50_realign_v2",
+  "review_only": true,
+  "source_sha256": {
+    "training_input": "43557583fbd78efc0d3d83ab7ad17f701a1bd63f2cd423234d1dbee30006fe00",
+    "stage_c_delivery": "f054e8e819d1053299fef4749a32e923db9136e20fc9c12cda79bbc7ef8c484a",
+    "deployment_resume": "1eef761337e34054973a36fc4b098e278094f5fc7472b2b12240fc6f87be5f9f",
+    "deployment_review": "fc65693aa9439bdbd808fcd29c421c1cfcfcb23abebd1a2c6512109b034641e8",
+    "oof_audit": "0740e5904edd1bad7c4a11c9ca5953e3650e04e8b5b9c3cdc340612ae865409a"
+  },
+  "folds": [[2021, 2022], [2022, 2023], [2023, 2024]],
+  "tabm_weight": "0.50",
+  "tree_prefixes": [4, 8, 12, 16, 20, 24, 28, 32],
+  "tabm": {
+    "capacity": "p2",
+    "k": 32,
+    "width": 512,
+    "blocks": 4,
+    "dropout": 0.1,
+    "num_embedding": "piecewise_linear",
+    "loss": "bce",
+    "scheduler": "plateau",
+    "learning_rate": 0.0006,
+    "seed": 3407,
+    "max_epochs": 40,
+    "min_epochs": 3,
+    "patience": 10
+  },
+  "catboost": {
+    "iterations": 400,
+    "depth": 7,
+    "learning_rate": 0.05,
+    "loss_function": "RMSE",
+    "eval_metric": "RMSE",
+    "border_count": 128,
+    "bootstrap_type": "Bayesian",
+    "bagging_temperature": 1.0,
+    "l2_leaf_reg": 3.0,
+    "model_size_reg": 0.5,
+    "max_ctr_complexity": 1,
+    "random_seed": 42,
+    "task_type": "GPU"
+  },
+  "gates": {
+    "minimum_weighted_gain": "0.00003",
+    "latest_bootstrap_lower_minimum": "0",
+    "maximum_segment_regression": "0.00075"
+  },
+  "selection_tolerance": "1e-12",
+  "bootstrap": {"repeats": 2000, "seed": 3407},
+  "budget": {
+    "session_seconds": 10800,
+    "new_job_guard_seconds": 900,
+    "snapshot_interval_seconds": 300
+  }
+}

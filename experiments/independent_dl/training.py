@@ -319,6 +319,37 @@ def call_adapter_loss(
     )
 
 
+def call_adapter_window_loss(
+    adapter: ModelAdapter,
+    model: object,
+    x_num: object,
+    x_cat: object,
+    y: object,
+    *,
+    row_indices: object,
+    window_indices: object,
+    microbatch_count: int,
+) -> object:
+    method = getattr(adapter, "loss_for_window", None)
+    if method is not None:
+        return method(
+            model,
+            x_num,
+            x_cat,
+            y,
+            row_indices=row_indices,
+            window_indices=window_indices,
+        )
+    return call_adapter_loss(
+        adapter,
+        model,
+        x_num,
+        x_cat,
+        y,
+        row_indices=row_indices,
+    ) / microbatch_count
+
+
 def _positive_integer(value: object, label: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
         raise TrainingContractError(f"{label} must be a positive integer")
@@ -666,6 +697,9 @@ class TorchTrainingBackend:
                     break
                 window = order[window_start : window_start + effective_batch]
                 n_micro = math.ceil(len(window) / micro_batch_size)
+                window_indices = torch.as_tensor(
+                    window, dtype=torch.long, device=device
+                )
                 optimizer.zero_grad(set_to_none=True)
                 window_loss = None
                 for start in range(0, len(window), micro_batch_size):
@@ -691,14 +725,16 @@ class TorchTrainingBackend:
                     with torch.autocast(
                         device_type="cuda", dtype=torch.float16, enabled=amp_enabled
                     ):
-                        loss = call_adapter_loss(
+                        loss = call_adapter_window_loss(
                             adapter,
                             model,
                             x_num,
                             x_cat,
                             y,
                             row_indices=row_indices,
-                        ) / n_micro
+                            window_indices=window_indices,
+                            microbatch_count=n_micro,
+                        )
                     scaler.scale(loss).backward()
                     detached_loss = loss.detach()
                     window_loss = (
