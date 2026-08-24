@@ -97,10 +97,11 @@ class _MultiprocessingHandle:
 class ForkLauncher:
     """Launch a materialized job with copy-on-write arrays on one visible GPU."""
 
-    def __init__(self) -> None:
+    def __init__(self, worker_entry=None) -> None:
         if "fork" not in multiprocessing.get_all_start_methods():
             raise T1RunnerError("T1 GPU workers require a Linux fork runtime")
         self._context = multiprocessing.get_context("fork")
+        self._worker_entry = _worker_entry if worker_entry is None else worker_entry
 
     def start(
         self,
@@ -111,7 +112,7 @@ class ForkLauncher:
         deadline: float,
     ) -> ProcessHandle:
         process = self._context.Process(
-            target=_worker_entry,
+            target=self._worker_entry,
             args=(materialized, output_dir, gpu, deadline),
             daemon=False,
         )

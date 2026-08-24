@@ -166,7 +166,11 @@ def _runtime_archive() -> bytes:
                 path.is_file()
                 and not path.is_symlink()
                 and "__pycache__" not in path.parts
-                and path.name not in {"KAGGLE_CELL.py", "COLAB_RECOVERY_CELL.py"}
+                and path.name not in {
+                    "KAGGLE_CELL.py",
+                    "T2A_KAGGLE_CELL.py",
+                    "COLAB_RECOVERY_CELL.py",
+                }
                 and path.suffix in {".py", ".json"}
             ):
                 members.append((path.relative_to(root).as_posix(), path.read_bytes()))
