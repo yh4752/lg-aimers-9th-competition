@@ -49,9 +49,12 @@ def artifact_kind(path):
     try:
         if path.is_file() and path.suffix.casefold() == ".zip":
             with ZipFile(path) as archive:
-                return json.loads(archive.read("manifest.json")).get("artifact_kind")
+                name = "manifest.json" if "manifest.json" in archive.namelist() else "handoff_manifest.json"
+                return json.loads(archive.read(name)).get("artifact_kind")
         if path.is_dir() and (path / "manifest.json").is_file():
             return json.loads((path / "manifest.json").read_text()).get("artifact_kind")
+        if path.is_dir() and (path / "handoff_manifest.json").is_file():
+            return json.loads((path / "handoff_manifest.json").read_text()).get("artifact_kind")
     except Exception: return None
     return None
 
@@ -83,6 +86,28 @@ def normalize_input(path):
     os.replace(destination.with_suffix(".zip.tmp"), destination)
     return destination
 
+def find_resume():
+    direct = find_kind("temporal_t2a_resume_v1", required=False)
+    handoffs = [path for path in sorted(INPUT_ROOT.rglob("*")) if artifact_kind(path) == "temporal_t2a_handoff_v1"]
+    nested = {path for parent in handoffs if parent.is_dir() for path in handoffs if path != parent and parent in path.parents}
+    handoffs = [path for path in handoffs if path not in nested]
+    if direct is not None and handoffs:
+        if any(handoff.is_dir() and handoff in direct.parents for handoff in handoffs):
+            return direct
+        raise RuntimeError("T2A_resume_sources_are_ambiguous")
+    if len(handoffs) > 1:
+        raise RuntimeError(f"temporal_t2a_handoff_candidate_count_must_be_0_or_1 found={len(handoffs)}")
+    if direct is not None or not handoffs:
+        return direct
+    handoff = handoffs[0]
+    if handoff.is_dir():
+        candidate = handoff / "resume.zip"
+        if not candidate.is_file(): raise RuntimeError("T2A_handoff_resume_is_missing")
+        return candidate
+    destination = WORK_ROOT / "resume_from_handoff.zip"
+    with ZipFile(handoff) as archive: destination.write_bytes(archive.read("resume.zip"))
+    return destination
+
 def handoff(review, resume, state, destination):
     members = {"review.zip": Path(review).read_bytes(), "resume.zip": Path(resume).read_bytes(), "run.log": LOG_PATH.read_bytes(), "stage_summary.json": Path(state).read_bytes()}
     manifest = {name: {"size_bytes": len(data), "sha256": __import__("hashlib").sha256(data).hexdigest()} for name, data in sorted(members.items())}
@@ -108,7 +133,7 @@ try:
 
     data_root = find_data_root()
     prepared = normalize_input(find_kind("temporal_t2a_input_v1", required=True))
-    resume = find_kind("temporal_t2a_resume_v1", required=False)
+    resume = find_resume()
     verified = verify_official_data(data_root)
     if resume is not None and not ((WORK_ROOT / "jobs").is_dir() and any((WORK_ROOT / "jobs").iterdir())):
         restore_t2a_resume_source(resume, WORK_ROOT)
