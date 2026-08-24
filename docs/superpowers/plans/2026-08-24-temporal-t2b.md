@@ -54,7 +54,7 @@ class VerifiedT2BInput:
 
 
 def prepare_t2b_input(t1_review: str | Path, t2a_handoff: str | Path, output: str | Path) -> Path:
-    """Verify both parent artifacts and publish the seven-member T2-B input."""
+    """Verify both parent artifacts and publish the nine-member T2-B input."""
 
 
 def verify_t2b_input(path: str | Path) -> VerifiedT2BInput:
