@@ -54,6 +54,7 @@ _MEMBERS = {
     "t2a_decision.json",
     *(f"t1_anchor_{year}.csv" for year in _YEARS),
     *(f"t1_multi_{year}.csv" for year in _YEARS),
+    *(f"t2a_recent_{bundle.casefold()}_2024.csv" for bundle in _PROMOTED),
 }
 _EXPECTED_COLUMNS = (
     "row_id",
@@ -77,6 +78,18 @@ def prepare_t2b_input(
         "t1_decision.json": _json_bytes(_decision_payload(decision)),
         "t2a_decision.json": _json_bytes(t2a),
     }
+    with ZipFile(Path(t2a_handoff)) as handoff:
+        with ZipFile(io.BytesIO(handoff.read("review.zip"))) as review:
+            for bundle in _PROMOTED:
+                job_id = f"t2a__r__{bundle.casefold()}__va2024__s3407"
+                frame = pd.read_csv(
+                    io.BytesIO(review.read(f"jobs/{job_id}/predictions.csv"))
+                )
+                if "valid_year" not in frame:
+                    frame.insert(1, "valid_year", 2024)
+                archive_members[
+                    f"t2a_recent_{bundle.casefold()}_2024.csv"
+                ] = frame.loc[:, _EXPECTED_COLUMNS].to_csv(index=False).encode("utf-8")
     with ZipFile(Path(t1_review)) as archive:
         decay_id = str(decision.decay).replace(".", "p")
         for year in _YEARS:
@@ -215,6 +228,17 @@ def verify_t2b_input(path: str | Path) -> VerifiedT2BInput:
                 )
                 if not first.loc[:, columns].equals(second.loc[:, columns]):
                     raise T2BInputError(f"T2-B paired OOF evidence differs: {year}")
+                if year == 2024:
+                    for bundle in _PROMOTED:
+                        recent = _read_oof(
+                            archive,
+                            f"t2a_recent_{bundle.casefold()}_2024.csv",
+                            year,
+                        )
+                        if not first.loc[:, columns].equals(recent.loc[:, columns]):
+                            raise T2BInputError(
+                                f"T2-B T2-A paired OOF evidence differs: {bundle}"
+                            )
             return VerifiedT2BInput(
                 source.resolve(),
                 _file_sha256(source),
@@ -232,7 +256,12 @@ def verify_t2b_input(path: str | Path) -> VerifiedT2BInput:
 
 def load_t2b_references(
     verified: VerifiedT2BInput,
-) -> tuple[Mapping[int, pd.DataFrame], Mapping[int, pd.DataFrame], Mapping[str, object]]:
+) -> tuple[
+    Mapping[int, pd.DataFrame],
+    Mapping[int, pd.DataFrame],
+    Mapping[str, pd.DataFrame],
+    Mapping[str, object],
+]:
     if type(verified) is not VerifiedT2BInput:
         raise T2BInputError("verified T2-B input identity differs")
     with ZipFile(verified.path) as archive:
@@ -244,8 +273,19 @@ def load_t2b_references(
             year: pd.read_csv(archive.open(f"t1_multi_{year}.csv"))
             for year in _YEARS
         }
+        recent = {
+            bundle: pd.read_csv(
+                archive.open(f"t2a_recent_{bundle.casefold()}_2024.csv")
+            )
+            for bundle in _PROMOTED
+        }
         t2a = json.loads(archive.read("t2a_decision.json"))
-    return MappingProxyType(anchors), MappingProxyType(multi), MappingProxyType(t2a)
+    return (
+        MappingProxyType(anchors),
+        MappingProxyType(multi),
+        MappingProxyType(recent),
+        MappingProxyType(t2a),
+    )
 
 
 def _verify_t2a_handoff(path: Path, t1_decision_sha256: str) -> dict[str, object]:
@@ -303,7 +343,10 @@ def _verify_t2a_handoff(path: Path, t1_decision_sha256: str) -> dict[str, object
         if promoted != _PROMOTED or type(recent) is not dict:
             raise T2BInputError("T2-A promoted evidence differs")
         latest = {bundle: recent.get(bundle) for bundle in _PROMOTED}
-        if any(type(item) is not dict or item.get("status") != "completed" for item in latest.values()):
+        if any(
+            type(item) is not dict or item.get("status") != "completed"
+            for item in latest.values()
+        ):
             raise T2BInputError("T2-A latest-fold evidence differs")
         return {
             "schema_version": 1,
@@ -382,4 +425,3 @@ def _read_oof(archive: ZipFile, name: str, year: int) -> pd.DataFrame:
     ):
         raise T2BInputError(f"T2-B OOF evidence differs: {name}")
     return frame
-

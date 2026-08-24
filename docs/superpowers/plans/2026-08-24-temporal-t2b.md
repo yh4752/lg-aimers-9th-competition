@@ -54,7 +54,7 @@ class VerifiedT2BInput:
 
 
 def prepare_t2b_input(t1_review: str | Path, t2a_handoff: str | Path, output: str | Path) -> Path:
-    """Verify both parent artifacts and publish the nine-member T2-B input."""
+    """Verify both parent artifacts and publish the twelve-member T2-B input."""
 
 
 def verify_t2b_input(path: str | Path) -> VerifiedT2BInput:
@@ -62,8 +62,10 @@ def verify_t2b_input(path: str | Path) -> VerifiedT2BInput:
 ```
 
 Use the existing T1 review evaluator to reconstruct fixed T1 anchor/multi frames for 2022,
-2023, and 2024. Accept only a completed T2-A result whose promoted list is exactly S1, P3,
-P2 with the recorded variants. Write deterministic ZIP timestamps and sorted JSON.
+2023, and 2024. Preserve the S1/P3/P2 recent 2024 train OOF from T2-A so the combined
+three-fold bootstrap remains reproducible. Accept only a completed T2-A result whose promoted
+list is exactly S1, P3, P2 with the recorded variants. Write deterministic ZIP timestamps and
+sorted JSON.
 
 - [ ] **Step 4: Run input tests and confirm GREEN**
 

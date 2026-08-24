@@ -119,6 +119,23 @@ def evaluate_t2b_fold(
 ) -> dict[str, float | int | str]:
     """Compare one recent-feature expert against the fixed T1 anchor."""
 
+    oof = build_t2b_oof(
+        anchor, fixed_multi, recent_prediction, valid_year=valid_year
+    )
+    result = evaluate_t2b_oof(oof, bootstrap_repeats=bootstrap_repeats)
+    result["valid_year"] = valid_year
+    return result
+
+
+def build_t2b_oof(
+    anchor: pd.DataFrame,
+    fixed_multi: pd.DataFrame,
+    recent_prediction: pd.DataFrame,
+    *,
+    valid_year: int,
+) -> pd.DataFrame:
+    """Build the row-level paired OOF used by fold and combined diagnostics."""
+
     if valid_year not in VALID_YEARS:
         raise T2BError("T2-B validation year is not authorized")
     frames = []
@@ -159,6 +176,14 @@ def evaluate_t2b_fold(
     ].copy(deep=True)
     oof["baseline"] = aligned["baseline"].to_numpy(dtype="float64", copy=True)
     oof["candidate"] = candidate
+    return oof
+
+
+def evaluate_t2b_oof(
+    oof: pd.DataFrame, *, bootstrap_repeats: int = 1_000
+) -> dict[str, float | int | str]:
+    """Score one or more aligned folds with the shared uncertainty contract."""
+
     baseline_score = brier(oof["target"], oof["baseline"])
     candidate_score = brier(oof["target"], oof["candidate"])
     interval = pitcher_block_bootstrap(
@@ -173,7 +198,6 @@ def evaluate_t2b_fold(
     )
     return {
         "status": "completed",
-        "valid_year": valid_year,
         "rows": len(oof),
         "baseline_brier": baseline_score,
         "candidate_brier": candidate_score,

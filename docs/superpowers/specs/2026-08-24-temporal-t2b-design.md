@@ -28,12 +28,17 @@ T2-B는 제출 파일이나 평가 데이터 예측을 만들지 않는다. 결�
 
 - `t1_anchor_2022.csv`, `t1_anchor_2023.csv`, `t1_anchor_2024.csv`
 - `t1_multi_2022.csv`, `t1_multi_2023.csv`, `t1_multi_2024.csv`
+- `t2a_recent_s1_2024.csv`, `t2a_recent_p3_2024.csv`, `t2a_recent_p2_2024.csv`
 - `t1_decision.json`
 - `t2a_decision.json`
 - `manifest.json`
 
 모든 멤버의 크기와 SHA-256, 공식 데이터 행 identity, T1/T2-A 계보를 manifest에
 기록한다. 하나라도 다르면 학습을 시작하지 않는다.
+
+세 T2-A 예측은 평가 데이터 예측이 아니라 2024년 train OOF다. 이를 보존해야
+2022~2024 세 fold를 합친 pitcher-block bootstrap을 동일한 행 수준에서 다시
+계산할 수 있다.
 
 ## 3. 고정 모델 설정
 

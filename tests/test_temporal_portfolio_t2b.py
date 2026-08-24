@@ -138,9 +138,26 @@ def _t2a_handoff(tmp_path: Path, t1_decision_sha256: str) -> Path:
     for job_id in completed:
         root = jobs / job_id
         root.mkdir(parents=True)
+        prediction = pd.DataFrame(
+            {
+                "row_id": [f"2024_{index}" for index in range(4)],
+                "target": [0, 1, 0, 1],
+                "probability": [0.2, 0.8, 0.2, 0.8],
+                "pitcher_id": [1, 2, 3, 4],
+                "batter_id": [11, 12, 13, 14],
+                "game_type": ["R"] * 4,
+                "pitcher_id_known": ["known"] * 4,
+                "batter_id_known": ["known"] * 4,
+                "trackman_available": ["available"] * 4,
+                "hand_matchup": ["R_R"] * 4,
+                "history_count_bucket": ["high"] * 4,
+                "runner_state": ["empty"] * 4,
+                "leverage_bucket": ["medium"] * 4,
+            }
+        ).to_csv(index=False).encode("utf-8")
         records = {}
         for name, data in {
-            "predictions.csv": b"row_id,target,probability\na,1,0.8\n",
+            "predictions.csv": prediction,
             "metrics.json": b"{}",
             "checkpoint_meta.json": b"{}",
         }.items():
@@ -298,6 +315,9 @@ def test_t2b_input_contains_three_fixed_t1_folds_and_t2a_lineage(
             "t1_multi_2022.csv",
             "t1_multi_2023.csv",
             "t1_multi_2024.csv",
+            "t2a_recent_s1_2024.csv",
+            "t2a_recent_p3_2024.csv",
+            "t2a_recent_p2_2024.csv",
         }
 
 
@@ -495,3 +515,229 @@ def test_t2b_fold_evaluation_accepts_worker_prediction_without_year() -> None:
     assert evidence["rows"] == 4
     assert evidence["gain"] > 0
     assert evidence["bootstrap_lower"] > 0
+
+
+def test_t2b_review_and_resume_are_compact_verified_bundles(tmp_path: Path) -> None:
+    from experiments.temporal_portfolio.t1_artifacts import (
+        _read_bundle,
+        verify_compact_result,
+    )
+    from experiments.temporal_portfolio.t2b_artifacts import (
+        restore_t2b_resume_source,
+        write_t2b_bundles,
+    )
+
+    job_id = "t2b__f__s1__va2022__s3407"
+    root = tmp_path / "jobs" / job_id
+    root.mkdir(parents=True)
+    records = {}
+    for name, data in {
+        "predictions.csv": b"row_id,target,probability\na,1,0.8\n",
+        "metrics.json": b"{}",
+        "checkpoint_meta.json": b"{}",
+    }.items():
+        (root / name).write_bytes(data)
+        records[name] = {
+            "size_bytes": len(data),
+            "sha256": sha256(data).hexdigest(),
+        }
+    identity = "d" * 64
+    (root / "compact_result.json").write_bytes(
+        _json_bytes(
+            {
+                "schema_version": 1,
+                "job_id": job_id,
+                "status": "completed",
+                "training_identity_sha256": identity,
+                "members": records,
+            }
+        )
+    )
+    bundles = write_t2b_bundles(
+        tmp_path / "bundles",
+        jobs_root=tmp_path / "jobs",
+        completed=(job_id,),
+        pending=(),
+        failed=(),
+        evidence={"promoted": []},
+        parent_sha256="e" * 64,
+    )
+
+    manifest, _ = _read_bundle(
+        bundles.review, expected_kind="temporal_t2b_review_v1"
+    )
+    assert manifest["completed"] == [job_id]
+    restored = restore_t2b_resume_source(bundles.resume, tmp_path / "restored")
+    payload = verify_compact_result(restored / "jobs" / job_id)
+    assert payload["training_identity_sha256"] == identity
+
+
+def test_t2b_runner_never_starts_more_than_ten_jobs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from types import MappingProxyType
+
+    from experiments.temporal_portfolio.identity import TrainingIdentity
+    from experiments.temporal_portfolio.inputs import VerifiedOfficialData
+    from experiments.temporal_portfolio.t1_runner import _input_identity
+    from experiments.temporal_portfolio.t2b_input import VerifiedT2BInput
+    from experiments.temporal_portfolio.t2b_runner import run_t2b_stage
+
+    data = tmp_path / "data"
+    data.mkdir()
+    paths, hashes, sizes = [], {}, {}
+    for name in (
+        "train.csv",
+        "test.csv",
+        "trackman_history.csv",
+        "sample_submission.csv",
+    ):
+        path = data / name
+        path.write_text("fixture\n", encoding="utf-8")
+        paths.append(path)
+        hashes[name] = sha256(path.read_bytes()).hexdigest()
+        sizes[name] = path.stat().st_size
+    verified = VerifiedOfficialData(
+        data,
+        *paths,
+        MappingProxyType(hashes),
+        10,
+        2,
+        MappingProxyType(sizes),
+        MappingProxyType({}),
+    )
+    prepared = VerifiedT2BInput(
+        tmp_path / "input.zip",
+        "a" * 64,
+        _input_identity(verified),
+        "b" * 64,
+        "c" * 64,
+        "d" * 64,
+        ("S1", "P3", "P2"),
+    )
+    monkeypatch.setattr(
+        "experiments.temporal_portfolio.t2b_runner.verify_t2b_input",
+        lambda _path: prepared,
+    )
+    monkeypatch.setattr(
+        "experiments.temporal_portfolio.t2b_runner.load_t2b_references",
+        lambda _prepared: ({}, {}, {}, {}),
+    )
+
+    def materialize(spec, **_kwargs):
+        identity = TrainingIdentity.from_payload(
+            {
+                "data_rows": prepared.data_rows_sha256,
+                "train_seasons": [spec.valid_year - 1],
+                "valid_year": spec.valid_year,
+                "decay": None,
+                "features": ["base", *spec.bundles],
+                "model": {"job_id": spec.job_id},
+                "loss": "bce",
+                "seed": 3407,
+            }
+        )
+        return SimpleNamespace(
+            training=SimpleNamespace(job_id=spec.job_id, identity=identity),
+            plan=SimpleNamespace(max_seconds=900),
+        )
+
+    monkeypatch.setattr(
+        "experiments.temporal_portfolio.t2b_runner.materialize_t2b_job",
+        materialize,
+    )
+    monkeypatch.setattr(
+        "experiments.temporal_portfolio.t2b_runner.verify_worker_result",
+        lambda path: json.loads((Path(path) / "worker_result.json").read_text()),
+    )
+    phase_f = {
+        bundle: {
+            year: {
+                "status": "completed",
+                "gain": 0.0001,
+                "rows": 100,
+                "max_segment_regression": 0.0,
+            }
+            for year in (2022, 2023, 2024)
+        }
+        for bundle in ("S1", "P3", "P2")
+    }
+    phase_c = {
+        name: {
+            "status": "completed",
+            "gain": 0.0001,
+            "bootstrap_lower": 0.00001,
+            "max_segment_regression": 0.0,
+        }
+        for name in ("S1+P3", "S1+P2")
+    }
+    monkeypatch.setattr(
+        "experiments.temporal_portfolio.t2b_runner._phase_f_evidence",
+        lambda *_args: phase_f,
+    )
+    monkeypatch.setattr(
+        "experiments.temporal_portfolio.t2b_runner._phase_c_evidence",
+        lambda *_args: phase_c,
+    )
+    monkeypatch.setattr(
+        "experiments.temporal_portfolio.t2b_runner._final_evidence",
+        lambda *_args: ({"promoted": []}, ()),
+    )
+
+    class Handle:
+        returncode = 0
+
+        def poll(self):
+            return 0
+
+        def terminate(self):
+            raise AssertionError
+
+        def wait(self, timeout=None):
+            return 0
+
+        def kill(self):
+            raise AssertionError
+
+    class Launcher:
+        def __init__(self):
+            self.jobs = []
+
+        def start(self, job, output, *, gpu, deadline):
+            self.jobs.append((job.training.job_id, gpu))
+            output.mkdir(parents=True, exist_ok=True)
+            (output / "worker_result.json").write_text(
+                json.dumps(
+                    {
+                        "status": "completed",
+                        "job_id": job.training.job_id,
+                        "training_identity_sha256": job.training.identity.sha256,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            return Handle()
+
+    launcher = Launcher()
+    result = run_t2b_stage(
+        verified=verified,
+        t2b_input=prepared.path,
+        output_root=tmp_path / "output",
+        deadline=20_000,
+        launcher=launcher,
+        frame_loader=lambda _path: pd.DataFrame(),
+        clock=lambda: 1_000.0,
+        sleeper=lambda _seconds: None,
+    )
+
+    assert result.status == "completed"
+    assert len(launcher.jobs) == 10
+    assert len({job_id for job_id, _ in launcher.jobs}) == 10
+
+
+def test_t2b_gpu_probe_accepts_exactly_two_t4_devices() -> None:
+    from experiments.temporal_portfolio.t1_runner import require_two_t4_gpus
+
+    assert require_two_t4_gpus(
+        lambda: ("Tesla T4", "Tesla T4"), log_prefix="T2B"
+    ) == ("Tesla T4", "Tesla T4")
