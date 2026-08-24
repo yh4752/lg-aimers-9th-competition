@@ -13,7 +13,7 @@ class T2APlatformError(RuntimeError):
 
 
 _TEMPLATE = '''from __future__ import annotations
-import base64, io, json, os, shutil, sys, tarfile, time, traceback
+import base64, io, json, os, shutil, subprocess, sys, tarfile, time, traceback
 from pathlib import Path
 from zipfile import ZIP_DEFLATED, ZipFile
 
@@ -44,6 +44,19 @@ def unpack_runtime():
         archive.extractall(RUNTIME_ROOT)
     sys.path.insert(0, str(RUNTIME_ROOT))
     print(f"T2A_CODE_READY size_bytes={len(payload)}", flush=True)
+
+def ensure_dependencies():
+    try:
+        import tabm, rtdl_num_embeddings
+    except ImportError:
+        subprocess.run(
+            [sys.executable, "-m", "pip", "install", "-q", "tabm==0.0.3", "rtdl-num-embeddings==0.0.12"],
+            check=True,
+        )
+        import tabm, rtdl_num_embeddings
+    if getattr(tabm, "__version__", None) != "0.0.3" or getattr(rtdl_num_embeddings, "__version__", None) != "0.0.12":
+        raise RuntimeError("T2A_dependency_versions_differ")
+    print("T2A_DEPENDENCIES_READY tabm=0.0.3 rtdl_num_embeddings=0.0.12", flush=True)
 
 def artifact_kind(path):
     try:
@@ -126,7 +139,9 @@ sys.stderr = Tee(sys.__stderr__, log_stream)
 unpack_runtime()
 stage = "inputs"
 try:
-    import tabm, rtdl_num_embeddings
+    stage = "dependencies"
+    ensure_dependencies()
+    stage = "inputs"
     from experiments.temporal_portfolio.inputs import verify_official_data
     from experiments.temporal_portfolio.t2a_artifacts import restore_t2a_resume_source, write_t2a_bundles
     from experiments.temporal_portfolio.t2a_runner import run_t2a_stage
