@@ -291,7 +291,7 @@ def test_t2b_kaggle_cell_is_deterministic_small_and_single_download(tmp_path):
     second = build_t2b_kaggle_cell(tmp_path / "second.py")
     assert first.read_bytes() == second.read_bytes()
     assert first.stat().st_size < 1_000_000
-    assert first.read_text().count("files.download") == 1
+    assert "files.download" not in first.read_text()
 ```
 
 - [ ] **Step 2: Run the test and confirm RED**
@@ -302,7 +302,8 @@ Expected: missing platform builder import.
 
 - [ ] **Step 3: Implement the cell template and builder**
 
-The cell must discover exactly one official data root and one T2-B input, optionally restore one
+Kaggle은 Colab의 `files.download` API를 제공하지 않으므로 결과를 `/kaggle/working`에
+단일 handoff로 남긴다. The cell must discover exactly one official data root and one T2-B input, optionally restore one
 T2-B resume/handoff, require two Tesla T4 devices, pin dependencies, tee logs, emit the declared
 T2B log events, and request only the final normal or emergency handoff ZIP.
 

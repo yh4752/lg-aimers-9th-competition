@@ -169,6 +169,7 @@ def _runtime_archive() -> bytes:
                 and path.name not in {
                     "KAGGLE_CELL.py",
                     "T2A_KAGGLE_CELL.py",
+                    "T2B_KAGGLE_CELL.py",
                     "COLAB_RECOVERY_CELL.py",
                 }
                 and path.suffix in {".py", ".json"}

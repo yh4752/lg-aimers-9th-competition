@@ -741,3 +741,22 @@ def test_t2b_gpu_probe_accepts_exactly_two_t4_devices() -> None:
     assert require_two_t4_gpus(
         lambda: ("Tesla T4", "Tesla T4"), log_prefix="T2B"
     ) == ("Tesla T4", "Tesla T4")
+
+
+def test_t2b_kaggle_cell_is_deterministic_small_and_single_handoff(
+    tmp_path: Path,
+) -> None:
+    from experiments.temporal_portfolio.t2b_platform import build_t2b_kaggle_cell
+
+    first = build_t2b_kaggle_cell(tmp_path / "first.py")
+    second = build_t2b_kaggle_cell(tmp_path / "second.py")
+    text = first.read_text(encoding="utf-8")
+
+    assert first.read_bytes() == second.read_bytes()
+    assert first.stat().st_size < 1_000_000
+    assert "files.download" not in text
+    assert "T2B_HANDOFF_READY" in text
+    assert "T2B_EMERGENCY_HANDOFF_READY" in text
+    assert "temporal_t2b_handoff.zip" in text
+    assert "temporal_t2b_emergency_handoff.zip" in text
+    compile(text, str(first), "exec")
