@@ -4,6 +4,7 @@ from hashlib import sha256
 import io
 import json
 from pathlib import Path
+from types import MappingProxyType
 from types import SimpleNamespace
 from zipfile import ZIP_DEFLATED, ZipFile
 
@@ -480,3 +481,298 @@ def test_t2c_rejects_extra_or_contradictory_evidence() -> None:
     ensemble = _passing_ensemble()
     ensemble["combined"]["rows"] = 1
     assert decide_t2c(seed_evidence=evidence, ensemble=ensemble).status == "rejected"
+
+
+def _verified_official(tmp_path: Path):
+    from experiments.temporal_portfolio.inputs import VerifiedOfficialData
+
+    data = tmp_path / "official"
+    data.mkdir(exist_ok=True)
+    paths, hashes, sizes = [], {}, {}
+    for name in ("train.csv", "test.csv", "trackman_history.csv", "sample_submission.csv"):
+        path = data / name
+        path.write_text("fixture\n", encoding="utf-8")
+        paths.append(path)
+        hashes[name] = sha256(path.read_bytes()).hexdigest()
+        sizes[name] = path.stat().st_size
+    return VerifiedOfficialData(
+        data,
+        *paths,
+        MappingProxyType(hashes),
+        10,
+        2,
+        MappingProxyType(sizes),
+        MappingProxyType({}),
+    )
+
+
+def _runner_prepared(tmp_path: Path, verified):
+    from experiments.temporal_portfolio.t1_runner import _input_identity
+    from experiments.temporal_portfolio.t2c_input import VerifiedT2CInput
+
+    path = tmp_path / "t2c_input.zip"
+    path.write_bytes(b"fixture")
+    return VerifiedT2CInput(
+        path,
+        "a" * 64,
+        _input_identity(verified),
+        "b" * 64,
+        "c" * 64,
+        "d" * 64,
+        "e" * 64,
+        "s1_game_type_f_fallback_v1",
+    )
+
+
+def _materialized_for(spec, prepared):
+    from experiments.temporal_portfolio.identity import TrainingIdentity
+
+    identity = TrainingIdentity.from_payload(
+        {
+            "data_rows": prepared.data_rows_sha256,
+            "train_seasons": [spec.valid_year - 1],
+            "valid_year": spec.valid_year,
+            "decay": None,
+            "features": ["base", "S1"],
+            "model": {"job_id": spec.job_id},
+            "loss": "bce",
+            "seed": spec.seed,
+        }
+    )
+    return SimpleNamespace(
+        training=SimpleNamespace(job_id=spec.job_id, identity=identity),
+        plan=SimpleNamespace(max_seconds=2_400),
+    )
+
+
+def _write_compact_job(root: Path, job_id: str, identity: str) -> None:
+    root.mkdir(parents=True, exist_ok=True)
+    members = {
+        "predictions.csv": b"row_id,target,probability\na,1,0.8\n",
+        "metrics.json": b"{}",
+        "checkpoint_meta.json": b"{}",
+    }
+    records = {}
+    for name, data in members.items():
+        (root / name).write_bytes(data)
+        records[name] = {"size_bytes": len(data), "sha256": sha256(data).hexdigest()}
+    (root / "compact_result.json").write_bytes(
+        _json_bytes(
+            {
+                "schema_version": 1,
+                "job_id": job_id,
+                "status": "completed",
+                "training_identity_sha256": identity,
+                "members": records,
+            }
+        )
+    )
+
+
+def _patch_runner_core(monkeypatch: pytest.MonkeyPatch, prepared) -> None:
+    monkeypatch.setattr(
+        "experiments.temporal_portfolio.t2c_runner.verify_t2c_input",
+        lambda _path: prepared,
+    )
+    monkeypatch.setattr(
+        "experiments.temporal_portfolio.t2c_runner.load_t2c_references",
+        lambda _prepared: ({}, {}, {}, {}),
+    )
+    monkeypatch.setattr(
+        "experiments.temporal_portfolio.t2c_runner.materialize_t2c_job",
+        lambda spec, **_kwargs: _materialized_for(spec, prepared),
+    )
+    monkeypatch.setattr(
+        "experiments.temporal_portfolio.t2c_runner.verify_worker_result",
+        lambda path: json.loads((Path(path) / "worker_result.json").read_text()),
+    )
+    monkeypatch.setattr(
+        "experiments.temporal_portfolio.t2c_runner._collect_evidence",
+        lambda *_args, **_kwargs: {
+            "seed_evidence": _passing_seed_evidence(),
+            "ensemble": _passing_ensemble(),
+            "decision": {"status": "promoted"},
+        },
+    )
+
+
+def test_t2c_runner_starts_exactly_six_authorized_jobs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from experiments.temporal_portfolio.t2c_runner import run_t2c_stage
+
+    verified = _verified_official(tmp_path)
+    prepared = _runner_prepared(tmp_path, verified)
+    _patch_runner_core(monkeypatch, prepared)
+
+    class Handle:
+        returncode = 0
+
+        def poll(self):
+            return 0
+
+        def terminate(self):
+            raise AssertionError
+
+        def wait(self, timeout=None):
+            return 0
+
+        def kill(self):
+            raise AssertionError
+
+    class FakeLauncher:
+        def __init__(self):
+            self.jobs = []
+
+        def start(self, job, output, *, gpu, deadline):
+            self.jobs.append((job.training.job_id, gpu))
+            output.mkdir(parents=True, exist_ok=True)
+            (output / "worker_result.json").write_text(
+                json.dumps(
+                    {
+                        "status": "completed",
+                        "job_id": job.training.job_id,
+                        "training_identity_sha256": job.training.identity.sha256,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            return Handle()
+
+    launcher = FakeLauncher()
+    result = run_t2c_stage(
+        verified=verified,
+        t2c_input=prepared.path,
+        output_root=tmp_path / "output",
+        deadline=20_000,
+        launcher=launcher,
+        frame_loader=lambda _path: pd.DataFrame(),
+        clock=lambda: 1_000.0,
+        sleeper=lambda _seconds: None,
+    )
+
+    assert len(launcher.jobs) == 6
+    assert len({job_id for job_id, _gpu in launcher.jobs}) == 6
+    assert result.status == "completed"
+
+
+def test_t2c_artifacts_bind_parent_and_compact_identities(tmp_path: Path) -> None:
+    from experiments.temporal_portfolio.t1_artifacts import _read_bundle
+    from experiments.temporal_portfolio.t2c import build_t2c_specs
+    from experiments.temporal_portfolio.t2c_artifacts import (
+        restore_t2c_resume_source,
+        write_t2c_bundles,
+    )
+
+    jobs = tmp_path / "jobs"
+    identities = {}
+    for spec in build_t2c_specs():
+        identity = sha256(spec.job_id.encode()).hexdigest()
+        identities[spec.job_id] = identity
+        _write_compact_job(jobs / spec.job_id, spec.job_id, identity)
+    completed = tuple(spec.job_id for spec in build_t2c_specs())
+    bundles = write_t2c_bundles(
+        tmp_path / "bundles",
+        jobs_root=jobs,
+        completed=completed,
+        pending=(),
+        failed=(),
+        evidence={"decision": {"status": "promoted"}},
+        parent_sha256="a" * 64,
+    )
+
+    manifest, _ = _read_bundle(
+        bundles.review, expected_kind="temporal_t2c_review_v1"
+    )
+    assert manifest["parent_sha256"] == "a" * 64
+    assert manifest["training_identities"] == identities
+    restored = restore_t2c_resume_source(bundles.resume, tmp_path / "restored")
+    assert (restored / "jobs" / completed[0] / "compact_result.json").is_file()
+
+
+def test_t2c_runner_reuses_compact_completed_job_without_launch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from experiments.temporal_portfolio.t2c import build_t2c_specs
+    from experiments.temporal_portfolio.t2c_artifacts import (
+        restore_t2c_resume_source,
+        write_t2c_bundles,
+    )
+    from experiments.temporal_portfolio.t2c_runner import run_t2c_stage
+
+    verified = _verified_official(tmp_path)
+    prepared = _runner_prepared(tmp_path, verified)
+    _patch_runner_core(monkeypatch, prepared)
+    source = tmp_path / "source_jobs"
+    for spec in build_t2c_specs():
+        job = _materialized_for(spec, prepared)
+        _write_compact_job(source / spec.job_id, spec.job_id, job.training.identity.sha256)
+    completed = tuple(spec.job_id for spec in build_t2c_specs())
+    bundles = write_t2c_bundles(
+        tmp_path / "bundles",
+        jobs_root=source,
+        completed=completed,
+        pending=(),
+        failed=(),
+        evidence={"decision": {"status": "promoted"}},
+        parent_sha256=prepared.decision_sha256,
+    )
+    output = restore_t2c_resume_source(bundles.resume, tmp_path / "output")
+
+    class MustNotLaunch:
+        def start(self, *_args, **_kwargs):
+            raise AssertionError("completed T2-C job was relaunched")
+
+    result = run_t2c_stage(
+        verified=verified,
+        t2c_input=prepared.path,
+        output_root=output,
+        deadline=20_000,
+        launcher=MustNotLaunch(),
+        frame_loader=lambda _path: pd.DataFrame(),
+        clock=lambda: 1_000.0,
+        sleeper=lambda _seconds: None,
+    )
+
+    assert result.completed == completed
+
+
+def test_t2c_collected_evidence_is_canonical_json_serializable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from experiments.temporal_portfolio.t2c import build_t2c_specs
+    from experiments.temporal_portfolio.t2c_runner import _collect_evidence
+
+    monkeypatch.setattr(
+        "experiments.temporal_portfolio.t2c_runner._prediction",
+        lambda root: pd.read_csv(Path(root) / "predictions.csv"),
+    )
+
+    jobs = tmp_path / "jobs"
+    anchors, multi, seed_3407 = {}, {}, {}
+    for year in YEARS:
+        anchors[year] = _oof(year, (0.40, 0.60, 0.40, 0.60))
+        multi[year] = _oof(year, (0.30, 0.70, 0.30, 0.70))
+        seed_3407[year] = _oof(year, (0.10, 0.90, 0.10, 0.90)).drop(
+            columns="valid_year"
+        )
+    for spec in build_t2c_specs():
+        root = jobs / spec.job_id
+        root.mkdir(parents=True)
+        _oof(spec.valid_year, (0.10, 0.90, 0.10, 0.90)).drop(
+            columns="valid_year"
+        ).to_csv(root / "predictions.csv", index=False)
+
+    evidence = _collect_evidence(
+        jobs,
+        (anchors, multi, seed_3407, {}),
+        completed=tuple(spec.job_id for spec in build_t2c_specs()),
+        pending=(),
+        failed=(),
+    )
+
+    encoded = json.dumps(
+        evidence, sort_keys=True, separators=(",", ":"), allow_nan=False
+    )
+    assert '"candidate_id":"s1_game_type_f_fallback_v1"' in encoded
+    assert '"status":"rejected"' in encoded
