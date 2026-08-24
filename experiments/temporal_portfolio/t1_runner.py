@@ -364,14 +364,18 @@ def _input_identity(verified: VerifiedOfficialData) -> str:
 
 def require_two_t4_gpus(
     probe: Callable[[], tuple[str, ...]] | None = None,
+    *,
+    log_prefix: str = "T1",
 ) -> tuple[str, ...]:
+    if log_prefix not in {"T1", "T2A"}:
+        raise T1RunnerError("GPU log prefix is invalid")
     names = (probe or _nvidia_gpu_names)()
     if len(names) != 2 or any(name.casefold() != "tesla t4" for name in names):
         observed = ", ".join(names) if names else "none"
         raise T1RunnerError(
             f"exactly two Tesla T4 devices are required; observed={observed}"
         )
-    print(f"T1_GPU_READY count=2 names={' | '.join(names)}", flush=True)
+    print(f"{log_prefix}_GPU_READY count=2 names={' | '.join(names)}", flush=True)
     return names
 
 

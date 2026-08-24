@@ -87,7 +87,7 @@ def run_t2a_stage(
     anchor, fixed_multi = _reference_frames(prepared)
     runtime = launcher
     if runtime is None:
-        require_two_t4_gpus()
+        require_two_t4_gpus(log_prefix="T2A")
         runtime = ForkLauncher(_worker_entry)
 
     completed: list[str] = []
