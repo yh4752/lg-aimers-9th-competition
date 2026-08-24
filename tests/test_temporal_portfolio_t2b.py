@@ -3,11 +3,14 @@ from __future__ import annotations
 from hashlib import sha256
 import json
 from pathlib import Path
+from types import SimpleNamespace
 from zipfile import ZIP_DEFLATED, ZipFile
 
+import numpy as np
 import pandas as pd
 import pytest
 
+from experiments.independent_dl.features import FeatureBatch
 from experiments.temporal_portfolio.contracts import build_stage_jobs, load_contract
 from experiments.temporal_portfolio.t1_artifacts import write_t1_bundles
 from experiments.temporal_portfolio.t2a_artifacts import write_t2a_bundles
@@ -16,6 +19,32 @@ from experiments.temporal_portfolio.t2b_input import (
     prepare_t2b_input,
     verify_t2b_input,
 )
+
+
+def _training_rows() -> pd.DataFrame:
+    rows = []
+    for year in (2019, 2020, 2021, 2022, 2023, 2024):
+        for index in range(4):
+            rows.append(
+                {
+                    "row_id": f"{year}_{index}",
+                    "season": year,
+                    "game_type": "regular",
+                    "pitcher_id": 10 + index,
+                    "batter_id": 20 + index,
+                    "pitcher_hand": "R",
+                    "batter_hand": "L" if index % 2 else "R",
+                    "asof_pitcher_n": 10 + index,
+                    "asof_batter_n": 10 + index,
+                    "asof_pitcher_success_rate": 0.5,
+                    "asof_batter_success_rate": 0.5,
+                    "base_state": "empty",
+                    "li": 1.0,
+                    "numeric": float(index),
+                    "control_success": index % 2,
+                }
+            )
+    return pd.DataFrame(rows)
 
 
 def _json_bytes(value: object) -> bytes:
@@ -286,3 +315,183 @@ def test_t2b_input_rejects_tampered_member(tmp_path: Path) -> None:
 
     with pytest.raises(T2BInputError, match="member differs"):
         verify_t2b_input(prepared)
+
+
+def test_t2b_schedule_is_six_single_two_latest_combo_then_two_history() -> None:
+    from experiments.temporal_portfolio.t2b import (
+        build_phase_c_specs,
+        build_phase_f_specs,
+        build_phase_h_specs,
+    )
+
+    phase_f = build_phase_f_specs()
+    phase_c = build_phase_c_specs()
+    phase_h = build_phase_h_specs("S1+P3")
+
+    assert len(phase_f) == 6
+    assert [(item.bundles, item.valid_year) for item in phase_f] == [
+        (("S1",), 2022),
+        (("P3",), 2022),
+        (("P2",), 2022),
+        (("S1",), 2023),
+        (("P3",), 2023),
+        (("P2",), 2023),
+    ]
+    assert [(item.bundles, item.valid_year) for item in phase_c] == [
+        (("S1", "P3"), 2024),
+        (("S1", "P2"), 2024),
+    ]
+    assert [(item.bundles, item.valid_year) for item in phase_h] == [
+        (("S1", "P3"), 2022),
+        (("S1", "P3"), 2023),
+    ]
+    assert len(phase_f + phase_c + phase_h) == 10
+
+
+def test_t2b_materialization_uses_previous_season_and_cutoff_safe_context(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from experiments.temporal_portfolio.t2b import T2BJobSpec, materialize_t2b_job
+
+    observed: dict[str, object] = {}
+
+    def materialize(cache_root, *, train, valid, feature_fit_rows, spec, **_kwargs):
+        observed.update(
+            train_seasons=tuple(sorted(train["season"].unique())),
+            context_seasons=tuple(sorted(feature_fit_rows["season"].unique())),
+            valid_seasons=tuple(sorted(valid["season"].unique())),
+            features=spec.bundles,
+        )
+
+        def batch(frame: pd.DataFrame, target: bool) -> FeatureBatch:
+            return FeatureBatch(
+                frame["row_id"].to_numpy(),
+                frame["season"].to_numpy(),
+                frame["game_type"].to_numpy(),
+                np.zeros((len(frame), 2), dtype="float32"),
+                np.zeros((len(frame), 1), dtype="int64"),
+                frame["control_success"].to_numpy(dtype="int8") if target else None,
+            )
+
+        return SimpleNamespace(
+            root=Path(cache_root),
+            train=batch(train, True),
+            valid=batch(valid, True),
+            identity_sha256="e" * 64,
+            state=SimpleNamespace(fitted_sources={}),
+        )
+
+    monkeypatch.setattr(
+        "experiments.temporal_portfolio.t2b.materialize_fold_cache", materialize
+    )
+    job = materialize_t2b_job(
+        T2BJobSpec(
+            "t2b__f__s1__va2022__s3407", "F", ("S1",), 2022, 3407
+        ),
+        data_rows_sha256="a" * 64,
+        parent_sha256="b" * 64,
+        train=_training_rows(),
+        history=pd.DataFrame(),
+        cache_root=tmp_path / "cache",
+    )
+
+    assert observed == {
+        "train_seasons": (2021,),
+        "context_seasons": (2019, 2020, 2021),
+        "valid_seasons": (2022,),
+        "features": ("base", "S1"),
+    }
+    assert tuple(job.training.identity.payload["train_seasons"]) == (2021,)
+    assert job.training.identity.payload["valid_year"] == 2022
+    assert job.training.identity.payload["model"]["parent_sha256"] == "b" * 64
+    job.training.validate_seals()
+
+
+def test_t2b_combination_selection_requires_all_latest_fold_gates() -> None:
+    from experiments.temporal_portfolio.t2b import select_combination
+
+    good = {
+        "S1+P3": {
+            "status": "completed",
+            "gain": 0.00010,
+            "bootstrap_lower": 0.00001,
+            "max_segment_regression": 0.00020,
+        },
+        "S1+P2": {
+            "status": "completed",
+            "gain": 0.00009,
+            "bootstrap_lower": 0.00002,
+            "max_segment_regression": 0.00010,
+        },
+    }
+    assert select_combination(good) == "S1+P3"
+
+    tied = {name: {**item, "gain": 0.00010} for name, item in good.items()}
+    assert select_combination(tied) == "S1+P3"
+
+    failed = {
+        "S1+P3": {**good["S1+P3"], "bootstrap_lower": 0.0},
+        "S1+P2": {**good["S1+P2"], "max_segment_regression": 0.00051},
+    }
+    assert select_combination(failed) is None
+
+
+def test_t2b_candidate_decision_uses_all_three_folds() -> None:
+    from experiments.temporal_portfolio.t2b import decide_t2b_candidates
+
+    folds = {
+        "S1": {
+            year: {
+                "status": "completed",
+                "gain": 0.00010,
+                "rows": 100,
+                "max_segment_regression": 0.0,
+            }
+            for year in (2022, 2023, 2024)
+        }
+    }
+    combined = {
+        "S1": {
+            "bootstrap_lower": 0.00005,
+            "max_segment_regression": 0.0,
+        }
+    }
+
+    decisions = decide_t2b_candidates(folds, combined)
+
+    assert len(decisions) == 1
+    assert decisions[0].candidate_id == "S1"
+    assert decisions[0].status == "champion"
+
+
+def test_t2b_fold_evaluation_accepts_worker_prediction_without_year() -> None:
+    from experiments.temporal_portfolio.t2b import evaluate_t2b_fold
+
+    base = {
+        "row_id": ["a", "b", "c", "d"],
+        "valid_year": [2023] * 4,
+        "target": [0, 1, 0, 1],
+        "pitcher_id": [1, 2, 3, 4],
+        "batter_id": [11, 12, 13, 14],
+        "game_type": ["R"] * 4,
+        "pitcher_id_known": ["known"] * 4,
+        "batter_id_known": ["known"] * 4,
+        "trackman_available": ["available"] * 4,
+        "hand_matchup": ["R_R"] * 4,
+        "history_count_bucket": ["high"] * 4,
+        "runner_state": ["empty"] * 4,
+        "leverage_bucket": ["medium"] * 4,
+    }
+    anchor = pd.DataFrame({**base, "probability": [0.4, 0.6, 0.4, 0.6]})
+    multi = pd.DataFrame({**base, "probability": [0.3, 0.7, 0.3, 0.7]})
+    recent = pd.DataFrame({**base, "probability": [0.1, 0.9, 0.1, 0.9]}).drop(
+        columns="valid_year"
+    )
+
+    evidence = evaluate_t2b_fold(
+        anchor, multi, recent, valid_year=2023, bootstrap_repeats=100
+    )
+
+    assert evidence["rows"] == 4
+    assert evidence["gain"] > 0
+    assert evidence["bootstrap_lower"] > 0
