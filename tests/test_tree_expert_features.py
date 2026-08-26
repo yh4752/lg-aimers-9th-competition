@@ -6,6 +6,7 @@ import pytest
 
 from experiments.tree_expert.features import (
     TreeFeatureError,
+    TreeFeatureSkip,
     fit_tree_features,
     transform_tree_features,
 )
@@ -66,6 +67,41 @@ def _rows() -> pd.DataFrame:
         },
         index=[30, 10, 20, 8, 8, 3],
     )
+
+
+def _history() -> pd.DataFrame:
+    rows: list[dict[str, object]] = []
+    for pitcher_id, hand, team, counts, speed in (
+        (101, "Left", "A", (50, 30, 20), 145.0),
+        (102, "Right", "B", (20, 40, 20), 151.0),
+    ):
+        groups = (
+            ["fastball"] * counts[0]
+            + ["breaking"] * counts[1]
+            + ["offspeed"] * counts[2]
+        )
+        for index, group in enumerate(groups):
+            rows.append(
+                {
+                    "season": 2023,
+                    "pitcher_trackman_id": pitcher_id,
+                    "pitch_type_group": group,
+                    "pitcher_hand": hand,
+                    "pitcher_team": team,
+                    "rel_speed": speed - (2.0 if group != "fastball" else 0.0),
+                    "spin_rate": 2100.0 + index,
+                    "induced_vert_break": 15.0,
+                    "horz_break": -3.0 if hand == "Left" else 3.0,
+                    "extension": 1.8,
+                    "rel_height": 1.7,
+                    "rel_side": -0.2 if hand == "Left" else 0.2,
+                    "zone_speed": speed - 12.0,
+                }
+            )
+    future = dict(rows[0])
+    future.update(season=2024, rel_speed=999.0, spin_rate=9999.0)
+    rows.append(future)
+    return pd.DataFrame(rows)
 
 
 @pytest.fixture
@@ -137,3 +173,53 @@ def test_training_s1_never_reads_validation_target(
 
     with pytest.raises(TreeFeatureError, match="evaluation rows contain target"):
         transform_tree_features(valid_rows.assign(control_success=1), state)
+
+
+def test_trackman_candidate_uses_only_cutoff_history(
+    train_prefix: pd.DataFrame,
+) -> None:
+    trackman_train = train_prefix.copy(deep=True)
+    trackman_train.loc[trackman_train["pitcher_id"].eq(11), "asof_pitcher_n"] = [98, 99]
+    trackman_train.loc[trackman_train["pitcher_id"].eq(11), [
+        "asof_pitcher_fastball_rate",
+        "asof_pitcher_breaking_rate",
+        "asof_pitcher_offspeed_rate",
+    ]] = [0.50, 0.30, 0.20]
+    trackman_train.loc[trackman_train["pitcher_id"].eq(12), "asof_pitcher_n"] = 79
+    trackman_train.loc[trackman_train["pitcher_id"].eq(12), [
+        "asof_pitcher_fastball_rate",
+        "asof_pitcher_breaking_rate",
+        "asof_pitcher_offspeed_rate",
+    ]] = [0.25, 0.50, 0.25]
+    history = _history()
+    state, first = fit_tree_features(
+        trackman_train,
+        history=history,
+        valid_year=2024,
+        use_trackman=True,
+    )
+    changed = history.copy(deep=True)
+    changed.loc[changed["season"].eq(2024), "rel_speed"] = -999.0
+    replay_state, replay = fit_tree_features(
+        trackman_train,
+        history=changed,
+        valid_year=2024,
+        use_trackman=True,
+    )
+
+    assert state.source_hashes == replay_state.source_hashes
+    pd.testing.assert_frame_equal(first.frame, replay.frame)
+    assert "tm_pitcher_mapping_missing" in first.frame
+
+
+def test_unusable_trackman_history_skips_only_trackman_candidate(
+    train_prefix: pd.DataFrame,
+) -> None:
+    with pytest.raises(TreeFeatureSkip, match="TrackMan"):
+        fit_tree_features(
+            train_prefix,
+            history=_history().iloc[0:0],
+            valid_year=2024,
+            use_trackman=True,
+            minimum_trackman_coverage=0.30,
+        )

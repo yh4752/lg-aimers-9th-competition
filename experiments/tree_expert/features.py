@@ -15,6 +15,10 @@ from experiments.temporal_portfolio.seasonal_features import (
     transform_s1,
 )
 from experiments.temporal_portfolio.trackman_pitcher import PitcherTrackmanState
+from experiments.temporal_portfolio.trackman_pitcher import (
+    PitcherTrackmanError,
+    fit_pitcher_trackman,
+)
 
 
 class TreeFeatureError(ValueError):
@@ -306,6 +310,60 @@ def _s1_sha256(state: S1State) -> str:
     return digest.hexdigest()
 
 
+def _fit_trackman(
+    rows: pd.DataFrame,
+    history: pd.DataFrame | None,
+    *,
+    valid_year: int,
+    minimum_coverage: float,
+) -> PitcherTrackmanState:
+    if type(history) is not pd.DataFrame:
+        raise TreeFeatureSkip("TrackMan history is unavailable")
+    if type(minimum_coverage) not in {float, int} or type(minimum_coverage) is bool:
+        raise TreeFeatureError("minimum TrackMan coverage must be numeric")
+    threshold = float(minimum_coverage)
+    if not 0.0 <= threshold <= 1.0:
+        raise TreeFeatureError("minimum TrackMan coverage must be between zero and one")
+    try:
+        state = fit_pitcher_trackman(rows, history, cutoff_year=valid_year - 1)
+    except PitcherTrackmanError as error:
+        raise TreeFeatureSkip(f"TrackMan unavailable: {error}") from error
+    lookup = state.lookup
+    accepted = pd.to_numeric(
+        lookup["tm_match_accepted"], errors="coerce"
+    ).fillna(0)
+    coverage = float(accepted.eq(1).mean()) if len(accepted) else 0.0
+    if coverage < threshold:
+        raise TreeFeatureSkip(f"trackman_coverage={coverage:.6f}")
+    return state
+
+
+def _attach_trackman(
+    frame: pd.DataFrame,
+    pitcher_ids: pd.Series,
+    state: PitcherTrackmanState,
+) -> pd.DataFrame:
+    output = frame.copy(deep=True)
+    lookup = state.lookup.set_index("pitcher_id")
+    added: list[str] = []
+    for bundle_name in ("P0", "P1", "P2", "P3"):
+        bundle = state.bundles[bundle_name].set_index("pitcher_id")
+        for column in bundle.columns:
+            if column in output:
+                raise TreeFeatureError(f"TrackMan feature collision: {column}")
+            output[column] = pd.to_numeric(
+                pitcher_ids.map(bundle[column]), errors="coerce"
+            ).astype("float32")
+            added.append(column)
+    accepted = pd.to_numeric(
+        pitcher_ids.map(lookup["tm_match_accepted"]), errors="coerce"
+    )
+    output["tm_pitcher_mapping_missing"] = accepted.ne(1).astype("float32")
+    if len(added) != len(set(added)):
+        raise TreeFeatureError("TrackMan bundles overlap")
+    return output
+
+
 def fit_tree_features(
     train: pd.DataFrame,
     history: pd.DataFrame | None,
@@ -314,11 +372,8 @@ def fit_tree_features(
     use_trackman: bool,
     minimum_trackman_coverage: float = 0.30,
 ) -> tuple[TreeFeatureState, TreeFeatureBatch]:
-    del history, minimum_trackman_coverage
     if type(use_trackman) is not bool:
         raise TreeFeatureError("use_trackman must be an exact bool")
-    if use_trackman:
-        raise TreeFeatureSkip("TrackMan composition is not available")
     rows = _validate_frame(train, training=True)
     target = pd.to_numeric(rows[_TARGET], errors="coerce")
     if not target.isin([0, 1]).all():
@@ -329,14 +384,29 @@ def fit_tree_features(
         raise TreeFeatureError(str(error)) from error
     raw, categorical = _row_local_features(rows)
     frame, categorical = _append_s1(raw, training_s1, categorical)
+    trackman_state = (
+        _fit_trackman(
+            rows,
+            history,
+            valid_year=valid_year,
+            minimum_coverage=minimum_trackman_coverage,
+        )
+        if use_trackman
+        else None
+    )
+    if trackman_state is not None:
+        frame = _attach_trackman(frame, rows["pitcher_id"], trackman_state)
+    source_hashes = {"S1": _s1_sha256(s1_state)}
+    if trackman_state is not None:
+        source_hashes["TrackMan"] = trackman_state.lookup_sha256
     state = TreeFeatureState(
         valid_year=valid_year,
         prior_rate=s1_state.prior_rate,
         categorical_columns=categorical,
         feature_columns=tuple(frame.columns),
         s1_state=s1_state,
-        trackman_state=None,
-        source_hashes=MappingProxyType({"S1": _s1_sha256(s1_state)}),
+        trackman_state=trackman_state,
+        source_hashes=MappingProxyType(source_hashes),
     )
     row_id = rows[_ROW_ID].astype(str).to_numpy(copy=True)
     row_id.setflags(write=False)
@@ -363,6 +433,8 @@ def transform_tree_features(
         raise TreeFeatureError(str(error)) from error
     raw, categorical = _row_local_features(source)
     frame, categorical = _append_s1(raw, s1, categorical)
+    if state.trackman_state is not None:
+        frame = _attach_trackman(frame, source["pitcher_id"], state.trackman_state)
     if tuple(frame.columns) != state.feature_columns:
         raise TreeFeatureError("evaluation feature schema differs")
     if categorical != state.categorical_columns:
