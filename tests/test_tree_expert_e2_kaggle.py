@@ -1,13 +1,19 @@
 from __future__ import annotations
 
 from hashlib import sha256
+import io
 import json
+import os
 from pathlib import Path
+import subprocess
+import sys
+import tarfile
 from types import SimpleNamespace
 
 import pytest
 
 from experiments.tree_expert.e2_kaggle import (
+    _runtime_archive,
     E2KaggleError,
     discover_inputs,
     runtime_identity_sha256,
@@ -78,3 +84,28 @@ def test_runtime_inventory_has_e2_and_no_generated_submission() -> None:
     assert "experiments/tree_expert/e2_production.py" in names
     assert all("KAGGLE_E2_CELL" not in name for name in names)
     assert all("submission" not in Path(name).name.lower() for name in names)
+
+
+def test_embedded_runtime_imports_without_repository_on_pythonpath(tmp_path: Path) -> None:
+    repository = Path(__file__).resolve().parents[1]
+    extracted = tmp_path / "runtime"
+    extracted.mkdir()
+    with tarfile.open(
+        fileobj=io.BytesIO(_runtime_archive(repository)), mode="r:gz"
+    ) as archive:
+        archive.extractall(extracted, filter="data")
+    environment = dict(os.environ)
+    environment["PYTHONPATH"] = str(extracted)
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "from experiments.tree_expert import e2_production; print(e2_production.__file__)",
+        ],
+        cwd=tmp_path,
+        env=environment,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert completed.stdout.strip().startswith(str(extracted))

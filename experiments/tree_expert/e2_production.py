@@ -117,6 +117,17 @@ def _average_predictions(frames: Sequence[pd.DataFrame]) -> pd.DataFrame:
     return output
 
 
+def build_inference_audit_rows(train_path: Path, *, row_count: int) -> pd.DataFrame:
+    if type(row_count) is not int or row_count <= 0:
+        raise E2ProductionError("inference audit row count differs")
+    rows = pd.read_csv(train_path)
+    seasons = pd.to_numeric(rows["season"], errors="raise")
+    eligible = rows.loc[seasons.eq(2024)].iloc[:row_count].copy(deep=True)
+    if len(eligible) != row_count or "control_success" not in eligible:
+        raise E2ProductionError("inference audit source rows differ")
+    return eligible.drop(columns="control_success").reset_index(drop=True)
+
+
 def _token_from_path(path: Path) -> AcceptedForFullFit:
     value = _read_json(path)
     return AcceptedForFullFit(
@@ -198,37 +209,37 @@ class ProductionRuntime:
             else:
                 pending.append(job)
         with ThreadPoolExecutor(max_workers=2) as pool:
-            active = {}
-            for index, job in enumerate(pending):
-                gpu_id = index % 2
-                _append(self.log, f"TREE_E2_JOB_START job={job.job_id} gpu={gpu_id}")
-                future = pool.submit(
-                    run_e2_fold_job,
-                    job=job,
-                    data=self.data,
-                    baseline=baselines[(job.train_end_year, job.valid_year)],
-                    output_dir=self._job_path(job),
-                    absolute_deadline=wall_deadline,
-                    gpu_id=gpu_id,
-                    input_manifest_sha256=self.evidence.manifest_sha256,
-                    contract=self.contract,
-                )
-                active[future] = job
-            for future in as_completed(active):
-                job = active[future]
-                try:
-                    result = future.result()
-                    if result.status == "completed":
-                        completed.append(job.job_id)
-                    elif result.status == "skipped":
-                        skipped.append(job.job_id)
-                    else:
+            for start in range(0, len(pending), 2):
+                active = {}
+                for gpu_id, job in enumerate(pending[start : start + 2]):
+                    _append(self.log, f"TREE_E2_JOB_START job={job.job_id} gpu={gpu_id}")
+                    future = pool.submit(
+                        run_e2_fold_job,
+                        job=job,
+                        data=self.data,
+                        baseline=baselines[(job.train_end_year, job.valid_year)],
+                        output_dir=self._job_path(job),
+                        absolute_deadline=wall_deadline,
+                        gpu_id=gpu_id,
+                        input_manifest_sha256=self.evidence.manifest_sha256,
+                        contract=self.contract,
+                    )
+                    active[future] = job
+                for future in as_completed(active):
+                    job = active[future]
+                    try:
+                        result = future.result()
+                        if result.status == "completed":
+                            completed.append(job.job_id)
+                        elif result.status == "skipped":
+                            skipped.append(job.job_id)
+                        else:
+                            failed.append(job.job_id)
+                        status = result.status
+                    except Exception as error:
                         failed.append(job.job_id)
-                    status = result.status
-                except Exception as error:
-                    failed.append(job.job_id)
-                    status = f"failed:{type(error).__name__}"
-                _append(self.log, f"TREE_E2_JOB_END job={job.job_id} status={status}")
+                        status = f"failed:{type(error).__name__}"
+                    _append(self.log, f"TREE_E2_JOB_END job={job.job_id} status={status}")
         return tuple(sorted(completed)), tuple(sorted(skipped)), tuple(sorted(failed))
 
     def _structure_decision(self) -> object:
@@ -433,21 +444,22 @@ class ProductionRuntime:
                 export_frozen_tree_state(feature_state, frozen, candidate_id=token.candidate_id)
             models = []
             with ThreadPoolExecutor(max_workers=2) as pool:
-                active = {
-                    pool.submit(
-                        fit_full_seed,
-                        token=token,
-                        seed=seed,
-                        state=feature_state,
-                        batch=batch,
-                        output_dir=self.output / "full_fit/models",
-                        gpu_id=index % 2,
-                        contract=self.contract,
-                    ): seed
-                    for index, seed in enumerate(token.seeds)
-                }
-                for future in as_completed(active):
-                    models.append(future.result())
+                for start in range(0, len(token.seeds), 2):
+                    active = {
+                        pool.submit(
+                            fit_full_seed,
+                            token=token,
+                            seed=seed,
+                            state=feature_state,
+                            batch=batch,
+                            output_dir=self.output / "full_fit/models",
+                            gpu_id=gpu_id,
+                            contract=self.contract,
+                        ): seed
+                        for gpu_id, seed in enumerate(token.seeds[start : start + 2])
+                    }
+                    for future in as_completed(active):
+                        models.append(future.result())
             manifest = {
                 "candidate_id": token.candidate_id,
                 "predictor": token.predictor,
@@ -467,10 +479,11 @@ class ProductionRuntime:
                 catboost_weight=weight,
                 tabm_dir=self.evidence.tabm_runtime_root if token.predictor == "blend" else None,
             )
-            test_path = Path(self.data.root) / "test.csv"
-            if not test_path.is_file():
-                raise E2ProductionError("official evaluation rows are absent")
-            audit = audit_inference(runtime, pd.read_csv(test_path), self.contract)
+            audit_rows = build_inference_audit_rows(
+                self.data.train,
+                row_count=int(self.contract.runtime["inference_rows"]),
+            )
+            audit = audit_inference(runtime, audit_rows, self.contract)
             _write_json(self.output / "audits/inference.json", audit)
             return PhaseOutcome(
                 "passed" if audit.status == "passed" else "failed",
