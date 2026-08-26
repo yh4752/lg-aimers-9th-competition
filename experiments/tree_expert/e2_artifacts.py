@@ -216,7 +216,19 @@ def _verify_manifest_members(
 
 def _state(path: Path, bindings: Mapping[str, str]) -> dict[str, object]:
     value = _read_json(path, "E2 state")
-    expected = {"schema_version", "campaign_id", "status", "phase", "bindings"}
+    expected = {
+        "schema_version",
+        "campaign_id",
+        "status",
+        "phase",
+        "bindings",
+        "completed",
+        "skipped",
+        "failed",
+        "active",
+        "decisions",
+        "artifact_paths",
+    }
     if (
         set(value) != expected
         or value["schema_version"] != 1
@@ -224,6 +236,11 @@ def _state(path: Path, bindings: Mapping[str, str]) -> dict[str, object]:
         or value["bindings"] != _bindings(bindings)
         or type(value["status"]) is not str
         or type(value["phase"]) is not str
+        or any(type(value[name]) is not list for name in ("completed", "skipped", "failed"))
+        or any(
+            type(value[name]) is not dict
+            for name in ("active", "decisions", "artifact_paths")
+        )
     ):
         raise E2ArtifactError("E2 state identity or binding differs")
     return value
