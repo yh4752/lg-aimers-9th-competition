@@ -7,6 +7,7 @@ import multiprocessing
 import os
 from pathlib import Path
 import tempfile
+import threading
 import time
 from types import MappingProxyType
 from typing import Callable, Mapping, Protocol, Sequence
@@ -322,9 +323,12 @@ def run_e2_campaign(
     state_path: Path | None = None,
     clock: Callable[[], float] = time.time,
     new_job_guard_seconds: int = 600,
+    snapshot_interval_seconds: int = 600,
 ) -> CampaignResult:
     if type(new_job_guard_seconds) is not int or new_job_guard_seconds < 0:
         raise E2RunnerError("new-job guard differs")
+    if type(snapshot_interval_seconds) is not int or snapshot_interval_seconds <= 0:
+        raise E2RunnerError("snapshot interval differs")
     output = Path(output_dir)
     output.mkdir(parents=True, exist_ok=True)
     state_file = output / "stage_state.json" if state_path is None else Path(state_path)
@@ -342,6 +346,23 @@ def run_e2_campaign(
             state.write(state_file)
             break
         phase = state.phase
+        state = state.with_update(active={phase: "running"})
+        state.write(state_file)
+        try:
+            runtime.publish(state, output / "bundles")
+        except Exception:
+            pass
+        stop_monitor = threading.Event()
+
+        def publish_snapshot() -> None:
+            while not stop_monitor.wait(snapshot_interval_seconds):
+                try:
+                    runtime.publish(state, output / "bundles")
+                except Exception:
+                    pass
+
+        monitor = threading.Thread(target=publish_snapshot, daemon=True)
+        monitor.start()
         try:
             outcome = runtime.run_phase(
                 phase,
@@ -359,7 +380,11 @@ def run_e2_campaign(
                 decisions=decisions,
             )
             state.write(state_file)
+            stop_monitor.set()
+            monitor.join(timeout=5)
             break
+        stop_monitor.set()
+        monitor.join(timeout=5)
 
         decisions = dict(state.decisions)
         decisions[phase] = dict(outcome.decisions)

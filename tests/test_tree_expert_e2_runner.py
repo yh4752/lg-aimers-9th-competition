@@ -29,6 +29,7 @@ class FakeRuntime:
     def __post_init__(self) -> None:
         self.phase_order: list[str] = []
         self.started_jobs: list[str] = []
+        self.publish_calls = 0
 
     def run_phase(
         self,
@@ -61,6 +62,7 @@ class FakeRuntime:
         )
 
     def publish(self, state: CampaignState, output_dir: Path) -> object:
+        self.publish_calls += 1
         output_dir.mkdir(parents=True, exist_ok=True)
         resume = output_dir / "resume.zip"
         resume.write_bytes(b"resume")
@@ -89,6 +91,7 @@ def test_pass_path_runs_exact_phase_order(tmp_path: Path) -> None:
     ]
     assert result.status == "accepted"
     assert result.bundles.delivery is not None
+    assert runtime.publish_calls >= len(runtime.phase_order) + 1
 
 
 def test_structure_rejection_stops_later_phases(tmp_path: Path) -> None:
