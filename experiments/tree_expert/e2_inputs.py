@@ -42,6 +42,10 @@ _E1_PREDICTION_MEMBERS = {
         "jobs/e1__c2_trackman_residual__tr2023__va2024__s3407/predictions.csv"
     ),
 }
+_E1_METRIC_MEMBERS = {
+    candidate_id: source_name.replace("predictions.csv", "metrics.json")
+    for candidate_id, source_name in _E1_PREDICTION_MEMBERS.items()
+}
 _STAGE_C_PREDICTION_MEMBERS = {
     "2022->2023": (
         "predictions/c_final__a__p2__piecewise_linear__bce__plateau__s42"
@@ -65,6 +69,8 @@ E2_INPUT_MEMBERS = (
     "e1/decision.json",
     "e1/c1_f3_predictions.csv",
     "e1/c2_f3_predictions.csv",
+    "e1/c1_f3_metrics.json",
+    "e1/c2_f3_metrics.json",
     "stage_c/tabm_f2_predictions.csv",
     "stage_c/tabm_f3_predictions.csv",
     *(f"tabm/{name}" for name in _TABM_MEMBERS),
@@ -72,6 +78,10 @@ E2_INPUT_MEMBERS = (
 _E1_COMPACT_PREDICTIONS = {
     "c1_anchor_residual": "e1/c1_f3_predictions.csv",
     "c2_trackman_residual": "e1/c2_f3_predictions.csv",
+}
+_E1_COMPACT_METRICS = {
+    "c1_anchor_residual": "e1/c1_f3_metrics.json",
+    "c2_trackman_residual": "e1/c2_f3_metrics.json",
 }
 _TABM_COMPACT_PREDICTIONS = {
     "2022->2023": "stage_c/tabm_f2_predictions.csv",
@@ -85,6 +95,7 @@ class VerifiedE2Input:
     archive_sha256: str
     manifest_sha256: str
     e1_predictions: Mapping[str, Path]
+    e1_metrics: Mapping[str, Path]
     tabm_predictions: Mapping[str, Path]
     tabm_runtime_root: Path
     lineage: Mapping[str, str]
@@ -204,6 +215,23 @@ def _decision(payload: bytes) -> dict[str, object]:
     return value
 
 
+def _metric(payload: bytes, candidate_id: str) -> dict[str, object]:
+    try:
+        value = json.loads(payload)
+    except Exception as error:
+        raise E2InputError(f"E1 metric is unreadable: {error}") from error
+    if (
+        type(value) is not dict
+        or value.get("objective") != "residual"
+        or type(value.get("best_iteration")) is not int
+        or value["best_iteration"] < 0
+        or type(value.get("row_count")) is not int
+        or value["row_count"] <= 0
+    ):
+        raise E2InputError(f"E1 metric differs: {candidate_id}")
+    return value
+
+
 def _verified_e1_archive(payload: bytes, *, kind: str) -> ZipFile:
     try:
         archive = ZipFile(BytesIO(payload), "r")
@@ -318,6 +346,9 @@ def prepare_e2_input(
     payloads: dict[str, bytes] = {"e1/decision.json": decision}
     for candidate_id, source_name in _E1_PREDICTION_MEMBERS.items():
         payloads[_E1_COMPACT_PREDICTIONS[candidate_id]] = review.read(source_name)
+        metric = review.read(_E1_METRIC_MEMBERS[candidate_id])
+        _metric(metric, candidate_id)
+        payloads[_E1_COMPACT_METRICS[candidate_id]] = metric
     review.close()
 
     if file_sha256(stage_c_delivery) != active.input_hashes["stage_c_delivery_sha256"]:
@@ -437,6 +468,8 @@ def verify_and_extract_e2_input(
         ):
             raise E2InputError(f"E2 input member differs: {name}")
     _decision(payloads["e1/decision.json"])
+    for candidate_id, name in _E1_COMPACT_METRICS.items():
+        _metric(payloads[name], candidate_id)
     bindings = manifest["prediction_bindings"]
     prediction_names = {
         *_E1_COMPACT_PREDICTIONS.values(),
@@ -486,6 +519,9 @@ def verify_and_extract_e2_input(
                 key: root / name
                 for key, name in _E1_COMPACT_PREDICTIONS.items()
             }
+        ),
+        e1_metrics=MappingProxyType(
+            {key: root / name for key, name in _E1_COMPACT_METRICS.items()}
         ),
         tabm_predictions=MappingProxyType(
             {key: root / name for key, name in _TABM_COMPACT_PREDICTIONS.items()}

@@ -53,6 +53,12 @@ def _member_payloads() -> dict[str, bytes]:
             sort_keys=True,
             separators=(",", ":"),
         ).encode("utf-8"),
+        "e1/c1_f3_metrics.json": json.dumps(
+            {"objective": "residual", "best_iteration": 77, "row_count": 2}
+        ).encode("utf-8"),
+        "e1/c2_f3_metrics.json": json.dumps(
+            {"objective": "residual", "best_iteration": 81, "row_count": 2}
+        ).encode("utf-8"),
         **{name: predictions for name in PREDICTION_MEMBERS},
         "tabm/script.py": b"def predict(rows):\n    return rows\n",
         "tabm/requirements.txt": b"tabm==0.0.3\n",
@@ -143,6 +149,10 @@ def test_extracts_only_the_sealed_member_set(tmp_path: Path) -> None:
 
     assert set(E2_INPUT_MEMBERS) == {"manifest.json", *members}
     assert set(verified.e1_predictions) == {
+        "c1_anchor_residual",
+        "c2_trackman_residual",
+    }
+    assert set(verified.e1_metrics) == {
         "c1_anchor_residual",
         "c2_trackman_residual",
     }

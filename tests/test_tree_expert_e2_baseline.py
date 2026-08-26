@@ -162,6 +162,7 @@ def test_reused_baselines_are_aligned_to_official_rows(tmp_path: Path) -> None:
         archive_sha256="a" * 64,
         manifest_sha256="b" * 64,
         e1_predictions=MappingProxyType({}),
+        e1_metrics=MappingProxyType({}),
         tabm_predictions=MappingProxyType(
             {"2022->2023": f2_path, "2023->2024": f3_path}
         ),
