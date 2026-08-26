@@ -154,7 +154,8 @@ calibration 또는 결합 계수 생성에는 사용하지 않는다. 완료된 
 
 - 기존 F2·F3 OOF는 후보 ID, 설정, 전처리와 코드 SHA-256이 제출 영수증과 연결될
   때만 재사용한다.
-- 동일 설정의 F1 OOF가 없으면 E1에서 F1 기준 job 하나를 추가한다.
+- 동일 설정의 F1 OOF가 없으면 F1이 실제로 필요한 E2 시작 단계에서 기준 job
+  하나를 추가한다. F3만 사용하는 E1에서는 학습하지 않는다.
 - temporal T1 anchor가 동일 identity를 증명하지 못하면 기준 TabM OOF로 대체하지
   않는다.
 - 세 fold 모두에서 CatBoost와 TabM의 `row_id`, target, fold 정의가 정확히 같아야
@@ -291,7 +292,6 @@ TrackMan은 후보 C2부터 사용한다.
 E1 선택:
 
 - 기존 TabM 기준 OOF와 독립 CatBoost Brier를 모두 기록
-- 필요한 경우 동일 설정의 F1 기준 TabM OOF job 하나를 추가
 - 기준 대비 개선량, bootstrap 하한, 세그먼트 회귀 기록
 - 상위 최대 두 구조만 E2로 승급
 - 후보가 모두 최신 fold에서 `0.00005` 이상 회귀하면 E2를 중단
@@ -302,6 +302,9 @@ E1 선택:
 
 E1 상위 최대 두 구조를 F1과 F2에서 seed `3407`로 학습한다. F3 결과와 합쳐 세
 fold의 방향을 판단한다.
+
+이 단계에 들어오기 전에 동일 설정의 F1 기준 TabM OOF가 없으면 기준 job 하나를
+먼저 실행한다. F2·F3는 identity binding이 일치하는 기존 OOF만 재사용한다.
 
 최종 구조는 다음 순서로 선택한다.
 
@@ -482,7 +485,7 @@ CatBoost가 선택되면 `catboost==1.2.10`만 추가 설치 대상으로 고정
 | 단계 | 최대 벽시계 | 주요 작업 |
 |---|---:|---|
 | E1 준비·감사 | 0.5시간 | 입력·label·TrackMan mapping 감사 |
-| E1 학습 | 3.0시간 | F3 최대 4후보, 필요 시 F1 기준 TabM 1개 |
+| E1 학습 | 3.0시간 | F3 최대 4후보 |
 | E1 정리 | 0.5시간 | metric·review·resume |
 | E2 fold 확인 | 2.0시간 | 상위 2구조 F1/F2 |
 | E2 seed 확인 | 2.5시간 | 최종 구조 2개 seed x 3fold |
