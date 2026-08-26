@@ -25,7 +25,7 @@ Kaggle Notebook에 다음 데이터셋을 연결한다.
 2. `tree_expert_e2_input.zip`으로 만든 데이터셋
 3. 재실행할 때만 직전 `tree_expert_e2_handoff.zip` 또는 그 안의 resume ZIP
 
-가속기는 `GPU T4 x2`를 선택한다. `experiments/tree_expert/KAGGLE_E2_CELL.py` 전체를 한 셀에 붙여 실행하거나 Save Version을 사용한다. 정상적인 예상 시간은 45–90분이고, 하드 캡은 6시간이다. 첫 안정 산출물 게시 전에는 Output Data가 비어 보일 수 있다.
+가속기는 `GPU T4 x2`를 선택한다. `experiments/tree_expert/KAGGLE_E2_CELL.py` 전체를 한 셀에 붙여 실행하거나 Save Version을 사용한다. 빠른 환경에서는 45–90분, 보통은 약 1.5–3시간을 예상하며 하드 캡은 6시간이다. 첫 안정 산출물 게시 전에는 Output Data가 비어 보일 수 있다.
 
 주요 로그는 `TREE_E2_CODE_READY`, `TREE_E2_DEPENDENCIES_READY`, `TREE_E2_INPUTS_FOUND`, `TREE_E2_GPU_READY`, 각 B0–B3 단계 로그, 마지막 `TREE_E2_HANDOFF_READY` 순서로 나온다.
 
