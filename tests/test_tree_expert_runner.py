@@ -15,7 +15,7 @@ from experiments.tree_expert.inputs import (
     VerifiedOfficialData,
     file_sha256,
 )
-from experiments.tree_expert.runner import run_e1_campaign
+from experiments.tree_expert.runner import code_identity_member_names, run_e1_campaign
 from experiments.tree_expert.training import FoldResult
 
 
@@ -69,6 +69,14 @@ class FakeClock:
 
     def __call__(self) -> float:
         return self.now
+
+
+def test_code_identity_excludes_generated_kaggle_cell() -> None:
+    members = code_identity_member_names()
+
+    assert "experiments/tree_expert/runner.py" in members
+    assert "experiments/tree_expert/kaggle.py" in members
+    assert "experiments/tree_expert/KAGGLE_E1_CELL.py" not in members
 
 
 def _context(tmp_path: Path):

@@ -23,6 +23,7 @@ from .artifacts import (
 )
 from .contracts import DEFAULT_CONTRACT, E1Contract, E1Job, build_e1_jobs, load_e1_contract
 from .inputs import VerifiedE1Input, VerifiedOfficialData
+from .kaggle import runtime_member_names
 from .metrics import CandidateMetric, decide_e1, evaluate_e1_candidate, skipped_metric
 from .training import FoldResult, run_e1_job
 
@@ -78,20 +79,17 @@ def _append_log(path: Path, message: str) -> None:
         handle.flush()
 
 
+def code_identity_member_names() -> tuple[str, ...]:
+    return runtime_member_names()
+
+
 def _code_sha256() -> str:
     root = Path(__file__).resolve().parents[2]
-    members = sorted((root / "experiments" / "tree_expert").glob("*.py"))
-    members.extend(
-        [
-            root / "experiments" / "temporal_portfolio" / "seasonal_features.py",
-            root / "experiments" / "temporal_portfolio" / "trackman_pitcher.py",
-        ]
-    )
     digest = sha256()
-    for path in sorted(members):
+    for name in code_identity_member_names():
+        path = root / name
         if not path.is_file():
             raise TreeRunnerError(f"runtime source is absent: {path}")
-        name = path.relative_to(root).as_posix()
         digest.update(name.encode("utf-8"))
         digest.update(b"\0")
         digest.update(path.read_bytes())
