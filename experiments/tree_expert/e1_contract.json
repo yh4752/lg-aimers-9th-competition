@@ -1,0 +1,83 @@
+{
+  "schema_version": 1,
+  "campaign_id": "tree_expert_e1_v1",
+  "review_only": true,
+  "submission_package": false,
+  "official_train_sha256": "d2081186b458b49f60b082be480c273135833e15ba59a76d033af28bcf8763ff",
+  "official_history_sha256": "f7818f9ee0ccefe7c2cf69fa99efe6e5cb882d8b886dd96d2394bcf3b53f33a9",
+  "stage_c_delivery_sha256": "f054e8e819d1053299fef4749a32e923db9136e20fc9c12cda79bbc7ef8c484a",
+  "stage_c_review_sha256": "461c4422cebdc7383577ad6c53b044bfe3d9d15b667383e454591135e4242d2c",
+  "baseline_predictor": "single_s3407",
+  "fold": {
+    "train_end_year": 2023,
+    "valid_year": 2024
+  },
+  "seed": 3407,
+  "candidates": [
+    {
+      "candidate_id": "c0_native_ctr",
+      "objective": "binary",
+      "use_trackman": false,
+      "use_failure_labels": false
+    },
+    {
+      "candidate_id": "c1_anchor_residual",
+      "objective": "residual",
+      "use_trackman": false,
+      "use_failure_labels": false
+    },
+    {
+      "candidate_id": "c2_trackman_residual",
+      "objective": "residual",
+      "use_trackman": true,
+      "use_failure_labels": false
+    },
+    {
+      "candidate_id": "c3_failure_aware",
+      "objective": "multiclass",
+      "use_trackman": false,
+      "use_failure_labels": true
+    }
+  ],
+  "catboost": {
+    "iterations": 800,
+    "depth": 8,
+    "learning_rate": 0.04,
+    "l2_leaf_reg": 5.0,
+    "random_strength": 0.5,
+    "bootstrap_type": "Bayesian",
+    "bagging_temperature": 0.5,
+    "border_count": 128,
+    "max_ctr_complexity": 2,
+    "one_hot_max_size": 16,
+    "od_type": "Iter",
+    "od_wait": 60,
+    "task_type": "GPU",
+    "allow_writing_files": true
+  },
+  "failure_label_gate": {
+    "minimum_coverage": 0.98,
+    "minimum_binary_delta_fraction": 0.999,
+    "minimum_success_agreement": 0.999,
+    "maximum_middle_reverse_overlap": 0.001,
+    "minimum_class_rows": 10000,
+    "delta_tolerance": 0.02
+  },
+  "trackman_gate": {
+    "minimum_accepted_coverage": 0.3
+  },
+  "metrics": {
+    "bootstrap_repeats": 1000,
+    "bootstrap_seed": 3407,
+    "minimum_segment_rows": 5000
+  },
+  "gates": {
+    "stop_if_all_regress_more_than": 0.00005,
+    "maximum_promoted": 2
+  },
+  "budget": {
+    "wall_seconds": 14400,
+    "new_job_guard_seconds": 600,
+    "snapshot_interval_seconds": 300
+  }
+}
