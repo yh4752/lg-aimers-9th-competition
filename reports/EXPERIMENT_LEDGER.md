@@ -22,7 +22,8 @@
 | 14 | `xgboost_aggressive_capacity_v1` | XGBoost | 역사 fold 구조 탐색·최근 시즌 ensemble | depthwise d6·lossguide l63 4-member, local Brier `0.2479270213638507` | public scored; rules quarantine | `820.9583317093` | [result](acceptances/xgboost_aggressive_capacity_public_result.json) |
 | 15 | `tabm_hand_matchup_version_d_seed3407_v1` | TabM | 2022→2023·2023→2024 후 전체 학습 | 최신 Brier `0.2481108023`, 이전 Brier `0.2508657359`, 전체 학습 3 epoch | accepted; public scored | `872.3920184667` | [result](acceptances/tabm_hand_matchup_public_result.json) |
 | 16 | `tabm_seed_ensemble` | TabM seed 평균 | 2022→2023·2023→2024 OOF 499,032행 | seed 3407 Brier `0.2494662366`; 두 평균 모두 `0.000318` 이상 악화 | rejected; keep seed 3407 | — | [rejection](rejections/tabm_seed_ensemble_rejection.json) |
-| 17 | `tree_expert_e2_c1_catboost` | anchor residual CatBoost 3시드 | 2021→2022·2022→2023·2023→2024, 전체 245,789행 독립성 감사 | weighted gain `0.0008375137`, worst fold gain `0.0003439904`, bootstrap lower `0.0006692336`; 행 독립성 최대 오차 `0` | accepted; package ready | — | E2 handoff SHA-256 `4dd0c901…384050f` |
+| 17 | `tree_expert_e2_c1_catboost` | anchor residual CatBoost 3시드 | 2021→2022·2022→2023·2023→2024, 전체 245,789행 독립성 감사 | weighted gain `0.0008375137`, worst fold gain `0.0003439904`, bootstrap lower `0.0006692336`; 행 독립성 최대 오차 `0` | accepted; public scored | `977.3809532715` | E2 handoff SHA-256 `4dd0c901…384050f` |
+| 18 | `tree_expert_t3_temporal_dual_v1` | 최근 시즌·감쇠 다중 시즌 CatBoost 잔차 전문가 | 2021→2022·2022→2023 구조 선택, 2023→2024 확인, 3시드 재검증 | decay `0.35/0.55/0.75`, 최근 모델 비중 `0.70/0.80/0.90`; 전체 행 가중 Brier와 fold·segment gate 적용 | implementation ready; not run | — | T3 input SHA-256 `b1c0a991…41728` |
 
 ## 현재 결론
 
@@ -42,6 +43,8 @@
   CatBoost seed 42·2026·3407 평균이 최종 후보로 승인됐다. 245,789행 reverse·shuffle·
   rebatch·singleton 감사에서 예측 차이는 모두 `0`이었다. 제출 ZIP은 기존 단일
   패키저로 만들었으며 SHA-256은 `8bc33042b9258049f905df0c733b1153d1cedfac39cb0732b2a7e154629d779a`다.
-  Public 점수는 아직 확인하지 않았으므로 장부에 기록하지 않는다.
+  Public 점수는 `977.3809532715`였다. 이전 규칙 준수 제출보다 올랐지만 1130점대와의
+  차이는 남았다. 다음 실험 T3는 E2를 버리지 않고, 직전 시즌 전용 모델과 과거 시즌
+  감쇠 모델을 분리해 시간 가중 구조 자체를 검증한다.
 - 대용량 OOF, 모델과 ZIP은 Google Drive에 두고 이 장부는 작은 evidence와 실행
   ID로 원본을 식별한다.
