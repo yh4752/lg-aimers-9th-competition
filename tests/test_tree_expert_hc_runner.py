@@ -47,6 +47,13 @@ class _Runtime:
         )
 
 
+class _IncompleteRuntime:
+    def run_stage(self, stage, state, deadline, gpu_count):
+        del deadline, gpu_count
+        evidence = Path("unused")
+        return HCStageOutcome(state, "incomplete", {}, None, None)
+
+
 def test_fresh_campaign_runs_only_h1_and_publishes_handoff(tmp_path: Path):
     runtime = _Runtime(tmp_path)
     result = run_campaign(
@@ -123,3 +130,18 @@ def test_gpu_count_must_be_one_or_two(tmp_path: Path):
             wall_deadline=10**12,
             gpu_count=0,
         )
+
+
+def test_incomplete_h1_keeps_same_stage_and_publishes_resume(tmp_path: Path):
+    result = run_campaign(
+        runtime=_IncompleteRuntime(),
+        state=initial_state(_bindings()),
+        campaign_root=tmp_path / "campaign",
+        bundle_root=tmp_path / "bundles",
+        log_path=tmp_path / "campaign.log",
+        wall_deadline=10**12,
+        gpu_count=2,
+    )
+    assert result.status == "incomplete"
+    assert result.next_stage == "H1"
+    assert result.delivery is None

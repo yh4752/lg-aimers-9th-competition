@@ -85,11 +85,12 @@ def run_campaign(
     outcome = runtime.run_stage(completed_stage, state, wall_deadline, gpu_count)
     if outcome.state.bindings != state.bindings:
         raise HCRunnerError("stage outcome bindings differ")
-    if completed_stage == "H1" and outcome.state.stage != "H2":
+    incomplete = outcome.status in {"incomplete", "budget_inconclusive"}
+    if completed_stage == "H1" and outcome.state.stage != ("H1" if incomplete else "H2"):
         raise HCRunnerError("H1 outcome did not advance to H2")
     if completed_stage == "H2" and outcome.state.stage not in {"H2", "H3"}:
         raise HCRunnerError("H2 outcome stage differs")
-    if completed_stage == "H3" and outcome.delivery is None:
+    if completed_stage == "H3" and outcome.delivery is None and not incomplete:
         raise HCRunnerError("H3 outcome is missing model delivery")
     root = Path(campaign_root)
     bundles = Path(bundle_root)
