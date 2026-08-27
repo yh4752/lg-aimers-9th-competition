@@ -6,13 +6,13 @@ import io
 import json
 import os
 from pathlib import Path, PurePosixPath
+import tempfile
 from types import MappingProxyType
 from typing import Mapping
 from zipfile import BadZipFile, ZIP_DEFLATED, ZipFile, ZipInfo
 
 import pandas as pd
 
-from .e2_artifacts import E2ArtifactError, verify_e2_handoff
 from .rf_contracts import contract_sha256, load_rf_contract
 
 
@@ -44,6 +44,15 @@ class VerifiedRFInput:
     fold_predictions: Mapping[tuple[int, int], Path]
     acceptance: Path
     full_fit_root: Path
+
+
+@dataclass(frozen=True)
+class VerifiedOfficialData:
+    root: Path
+    train: Path
+    history: Path
+    train_sha256: str
+    history_sha256: str
 
 
 def file_sha256(path: Path) -> str:
@@ -176,15 +185,35 @@ def _read_e2_handoff(path: Path, expected_sha: str) -> dict[str, bytes]:
     if not source.is_file() or file_sha256(source) != expected_sha:
         raise RFInputError("E2 handoff SHA-256 differs")
     try:
-        verified = verify_e2_handoff(source)
-    except E2ArtifactError as error:
-        raise RFInputError(f"E2 handoff verification failed: {error}") from error
-    if verified.status != "accepted" or not verified.delivery:
-        raise RFInputError("E2 handoff is not accepted")
-    try:
         with ZipFile(source) as outer:
             infos = _safe_infos(outer, "E2 handoff", _MAX_HANDOFF_EXPANDED)
             handoff_manifest = outer.read(infos["handoff_manifest.json"])
+            handoff = _json(handoff_manifest, "E2 handoff manifest")
+            expected_names = {
+                "handoff_manifest.json", "tree_expert_e2_model_delivery.zip",
+                "tree_expert_e2_resume.zip", "tree_expert_e2_review.zip", "tree_expert_e2.log",
+            }
+            if (
+                set(infos) != expected_names
+                or handoff.get("artifact_kind") != "tree_expert_e2_handoff_v1"
+                or handoff.get("campaign_id") != "tree_expert_e2_v1"
+                or handoff.get("status") != "accepted"
+                or handoff.get("delivery") is not True
+                or handoff.get("submission_package") is not False
+            ):
+                raise RFInputError("E2 handoff is not accepted")
+            declared = handoff.get("members")
+            if type(declared) is not dict or set(declared) != expected_names - {"handoff_manifest.json"}:
+                raise RFInputError("E2 handoff members differ")
+            for name in sorted(declared):
+                payload = outer.read(infos[name])
+                metadata = declared[name]
+                if (
+                    type(metadata) is not dict
+                    or metadata.get("size") != len(payload)
+                    or metadata.get("sha256") != sha256(payload).hexdigest()
+                ):
+                    raise RFInputError(f"E2 handoff member differs: {name}")
             review = outer.read(infos["tree_expert_e2_review.zip"])
             delivery = outer.read(infos["tree_expert_e2_model_delivery.zip"])
         _validate_delivery(delivery)
@@ -350,3 +379,37 @@ def verify_and_extract_rf_input(
         acceptance=root / "e2/acceptance.json",
         full_fit_root=full_fit_root,
     )
+
+
+def verify_official_data(root: Path, *, testing: bool = False) -> VerifiedOfficialData:
+    source = Path(root)
+    if source.is_symlink() or not source.is_dir():
+        raise RFInputError("official data directory is missing")
+    resolved = source.resolve()
+    if testing and not resolved.is_relative_to(Path(tempfile.gettempdir()).resolve()):
+        raise RFInputError("testing hash bypass requires temporary data")
+    found: dict[str, list[Path]] = {"train.csv": [], "trackman_history.csv": []}
+    for directory, directory_names, file_names in os.walk(resolved, followlinks=False):
+        current = Path(directory)
+        if any((current / name).is_symlink() for name in directory_names):
+            raise RFInputError("official data contains a symlink directory")
+        for name in found:
+            if name in file_names:
+                candidate = current / name
+                if candidate.is_symlink() or not candidate.is_file():
+                    raise RFInputError(f"official {name} is not a regular file")
+                found[name].append(candidate)
+    for name, candidates in found.items():
+        if len(candidates) != 1 or candidates[0].parent != resolved:
+            raise RFInputError(f"official {name} must occur exactly once at the data root")
+    train = found["train.csv"][0]
+    history = found["trackman_history.csv"][0]
+    train_hash = file_sha256(train)
+    history_hash = file_sha256(history)
+    contract = load_rf_contract()
+    if not testing and (
+        train_hash != contract.inputs["official_train_sha256"]
+        or history_hash != contract.inputs["official_history_sha256"]
+    ):
+        raise RFInputError("official data SHA-256 differs")
+    return VerifiedOfficialData(resolved, train, history, train_hash, history_hash)

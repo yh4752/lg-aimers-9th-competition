@@ -117,19 +117,25 @@ def route_probability(
     return np.clip((1.0 - weights) * base + weights * expert, 1e-5, 1 - 1e-5)
 
 
-def _validate_structure(evidence: RFStructureEvidence, contract: RFContract) -> None:
+def _validate_structure(
+    evidence: RFStructureEvidence,
+    contract: RFContract,
+    *,
+    folds: tuple[Fold, ...] | None = None,
+) -> None:
     if type(evidence) is not RFStructureEvidence:
         raise RFDecisionError("structure evidence type differs")
-    if set(evidence.target) != set(contract.folds):
+    expected_folds = contract.folds if folds is None else folds
+    if set(evidence.target) != set(expected_folds):
         raise RFDecisionError("structure folds differ")
-    if set(evidence.baseline) != set(contract.folds) or set(evidence.game_type) != set(contract.folds):
+    if set(evidence.baseline) != set(expected_folds) or set(evidence.game_type) != set(expected_folds):
         raise RFDecisionError("structure folds differ")
     if set(evidence.expert) != {"f_small", "f_wide", "r_expert"}:
         raise RFDecisionError("structure heads differ")
     for head in evidence.expert:
-        if set(evidence.expert[head]) != set(contract.folds):
+        if set(evidence.expert[head]) != set(expected_folds):
             raise RFDecisionError("structure head folds differ")
-    for fold in contract.folds:
+    for fold in expected_folds:
         target = _vector(evidence.target[fold])
         if not np.isin(target, [0.0, 1.0]).all():
             raise RFDecisionError("target values differ")
@@ -140,7 +146,7 @@ def _validate_structure(evidence: RFStructureEvidence, contract: RFContract) -> 
 
 
 def screen_structure_heads(evidence: RFStructureEvidence, contract: RFContract) -> tuple[str, ...]:
-    _validate_structure(evidence, contract)
+    _validate_structure(evidence, contract, folds=contract.folds[:2])
     survivors: list[str] = []
     for head in ("f_small", "f_wide", "r_expert"):
         segment_name = "F" if head.startswith("f_") else "R"
@@ -248,22 +254,33 @@ def _gate_reason(
     return None
 
 
-def select_rf_structure(evidence: RFStructureEvidence, contract: RFContract) -> RFStructureDecision:
+def select_rf_structure(
+    evidence: RFStructureEvidence,
+    contract: RFContract,
+    *,
+    allowed_heads: tuple[str, ...] | None = None,
+) -> RFStructureDecision:
     _validate_structure(evidence, contract)
+    allowed = {"f_small", "f_wide", "r_expert"} if allowed_heads is None else set(allowed_heads)
+    if not allowed.issubset({"f_small", "f_wide", "r_expert"}) or not allowed.intersection({"f_small", "f_wide"}):
+        raise RFDecisionError("allowed heads differ")
     scored: list[tuple[tuple[float, int, float, int, float, float], str, float, float]] = []
     for f_head in ("f_small", "f_wide"):
+        if f_head not in allowed:
+            continue
         for alpha_f in contract.alpha_values:
             score = _joined_brier(evidence, contract.folds[:2], f_head, 0.0, alpha_f)
             scored.append(((score, 0 if f_head == "f_small" else 1, alpha_f, 0, 0.0, alpha_f), f_head, 0.0, alpha_f))
-        for alpha_r in contract.alpha_values:
-            for alpha_f in contract.alpha_values:
-                score = _joined_brier(evidence, contract.folds[:2], f_head, alpha_r, alpha_f)
-                scored.append((
-                    (score, 0 if f_head == "f_small" else 1, alpha_r + alpha_f, 1, alpha_r, alpha_f),
-                    f_head,
-                    alpha_r,
-                    alpha_f,
-                ))
+        if "r_expert" in allowed:
+            for alpha_r in contract.alpha_values:
+                for alpha_f in contract.alpha_values:
+                    score = _joined_brier(evidence, contract.folds[:2], f_head, alpha_r, alpha_f)
+                    scored.append((
+                        (score, 0 if f_head == "f_small" else 1, alpha_r + alpha_f, 1, alpha_r, alpha_f),
+                        f_head,
+                        alpha_r,
+                        alpha_f,
+                    ))
     key, f_head, alpha_r, alpha_f = min(scored, key=lambda item: item[0])
     candidate = {
         fold: _candidate(evidence, fold, f_head, alpha_r, alpha_f)

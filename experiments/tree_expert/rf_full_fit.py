@@ -12,10 +12,10 @@ from typing import Callable, Mapping, Protocol, Sequence
 import numpy as np
 import pandas as pd
 
-from .e2_full_fit import export_frozen_tree_state
 from .features import TreeFeatureBatch, fit_tree_features
 from .rf_contracts import RFContract, load_rf_contract
 from .rf_decisions import RFAcceptanceDecision, acceptance_payload
+from .rf_state import export_frozen_tree_state
 
 
 class RFFullFitError(ValueError):

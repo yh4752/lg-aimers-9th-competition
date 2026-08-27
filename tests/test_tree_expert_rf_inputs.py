@@ -14,6 +14,7 @@ from experiments.tree_expert.rf_inputs import (
     file_sha256,
     prepare_rf_input,
     verify_and_extract_rf_input,
+    verify_official_data,
 )
 
 
@@ -197,3 +198,13 @@ def test_rf_input_accepts_expanded_directory(tmp_path: Path) -> None:
         expected_e2_sha256=digest,
     )
     assert verified.manifest_sha256
+
+
+def test_verify_official_data_accepts_exactly_one_root_in_testing(tmp_path: Path) -> None:
+    (tmp_path / "train.csv").write_text("row_id,control_success\na,1\n")
+    (tmp_path / "trackman_history.csv").write_text("pitcher_id\np1\n")
+
+    verified = verify_official_data(tmp_path, testing=True)
+
+    assert verified.root == tmp_path.resolve()
+    assert len(verified.train_sha256) == 64

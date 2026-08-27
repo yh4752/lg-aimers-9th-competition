@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+from pathlib import Path
 from typing import Callable, Mapping, Sequence
 
 import numpy as np
@@ -7,6 +9,7 @@ import pandas as pd
 
 from .features import TreeFeatureBatch, transform_tree_features
 from .rf_decisions import RFDecisionError, route_probability
+from .rf_state import load_frozen_tree_state
 
 
 class RFInferenceError(ValueError):
@@ -178,3 +181,98 @@ def audit_row_independence(
         "maximum_absolute_difference": maximum,
         "tolerance": float(tolerance),
     }
+
+
+def _load_models(root: Path, names: tuple[str, ...]) -> tuple[object, ...]:
+    try:
+        from catboost import CatBoostRegressor
+    except ImportError as error:
+        raise RFInferenceError("catboost==1.2.10 is required") from error
+    models: list[object] = []
+    for name in names:
+        path = root / name
+        if path.is_symlink() or not path.is_file():
+            raise RFInferenceError(f"RF model is absent: {name}")
+        model = CatBoostRegressor()
+        model.load_model(str(path))
+        models.append(model)
+    return tuple(models)
+
+
+class _TreeEnsembleRuntime:
+    def __init__(self, state: object, models: tuple[object, ...]) -> None:
+        self.state = state
+        self.models = models
+
+    def predict(self, rows: pd.DataFrame, *, batch_size: int = 4096) -> np.ndarray:
+        del batch_size
+        batch = transform_tree_features(rows.copy(deep=True), self.state)
+        anchor = np.asarray(batch.anchor, dtype="float64")
+        members = [
+            np.clip(anchor + np.asarray(model.predict(batch.frame), dtype="float64"), 1e-5, 1 - 1e-5)
+            for model in self.models
+        ]
+        if any(item.shape != anchor.shape or not np.isfinite(item).all() for item in members):
+            raise RFInferenceError("baseline model prediction differs")
+        return np.mean(np.stack(members), axis=0)
+
+
+def load_rf_inference_runtime(
+    *,
+    baseline_delivery_root: Path,
+    rf_full_fit_root: Path,
+) -> RFInferenceRuntime:
+    baseline_root = Path(baseline_delivery_root)
+    rf_root = Path(rf_full_fit_root)
+    try:
+        baseline_manifest = json.loads((baseline_root / "manifest.json").read_text(encoding="utf-8"))
+        rf_manifest = json.loads((rf_root / "full_fit_manifest.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise RFInferenceError("inference manifest cannot be loaded") from error
+    if (
+        baseline_manifest.get("artifact_kind") != "tree_expert_e2_model_delivery_v1"
+        or baseline_manifest.get("candidate_id") != "c1_anchor_residual"
+        or baseline_manifest.get("predictor") != "catboost"
+        or baseline_manifest.get("seeds") != [42, 2026, 3407]
+        or rf_manifest.get("artifact_kind") != "tree_expert_rf_full_fit_v1"
+        or rf_manifest.get("status") != "accepted"
+    ):
+        raise RFInferenceError("inference manifest identity differs")
+    try:
+        token_value = rf_manifest["token"]
+        seeds = tuple(int(seed) for seed in token_value["seeds"])
+    except (KeyError, TypeError, ValueError) as error:
+        raise RFInferenceError("inference token differs") from error
+    baseline = _TreeEnsembleRuntime(
+        load_frozen_tree_state(baseline_root / "frozen_state"),
+        _load_models(
+            baseline_root / "models",
+            tuple(f"catboost_seed_{seed}.cbm" for seed in (42, 2026, 3407)),
+        ),
+    )
+    if seeds != (42, 2026, 3407):
+        raise RFInferenceError("RF inference seeds differ")
+    f_head = str(token_value.get("f_head"))
+    include_r = token_value.get("include_r")
+    alpha_r = float(token_value.get("alpha_r"))
+    alpha_f = float(token_value.get("alpha_f"))
+    if f_head not in {"f_small", "f_wide"} or type(include_r) is not bool:
+        raise RFInferenceError("RF inference token differs")
+    f_root = rf_root / f_head
+    f_state = load_frozen_tree_state(f_root / "frozen_state")
+    f_models = _load_models(f_root / "models", tuple(f"seed_{seed}.cbm" for seed in seeds))
+    r_state = None
+    r_models: tuple[object, ...] = ()
+    if include_r:
+        r_root = rf_root / "r_expert"
+        r_state = load_frozen_tree_state(r_root / "frozen_state")
+        r_models = _load_models(r_root / "models", tuple(f"seed_{seed}.cbm" for seed in seeds))
+    return RFInferenceRuntime(
+        baseline_predictor=baseline,
+        f_state=f_state,
+        f_models=f_models,
+        alpha_f=alpha_f,
+        r_state=r_state,
+        r_models=r_models,
+        alpha_r=alpha_r,
+    )

@@ -124,12 +124,34 @@ def test_tie_break_prefers_small_f_then_lower_alpha_sum_then_f_only() -> None:
 
 
 def test_head_screen_keeps_shrinkage_improvement_and_drops_uniform_failure() -> None:
-    evidence = _structure_evidence()
+    complete = _structure_evidence()
+    evidence = RFStructureEvidence(
+        target=MappingProxyType({fold: complete.target[fold] for fold in CONTRACT.folds[:2]}),
+        baseline=MappingProxyType({fold: complete.baseline[fold] for fold in CONTRACT.folds[:2]}),
+        game_type=MappingProxyType({fold: complete.game_type[fold] for fold in CONTRACT.folds[:2]}),
+        expert=MappingProxyType(
+            {
+                head: MappingProxyType({fold: complete.expert[head][fold] for fold in CONTRACT.folds[:2]})
+                for head in ("f_small", "f_wide", "r_expert")
+            }
+        ),
+    )
 
     result = screen_structure_heads(evidence, CONTRACT)
 
     assert "f_small" in result
     assert "f_wide" not in result
+
+
+def test_structure_selection_honors_screened_head_allowlist() -> None:
+    decision = select_rf_structure(
+        _structure_evidence(),
+        CONTRACT,
+        allowed_heads=("f_wide",),
+    )
+
+    assert decision.f_head == "f_wide"
+    assert decision.include_r is False
 
 
 def _acceptance_evidence(
