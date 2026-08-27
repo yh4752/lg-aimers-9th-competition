@@ -355,7 +355,14 @@ def run_t3_campaign(
         if any(job.job_id not in state.completed_jobs for job in required):
             raise T3RunnerError("confirmation jobs are incomplete; resume required")
         acceptance = accept_t3(
-            T3AcceptanceEvidence(structure, _seed_fold_gains(state, verified, structure)),
+            T3AcceptanceEvidence(
+                structure,
+                _seed_fold_gains(state, verified, structure),
+                MappingProxyType({
+                    fold: len(pd.read_csv(path, usecols=["row_id"]))
+                    for fold, path in verified.fold_predictions.items()
+                }),
+            ),
             contract,
         )
         acceptance_status = acceptance.status

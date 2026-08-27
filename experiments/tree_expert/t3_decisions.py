@@ -43,6 +43,7 @@ class T3StructureDecision:
 class T3AcceptanceEvidence:
     structure: T3StructureDecision
     seed_fold_gains: Mapping[int, Mapping[Fold, float]]
+    fold_row_counts: Mapping[Fold, int]
 
 
 @dataclass(frozen=True)
@@ -140,11 +141,19 @@ def accept_t3(evidence: T3AcceptanceEvidence, contract: T3Contract) -> T3Accepta
     expected_seeds = {contract.structure_seed, *contract.confirmation_seeds}
     if set(evidence.seed_fold_gains) != expected_seeds:
         raise T3DecisionError("acceptance seed evidence differs")
+    if (
+        set(evidence.fold_row_counts) != set(contract.folds)
+        or any(type(count) is not int or count <= 0 for count in evidence.fold_row_counts.values())
+    ):
+        raise T3DecisionError("acceptance fold row counts differ")
     fold_gains = {
         fold: float(np.mean([evidence.seed_fold_gains[seed][fold] for seed in sorted(expected_seeds)]))
         for fold in contract.folds
     }
-    weighted_gain = float(np.mean(tuple(fold_gains.values())))
+    weighted_gain = float(np.average(
+        [fold_gains[fold] for fold in contract.folds],
+        weights=[evidence.fold_row_counts[fold] for fold in contract.folds],
+    ))
     non_worse = sum(
         min(evidence.seed_fold_gains[seed].values()) >= -contract.gates.maximum_fold_regression
         for seed in expected_seeds

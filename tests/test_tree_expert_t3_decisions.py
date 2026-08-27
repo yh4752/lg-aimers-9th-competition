@@ -1,6 +1,7 @@
 from types import MappingProxyType
 
 import numpy as np
+import pytest
 
 from experiments.tree_expert.t3_contracts import load_t3_contract
 from experiments.tree_expert.t3_decisions import (
@@ -58,14 +59,37 @@ def test_acceptance_requires_two_non_worse_seeds_and_recent_fold_gain():
         2026: {fold: 0.0002 for fold in FOLDS},
     }
     accepted = accept_t3(
-        T3AcceptanceEvidence(structure, MappingProxyType({k: MappingProxyType(v) for k, v in gains.items()})),
+        T3AcceptanceEvidence(
+            structure,
+            MappingProxyType({k: MappingProxyType(v) for k, v in gains.items()}),
+            MappingProxyType({fold: 4 for fold in FOLDS}),
+        ),
         load_t3_contract(),
     )
     assert accepted.status == "accepted"
     gains[42][FOLDS[-1]] = -0.01
     gains[2026][FOLDS[-1]] = -0.01
     rejected = accept_t3(
-        T3AcceptanceEvidence(structure, MappingProxyType({k: MappingProxyType(v) for k, v in gains.items()})),
+        T3AcceptanceEvidence(
+            structure,
+            MappingProxyType({k: MappingProxyType(v) for k, v in gains.items()}),
+            MappingProxyType({fold: 4 for fold in FOLDS}),
+        ),
         load_t3_contract(),
     )
     assert rejected.status == "rejected"
+
+
+def test_acceptance_weighted_gain_uses_fold_row_counts():
+    structure = select_structure(structure_evidence(0.25), load_t3_contract())
+    per_fold = {FOLDS[0]: 0.0003, FOLDS[1]: 0.0001, FOLDS[2]: 0.0001}
+    gains = {seed: MappingProxyType(dict(per_fold)) for seed in (3407, 42, 2026)}
+    decision = accept_t3(
+        T3AcceptanceEvidence(
+            structure,
+            MappingProxyType(gains),
+            MappingProxyType({FOLDS[0]: 100, FOLDS[1]: 1, FOLDS[2]: 1}),
+        ),
+        load_t3_contract(),
+    )
+    assert decision.weighted_gain == pytest.approx((0.0003 * 100 + 0.0001 * 2) / 102)
