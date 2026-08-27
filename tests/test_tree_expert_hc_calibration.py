@@ -81,7 +81,7 @@ def test_unseen_groups_fall_back_without_nonfinite_probability():
         profile=contract.profiles["hc_balanced"],
         minimum_group_rows={"identity": 1, "context": 1, "interaction": 1},
     )
-    query = _frame(2024, "p1").head(1)
+    query = _frame(2024, "p1").head(1).drop(columns=["target", "oof_year"])
     query.loc[:, "pitcher_id"] = "unseen"
     result = apply_calibrator(query, state, alpha=1.0)
     assert np.isfinite(result["p2"]).all()

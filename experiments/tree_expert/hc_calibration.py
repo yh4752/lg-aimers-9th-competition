@@ -104,22 +104,27 @@ def _validate(
     label: str,
     *,
     require_unique_rows: bool = True,
+    require_target: bool = True,
 ) -> pd.DataFrame:
     required = {
         "row_id",
-        "oof_year",
-        "target",
         probability_column,
         *set().union(*(set(keys) for keys in _KEYS.values())),
     }
+    if require_target:
+        required.update({"oof_year", "target"})
     if type(frame) is not pd.DataFrame or not required.issubset(frame.columns) or frame.empty:
         raise HCCalibrationError(f"{label} schema differs")
-    target = pd.to_numeric(frame["target"], errors="coerce")
+    target = (
+        pd.to_numeric(frame["target"], errors="coerce")
+        if require_target
+        else pd.Series(dtype="float64")
+    )
     probability = pd.to_numeric(frame[probability_column], errors="coerce")
     if (
         frame["row_id"].isna().any()
         or (require_unique_rows and not frame["row_id"].is_unique)
-        or not target.isin([0, 1]).all()
+        or (require_target and not target.isin([0, 1]).all())
         or probability.isna().any()
         or not probability.between(0, 1).all()
     ):
@@ -253,6 +258,7 @@ def apply_calibrator(
         "p1",
         "calibration inference rows",
         require_unique_rows=False,
+        require_target=False,
     )
     if alpha not in load_hc_contract().calibration_alphas:
         raise HCCalibrationError("calibration alpha differs")
