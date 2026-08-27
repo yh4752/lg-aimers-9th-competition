@@ -285,7 +285,7 @@ try:
         gpu_count=len(names),
     )
     shutil.copy2(result.handoff, FINAL_HANDOFF)
-    print(f"TREE_HC_SUCCESS stage={{result.completed_stage}} next={{result.next_stage}} handoff={{FINAL_HANDOFF}}", flush=True)
+    print(f"TREE_HC_SUCCESS stage={{result.completed_stage}} next={{result.next_stage}} status={{result.status}} handoff={{FINAL_HANDOFF}}", flush=True)
 except Exception as error:
     emergency = TEMP_ROOT / "bundles/tree_hierarchical_handoff.zip"
     if emergency.is_file():
