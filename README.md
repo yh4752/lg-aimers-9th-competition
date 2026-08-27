@@ -49,6 +49,15 @@
 
 ## 문서
 
+### R/F 경기 유형 전문가
+
+기존 977점 CatBoost 모델을 고정하고 정규 시즌(R)과 F 경기의 전용 모델이
+시간 순서 검증에서 추가 개선을 만드는지 확인하는 독립 실험이다. Kaggle
+실행 결과가 `accepted`인 경우에만 제출 후보 제작 단계로 넘어간다.
+
+- [실험 설계](docs/superpowers/specs/2026-08-27-rf-expert-experiment-design.md)
+- [구현 계획](docs/superpowers/plans/2026-08-27-rf-expert-experiment.md)
+
 - [실험 장부](reports/EXPERIMENT_LEDGER.md): 완료된 모든 실행과 판정
 - [실험 라운드](docs/rounds/README.md): 가설, 결과, 배운 점과 다음 결정
 - [실험 실행 계약](docs/EXPERIMENT_CONTRACT.md): 역할, 상태와 패키지 gate
