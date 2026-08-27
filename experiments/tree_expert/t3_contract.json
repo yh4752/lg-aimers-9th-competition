@@ -1,0 +1,46 @@
+{
+  "schema_version": 1,
+  "campaign_id": "tree_expert_t3_temporal_dual_v1",
+  "inputs": {
+    "official_train_sha256": "d2081186b458b49f60b082be480c273135833e15ba59a76d033af28bcf8763ff",
+    "official_history_sha256": "f7818f9ee0ccefe7c2cf69fa99efe6e5cb882d8b886dd96d2394bcf3b53f33a9",
+    "e2_handoff_sha256": "4dd0c9012b9a59e5235b76d6fe1f6ded4df4b404cab0082c0f3084b8c384050f"
+  },
+  "folds": [[2021, 2022], [2022, 2023], [2023, 2024]],
+  "decays": [0.35, 0.55, 0.75],
+  "recent_weights": [0.70, 0.80, 0.90],
+  "structure_seed": 3407,
+  "confirmation_seeds": [42, 2026],
+  "catboost": {
+    "iterations": 800,
+    "depth": 8,
+    "learning_rate": 0.04,
+    "l2_leaf_reg": 5.0,
+    "random_strength": 0.5,
+    "bootstrap_type": "Bayesian",
+    "bagging_temperature": 0.5,
+    "border_count": 128,
+    "max_ctr_complexity": 2,
+    "one_hot_max_size": 16,
+    "od_type": "Iter",
+    "od_wait": 60,
+    "task_type": "GPU",
+    "allow_writing_files": true
+  },
+  "gates": {
+    "weighted_gain": 0.00015,
+    "recent_fold_gain": 0.0,
+    "maximum_fold_regression": 0.00005,
+    "maximum_segment_regression": 0.0005,
+    "minimum_segment_rows": 5000,
+    "minimum_non_worse_seed_count": 2
+  },
+  "runtime": {
+    "wall_seconds": 28800,
+    "new_job_guard_seconds": 600,
+    "snapshot_interval_seconds": 600,
+    "inference_max_seconds": 480,
+    "rss_max_bytes": 23622320128,
+    "probability_tolerance": 0.000001
+  }
+}
