@@ -44,6 +44,23 @@ class RecordingExecutor:
         return "completed"
 
 
+class TemporaryFileExecutor:
+    def __init__(self):
+        self.temporary_ready = threading.Event()
+
+    def __call__(self, job, output_dir, _gpu_id):
+        output_dir.mkdir(parents=True, exist_ok=True)
+        if job.job_id == "job_0":
+            assert self.temporary_ready.wait(timeout=1)
+        else:
+            temporary = output_dir / ".predictions.csv.tmp"
+            temporary.write_text("in progress")
+            self.temporary_ready.set()
+            time.sleep(0.1)
+            temporary.unlink()
+        return "completed"
+
+
 def state(tmp_path):
     return T3CampaignState(root=tmp_path, completed_jobs=set(), failed_jobs=set())
 
@@ -55,6 +72,26 @@ def test_runner_uses_two_workers_and_records_completed_jobs(tmp_path):
     assert executor.maximum == 2
     assert {gpu for _, gpu in executor.started} == {0, 1}
     assert active.completed_jobs == {job.job_id for job in jobs()}
+
+
+def test_snapshot_runs_only_after_both_gpu_workers_finish(tmp_path):
+    executor = TemporaryFileExecutor()
+    active = state(tmp_path)
+    snapshots = []
+
+    def snapshot():
+        temporary = list(tmp_path.rglob("*.tmp"))
+        assert temporary == []
+        snapshots.append(tuple(sorted(active.completed_jobs)))
+
+    run_pending_jobs(
+        active,
+        jobs()[:2],
+        executor=executor,
+        gpu_ids=(0, 1),
+        on_progress=snapshot,
+    )
+    assert snapshots == [("job_0", "job_1")]
 
 
 def test_runner_reuses_completed_jobs(tmp_path):

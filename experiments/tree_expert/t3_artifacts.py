@@ -124,9 +124,31 @@ def _write_bundle(
 
 
 def create_resume_bundle(campaign_root: Path, destination: Path, bindings: T3Bindings) -> Path:
+    state_path = Path(campaign_root) / "state/stage_state.json"
+    try:
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise T3ArtifactError("campaign state cannot be loaded") from error
+    if (
+        type(state) is not dict
+        or set(state) != {"completed_jobs", "failed_jobs"}
+        or type(state["completed_jobs"]) is not list
+        or any(type(job_id) is not str or not job_id for job_id in state["completed_jobs"])
+    ):
+        raise T3ArtifactError("campaign state schema differs")
+    completed = frozenset(state["completed_jobs"])
+
+    def include(name: str) -> bool:
+        path = PurePosixPath(name)
+        if name.endswith((".zip", ".tmp")) or path.name.startswith(".") or name.startswith("bundles/"):
+            return False
+        if path.parts and path.parts[0] == "jobs":
+            return len(path.parts) >= 3 and path.parts[1] in completed
+        return True
+
     return _write_bundle(
         campaign_root, destination, kind="resume", bindings=bindings,
-        include=lambda name: not name.endswith(".zip") and not name.startswith("bundles/"),
+        include=include,
     )
 
 
@@ -149,7 +171,13 @@ def create_model_delivery(full_fit_root: Path, destination: Path, bindings: T3Bi
     )
 
 
-def _verify(path: Path, kind: str, expected: T3Bindings) -> dict[str, object]:
+def _verify(
+    path: Path,
+    kind: str,
+    expected: T3Bindings,
+    *,
+    compatible_code_sha256s: frozenset[str] = frozenset(),
+) -> dict[str, object]:
     try:
         with ZipFile(path) as archive:
             infos = _safe_infos(archive)
@@ -161,8 +189,20 @@ def _verify(path: Path, kind: str, expected: T3Bindings) -> dict[str, object]:
                 raise T3ArtifactError("artifact manifest is invalid") from error
             if type(manifest) is not dict or manifest.get("artifact_kind") != _KINDS[kind]:
                 raise T3ArtifactError("artifact identity differs")
-            if manifest.get("bindings") != asdict(expected):
-                raise T3ArtifactError("artifact bindings differ")
+            actual_bindings = manifest.get("bindings")
+            expected_bindings = asdict(expected)
+            if actual_bindings != expected_bindings:
+                compatible = False
+                if kind == "resume" and type(actual_bindings) is dict:
+                    legacy_code = actual_bindings.get("code_sha256")
+                    rebound = dict(actual_bindings)
+                    rebound["code_sha256"] = expected.code_sha256
+                    compatible = (
+                        legacy_code in compatible_code_sha256s
+                        and rebound == expected_bindings
+                    )
+                if not compatible:
+                    raise T3ArtifactError("artifact bindings differ")
             members = manifest.get("members")
             if type(members) is not dict or set(members) != set(infos) - {"manifest.json"}:
                 raise T3ArtifactError("artifact member set differs")
@@ -178,8 +218,18 @@ def _verify(path: Path, kind: str, expected: T3Bindings) -> dict[str, object]:
         raise T3ArtifactError("artifact is not a valid ZIP") from error
 
 
-def verify_resume_bundle(path: Path, expected: T3Bindings) -> dict[str, object]:
-    return _verify(Path(path), "resume", expected)
+def verify_resume_bundle(
+    path: Path,
+    expected: T3Bindings,
+    *,
+    compatible_code_sha256s: frozenset[str] = frozenset(),
+) -> dict[str, object]:
+    return _verify(
+        Path(path),
+        "resume",
+        expected,
+        compatible_code_sha256s=compatible_code_sha256s,
+    )
 
 
 def verify_review_bundle(path: Path, expected: T3Bindings) -> dict[str, object]:
@@ -190,8 +240,18 @@ def verify_model_delivery(path: Path, expected: T3Bindings) -> dict[str, object]
     return _verify(Path(path), "model_delivery", expected)
 
 
-def restore_resume_bundle(path: Path, destination: Path, expected: T3Bindings) -> Path:
-    verify_resume_bundle(path, expected)
+def restore_resume_bundle(
+    path: Path,
+    destination: Path,
+    expected: T3Bindings,
+    *,
+    compatible_code_sha256s: frozenset[str] = frozenset(),
+) -> Path:
+    verify_resume_bundle(
+        path,
+        expected,
+        compatible_code_sha256s=compatible_code_sha256s,
+    )
     output = Path(destination)
     if output.exists() or output.is_symlink():
         raise T3ArtifactError("resume destination already exists")

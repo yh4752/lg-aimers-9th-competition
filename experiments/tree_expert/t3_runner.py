@@ -135,8 +135,8 @@ def run_pending_jobs(
                 else:
                     state.failed_jobs.add(job.job_id)
                 _write_state(state)
-                if on_progress is not None:
-                    on_progress()
+        if on_progress is not None:
+            on_progress()
 
 
 def require_full_fit_window(
@@ -169,6 +169,10 @@ _CODE_MEMBERS = (
     "experiments/temporal_portfolio/seasonal_features.py",
     "experiments/independent_dl/feature_sources/seasonal.py",
 )
+
+_COMPATIBLE_RESUME_CODE_SHA256S = frozenset({
+    "87c731d13abe14bc191f2b8a6b768b59c7e6aeedad071e11e5158e73d87052d3",
+})
 
 
 def code_sha256(root: Path | None = None) -> str:
@@ -311,7 +315,12 @@ def run_t3_campaign(
     bindings = campaign_bindings(verified, data)
     output = Path(output_dir)
     if resume_bundle is not None:
-        restore_resume_bundle(resume_bundle, output, bindings)
+        restore_resume_bundle(
+            resume_bundle,
+            output,
+            bindings,
+            compatible_code_sha256s=_COMPATIBLE_RESUME_CODE_SHA256S,
+        )
     else:
         output.mkdir(parents=True, exist_ok=False)
     state = _load_state(output)
