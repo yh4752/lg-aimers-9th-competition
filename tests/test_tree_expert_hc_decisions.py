@@ -1,5 +1,6 @@
 from dataclasses import replace
 
+import pandas as pd
 import pytest
 
 from experiments.tree_expert.hc_contracts import load_hc_contract
@@ -9,6 +10,7 @@ from experiments.tree_expert.hc_decisions import (
     decide_c1,
     decide_c2,
     choose_winner,
+    select_profile,
 )
 
 
@@ -97,3 +99,20 @@ def test_lower_brier_wins_outside_tie_margin():
     c1 = decide_c1(_c1(weighted_brier=0.24800), load_hc_contract())
     c2 = decide_c2(_c2(weighted_brier=0.24790), load_hc_contract())
     assert choose_winner(c1, c2, load_hc_contract()).candidate == "C2"
+
+
+def test_profile_selection_uses_only_structure_folds_and_registered_tie_order():
+    predictions = {}
+    for profile in ("hc_strong", "hc_balanced", "hc_light"):
+        predictions[profile] = {}
+        for year in (2022, 2023):
+            predictions[profile][year] = pd.DataFrame(
+                {"target": [0, 1], "p1": [0.4, 0.6]}
+            )
+    decision = select_profile(predictions, load_hc_contract())
+    assert decision.selected == "hc_strong"
+    assert decision.structure_years == (2022, 2023)
+
+    predictions["hc_balanced"][2023].loc[:, "p1"] = [0.1, 0.9]
+    decision = select_profile(predictions, load_hc_contract())
+    assert decision.selected == "hc_balanced"

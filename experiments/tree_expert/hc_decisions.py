@@ -3,6 +3,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Mapping
 
+import numpy as np
+import pandas as pd
+
 from .hc_contracts import HCContract
 
 
@@ -45,6 +48,56 @@ class WinnerDecision:
     status: str
     candidate: str
     reason: str
+
+
+@dataclass(frozen=True)
+class ProfileDecision:
+    selected: str
+    structure_years: tuple[int, ...]
+    weighted_brier: Mapping[str, float]
+
+
+def select_profile(
+    predictions: Mapping[str, Mapping[int, pd.DataFrame]], contract: HCContract
+) -> ProfileDecision:
+    if set(predictions) != set(contract.profiles):
+        raise ValueError("profile evidence differs")
+    years = tuple(fold[1] for fold in contract.structure_folds)
+    scores: dict[str, float] = {}
+    for profile in contract.profile_tie_order:
+        folds = predictions[profile]
+        if set(folds) != set(years):
+            raise ValueError("profile structure folds differ")
+        squared: list[np.ndarray] = []
+        for year in years:
+            frame = folds[year]
+            if (
+                type(frame) is not pd.DataFrame
+                or frame.empty
+                or not {"target", "p1"}.issubset(frame.columns)
+            ):
+                raise ValueError("profile prediction evidence differs")
+            target = pd.to_numeric(frame["target"], errors="coerce").to_numpy(
+                dtype="float64"
+            )
+            probability = pd.to_numeric(frame["p1"], errors="coerce").to_numpy(
+                dtype="float64"
+            )
+            if (
+                not np.isin(target, [0.0, 1.0]).all()
+                or not np.isfinite(probability).all()
+                or np.any((probability < 0) | (probability > 1))
+            ):
+                raise ValueError("profile prediction values differ")
+            squared.append(np.square(probability - target))
+        scores[profile] = float(np.concatenate(squared).mean())
+    best = min(scores.values())
+    selected = next(
+        profile
+        for profile in contract.profile_tie_order
+        if scores[profile] <= best + 1e-12
+    )
+    return ProfileDecision(selected, years, scores)
 
 
 def decide_c1(evidence: C1Evidence, contract: HCContract) -> CandidateDecision:
