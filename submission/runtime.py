@@ -160,6 +160,10 @@ def render_script(
 
     from .adapters import resolve_adapter_factory
     from .tabm_candidate import CANDIDATE_ID, render_bound_script
+    from .tree_expert_e2_candidate import (
+        TREE_E2_ADAPTER_ID,
+        render_bound_script as render_tree_e2_script,
+    )
 
     resolve_adapter_factory(adapter_id)
     if not isinstance(artifact_metadata, Mapping):
@@ -169,4 +173,9 @@ def render_script(
             return render_bound_script(artifact_metadata)
         except ValueError as error:
             raise SubmissionRuntimeError("TabM artifact metadata is invalid") from error
+    if adapter_id == TREE_E2_ADAPTER_ID:
+        try:
+            return render_tree_e2_script(artifact_metadata)
+        except ValueError as error:
+            raise SubmissionRuntimeError("Tree E2 artifact metadata is invalid") from error
     raise SubmissionRuntimeError("registered adapter has no reviewed script template")

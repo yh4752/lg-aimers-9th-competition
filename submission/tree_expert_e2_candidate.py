@@ -44,6 +44,7 @@ _MODEL_PAYLOADS = {
     name for name in _DELIVERY_PAYLOADS if name.startswith(("frozen_state/", "models/"))
 }
 _MAX_TOTAL_BYTES = 8 * 1024**3
+_SCRIPT_SOURCE = Path(__file__).with_name("tree_expert_e2_script.py")
 
 
 class TreeE2CandidateError(ValueError):
@@ -361,3 +362,77 @@ def import_tree_expert_e2_candidate(
         full_fit_manifest=MappingProxyType(dict(evidence["full_fit"])),
         inference_audit=MappingProxyType(dict(evidence["audit"])),
     )
+
+
+def candidate_metadata(candidate: ImportedTreeE2Candidate) -> dict[str, object]:
+    if not isinstance(candidate, ImportedTreeE2Candidate):
+        raise TreeE2CandidateError("candidate has invalid type")
+    return {
+        "candidate_id": candidate.candidate_id,
+        "adapter_id": candidate.adapter_id,
+        "handoff_sha256": candidate.handoff_sha256,
+        "delivery_sha256": candidate.delivery_sha256,
+        "delivery_manifest_sha256": candidate.delivery_manifest_sha256,
+        "model_sha256": candidate.model_sha256,
+        "members": dict(candidate.member_sha256),
+        "seeds": list(candidate.seeds),
+        "iterations": {str(seed): count for seed, count in candidate.iterations.items()},
+    }
+
+
+def render_bound_script(metadata: Mapping[str, object]) -> bytes:
+    expected_keys = {
+        "candidate_id",
+        "adapter_id",
+        "handoff_sha256",
+        "delivery_sha256",
+        "delivery_manifest_sha256",
+        "model_sha256",
+        "members",
+        "seeds",
+        "iterations",
+    }
+    if not isinstance(metadata, Mapping) or set(metadata) != expected_keys:
+        raise TreeE2CandidateError("script metadata contract differs")
+    if (
+        metadata["candidate_id"] != TREE_E2_CANDIDATE_ID
+        or metadata["adapter_id"] != TREE_E2_ADAPTER_ID
+        or metadata["seeds"] != [42, 2026, 3407]
+        or metadata["iterations"] != {"42": 78, "2026": 86, "3407": 149}
+    ):
+        raise TreeE2CandidateError("script candidate identity differs")
+    members = metadata["members"]
+    if not isinstance(members, Mapping) or set(members) != _MODEL_PAYLOADS:
+        raise TreeE2CandidateError("script model member contract differs")
+    hashes = {
+        "handoff_sha256": metadata["handoff_sha256"],
+        "delivery_sha256": metadata["delivery_sha256"],
+        "delivery_manifest_sha256": metadata["delivery_manifest_sha256"],
+        "model_sha256": metadata["model_sha256"],
+        **dict(members),
+    }
+    if any(
+        not isinstance(value, str)
+        or len(value) != 64
+        or any(character not in "0123456789abcdef" for character in value)
+        for value in hashes.values()
+    ):
+        raise TreeE2CandidateError("script SHA-256 metadata differs")
+    source = _SCRIPT_SOURCE.read_bytes()
+    sentinel = b"EMBEDDED_METADATA = None"
+    if source.count(sentinel) != 1:
+        raise TreeE2CandidateError("script metadata sentinel differs")
+    payload = _canonical(dict(metadata)).decode("utf-8").strip()
+    rendered = source.replace(
+        sentinel,
+        ("EMBEDDED_METADATA = json.loads(" + repr(payload) + ")").encode("utf-8"),
+    )
+    try:
+        compile(rendered, "script.py", "exec")
+    except SyntaxError as error:
+        raise TreeE2CandidateError("rendered script is invalid") from error
+    return rendered
+
+
+def render_validation_script(candidate: ImportedTreeE2Candidate) -> bytes:
+    return render_bound_script(candidate_metadata(candidate))

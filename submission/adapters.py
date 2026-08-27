@@ -7,6 +7,7 @@ from types import MappingProxyType
 from typing import Callable, Mapping, Protocol
 
 from .tabm_candidate import CANDIDATE_ID
+from .tree_expert_e2_candidate import TREE_E2_ADAPTER_ID
 
 
 class AdapterRegistryError(ValueError):
@@ -32,8 +33,19 @@ def _load_version_d(
     return load_frozen_predictor(model_dir)
 
 
+def _load_tree_e2(
+    model_dir: Path, metadata: Mapping[str, object]
+) -> SubmissionAdapter:
+    from .tree_expert_e2_script import load_frozen_predictor
+
+    return load_frozen_predictor(model_dir, metadata=metadata)
+
+
 ADAPTER_FACTORIES: Mapping[str, AdapterFactory] = MappingProxyType(
-    {CANDIDATE_ID: _load_version_d}
+    {
+        CANDIDATE_ID: _load_version_d,
+        TREE_E2_ADAPTER_ID: _load_tree_e2,
+    }
 )
 
 
