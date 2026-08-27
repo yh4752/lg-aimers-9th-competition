@@ -206,8 +206,8 @@ def _prepare_full_fit_output(campaign_root: Path) -> Path:
 
 
 _CODE_MEMBERS = (
-    "experiments/tree_expert/e2_full_fit.py",
-    "experiments/tree_expert/e2_inference.py",
+    "experiments/tree_expert/__init__.py",
+    "experiments/tree_expert/contracts.py",
     "experiments/tree_expert/features.py",
     "experiments/tree_expert/rf_artifacts.py",
     "experiments/tree_expert/rf_contract.json",
@@ -217,10 +217,17 @@ _CODE_MEMBERS = (
     "experiments/tree_expert/rf_full_fit.py",
     "experiments/tree_expert/rf_inference.py",
     "experiments/tree_expert/rf_inputs.py",
+    "experiments/tree_expert/rf_kaggle.py",
     "experiments/tree_expert/rf_runner.py",
+    "experiments/tree_expert/rf_state.py",
     "experiments/tree_expert/rf_training.py",
+    "experiments/temporal_portfolio/__init__.py",
     "experiments/temporal_portfolio/seasonal_features.py",
+    "experiments/temporal_portfolio/trackman_pitcher.py",
+    "experiments/independent_dl/__init__.py",
+    "experiments/independent_dl/feature_sources/__init__.py",
     "experiments/independent_dl/feature_sources/seasonal.py",
+    "experiments/independent_dl/feature_sources/trackman.py",
 )
 
 
