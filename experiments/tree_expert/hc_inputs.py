@@ -132,6 +132,31 @@ def _source_payloads(path: Path, label: str) -> dict[str, bytes]:
         raise HCInputError(f"{label} is not a valid ZIP") from error
 
 
+def _hc_input_payloads(path: Path) -> dict[str, bytes]:
+    source = Path(path)
+    if not source.is_dir():
+        return _source_payloads(source, "HC input")
+    if source.is_symlink():
+        raise HCInputError("unsafe HC input source")
+    required = {*_PAYLOAD_NAMES, "manifest.json"}
+    payloads: dict[str, bytes] = {}
+    total = 0
+    for name in sorted(required):
+        target = source
+        for part in PurePosixPath(name).parts:
+            target = target / part
+            if target.is_symlink():
+                raise HCInputError(f"unsafe HC input member: {name}")
+        if not target.is_file():
+            raise HCInputError(f"HC input member is absent: {name}")
+        payload = target.read_bytes()
+        total += len(payload)
+        if len(payload) > _MAX_MEMBER or total > _MAX_TOTAL:
+            raise HCInputError("HC input expanded size exceeds limit")
+        payloads[name] = payload
+    return payloads
+
+
 def _verify_declared_members(
     payloads: Mapping[str, bytes], manifest: Mapping[str, object], manifest_name: str
 ) -> None:
@@ -295,7 +320,7 @@ def verify_and_extract_hc_input(
 ) -> VerifiedHCEvidence:
     contract = load_hc_contract()
     expected = expected_e2_sha256 or contract.inputs["e2_handoff_sha256"]
-    payloads = _source_payloads(Path(path), "HC input")
+    payloads = _hc_input_payloads(Path(path))
     if set(payloads) != {*_PAYLOAD_NAMES, "manifest.json"}:
         raise HCInputError("HC input member set differs")
     manifest_bytes = payloads["manifest.json"]

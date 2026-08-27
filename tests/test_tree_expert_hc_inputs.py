@@ -182,6 +182,28 @@ def test_zip_and_expanded_copy_with_same_identity_are_deduplicated(tmp_path):
     assert choose_unique_hc_input([archive, expanded]) == archive
 
 
+def test_expanded_kaggle_input_ignores_unregistered_wrapper_files(tmp_path):
+    handoff = _accepted_handoff(tmp_path / "e2.zip")
+    expected = sha256(handoff.read_bytes()).hexdigest()
+    archive = prepare_hc_input(
+        e2_handoff=handoff,
+        output=tmp_path / "hc_input.zip",
+        expected_e2_sha256=expected,
+    )
+    expanded = tmp_path / "kaggle_dataset"
+    with ZipFile(archive) as source:
+        source.extractall(expanded)
+    (expanded / "dataset-metadata.json").write_text('{"title":"wrapper"}')
+    (expanded / "hc_input_original.zip").write_bytes(archive.read_bytes())
+
+    verified = verify_and_extract_hc_input(
+        expanded,
+        tmp_path / "verified_expanded",
+        expected_e2_sha256=expected,
+    )
+    assert verified.e2_handoff_sha256 == expected
+
+
 def test_two_distinct_input_identities_are_rejected(tmp_path):
     first = tmp_path / "first"
     second = tmp_path / "second"
