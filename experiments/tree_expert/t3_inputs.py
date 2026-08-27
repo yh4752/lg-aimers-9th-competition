@@ -39,6 +39,15 @@ class VerifiedT3Input:
     handoff_manifest: Path
 
 
+@dataclass(frozen=True)
+class VerifiedOfficialData:
+    root: Path
+    train: Path
+    history: Path
+    train_sha256: str
+    history_sha256: str
+
+
 def file_sha256(path: Path) -> str:
     digest = sha256()
     with Path(path).open("rb") as handle:
@@ -253,3 +262,23 @@ def verify_and_extract_t3_input(
         acceptance=root / "e2/acceptance.json",
         handoff_manifest=root / "e2/handoff_manifest.json",
     )
+
+
+def verify_official_data(root: Path) -> VerifiedOfficialData:
+    source = Path(root)
+    if not source.is_dir():
+        raise T3InputError("official data directory is missing")
+    train_candidates = [path for path in source.rglob("train.csv") if path.is_file()]
+    history_candidates = [path for path in source.rglob("trackman_history.csv") if path.is_file()]
+    if len(train_candidates) != 1 or len(history_candidates) != 1:
+        raise T3InputError("official data file count differs")
+    train = train_candidates[0]
+    history = history_candidates[0]
+    if train.parent != history.parent:
+        raise T3InputError("official data roots differ")
+    contract = load_t3_contract()
+    train_hash = file_sha256(train)
+    history_hash = file_sha256(history)
+    if train_hash != contract.inputs["official_train_sha256"] or history_hash != contract.inputs["official_history_sha256"]:
+        raise T3InputError("official data SHA-256 differs")
+    return VerifiedOfficialData(train.parent, train, history, train_hash, history_hash)

@@ -12,11 +12,11 @@ from typing import Callable, Mapping, Protocol, Sequence
 import numpy as np
 import pandas as pd
 
-from .e2_full_fit import export_frozen_tree_state
 from .features import TreeFeatureBatch, fit_tree_features
 from .t3_contracts import load_t3_contract
 from .t3_decisions import T3AcceptanceDecision, acceptance_payload
 from .t3_temporal import temporal_training_weights
+from .t3_state import export_frozen_tree_state
 
 
 class T3FullFitError(ValueError):

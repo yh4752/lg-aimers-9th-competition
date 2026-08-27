@@ -12,7 +12,6 @@ from typing import Callable, Iterable
 import numpy as np
 import pandas as pd
 
-from .inputs import VerifiedOfficialData
 from .t3_artifacts import (
     T3Bindings,
     create_handoff_bundle,
@@ -34,7 +33,7 @@ from .t3_decisions import (
 )
 from .t3_diagnostics import calibration_diagnostics, residual_correlation, segment_diagnostics
 from .t3_full_fit import full_fit_t3
-from .t3_inputs import VerifiedT3Input
+from .t3_inputs import VerifiedOfficialData, VerifiedT3Input
 from .t3_training import T3JobResult, load_t3_job_result, run_t3_job
 
 
@@ -151,6 +150,7 @@ _CODE_MEMBERS = (
     "experiments/tree_expert/t3_inference.py",
     "experiments/tree_expert/t3_inputs.py",
     "experiments/tree_expert/t3_runner.py",
+    "experiments/tree_expert/t3_state.py",
     "experiments/tree_expert/t3_temporal.py",
     "experiments/tree_expert/t3_training.py",
     "experiments/temporal_portfolio/seasonal_features.py",
