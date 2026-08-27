@@ -58,6 +58,16 @@
 - [실험 설계](docs/superpowers/specs/2026-08-27-rf-expert-experiment-design.md)
 - [구현 계획](docs/superpowers/plans/2026-08-27-rf-expert-experiment.md)
 
+### 실패 유형 라벨 감사
+
+공식 학습 데이터의 누적 상태로 `middle`, `reverse`, `other_failure`를 시간 cutoff별로
+복원할 수 있는지 확인하는 CPU 감사다. 최소 한 유형이 모든 고정 gate를 통과해야만
+실패 유형 전문가 OOF 설계로 넘어간다. 아직 Kaggle 감사 결과가 없으므로 어떤 유형도
+학습 후보로 확정하지 않았다.
+
+- [감사 설계](docs/superpowers/specs/2026-08-27-failure-expert-label-audit-design.md)
+- [구현 계획](docs/superpowers/plans/2026-08-27-failure-expert-label-audit.md)
+
 - [실험 장부](reports/EXPERIMENT_LEDGER.md): 완료된 모든 실행과 판정
 - [실험 라운드](docs/rounds/README.md): 가설, 결과, 배운 점과 다음 결정
 - [실험 실행 계약](docs/EXPERIMENT_CONTRACT.md): 역할, 상태와 패키지 gate
