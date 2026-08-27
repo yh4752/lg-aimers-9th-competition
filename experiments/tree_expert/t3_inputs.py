@@ -26,6 +26,8 @@ _PAYLOAD_NAMES = {
     "e2/acceptance.json", "e2/handoff_manifest.json", *_FOLD_MEMBERS.values(),
 }
 _MAX_EXPANDED = 256 * 1024 * 1024
+_MAX_E2_HANDOFF_EXPANDED = 1024 * 1024 * 1024
+_MAX_E2_REVIEW_EXPANDED = 512 * 1024 * 1024
 
 
 @dataclass(frozen=True)
@@ -77,9 +79,15 @@ def _zip_info(name: str) -> ZipInfo:
     return info
 
 
-def _safe_infos(archive: ZipFile, label: str) -> dict[str, ZipInfo]:
+def _safe_infos(
+    archive: ZipFile,
+    label: str,
+    *,
+    max_expanded: int | None = None,
+) -> dict[str, ZipInfo]:
     result: dict[str, ZipInfo] = {}
     total = 0
+    limit = _MAX_EXPANDED if max_expanded is None else max_expanded
     for info in archive.infolist():
         path = PurePosixPath(info.filename)
         if (
@@ -88,7 +96,7 @@ def _safe_infos(archive: ZipFile, label: str) -> dict[str, ZipInfo]:
         ):
             raise T3InputError(f"unsafe or duplicate member in {label}")
         total += info.file_size
-        if total > _MAX_EXPANDED:
+        if total > limit:
             raise T3InputError(f"{label} expanded size exceeds limit")
         result[info.filename] = info
     return result
@@ -117,7 +125,11 @@ def _read_e2_handoff(path: Path, expected_sha: str) -> dict[str, bytes]:
         raise T3InputError("E2 handoff SHA-256 differs")
     try:
         with ZipFile(path) as outer:
-            infos = _safe_infos(outer, "E2 handoff")
+            infos = _safe_infos(
+                outer,
+                "E2 handoff",
+                max_expanded=_MAX_E2_HANDOFF_EXPANDED,
+            )
             if "handoff_manifest.json" not in infos or "tree_expert_e2_review.zip" not in infos:
                 raise T3InputError("E2 handoff members differ")
             handoff_bytes = outer.read(infos["handoff_manifest.json"])
@@ -129,7 +141,11 @@ def _read_e2_handoff(path: Path, expected_sha: str) -> dict[str, bytes]:
             if declared.get("sha256") != sha256(review).hexdigest() or declared.get("size") != len(review):
                 raise T3InputError("E2 review binding differs")
         with ZipFile(io.BytesIO(review)) as nested:
-            nested_infos = _safe_infos(nested, "E2 review")
+            nested_infos = _safe_infos(
+                nested,
+                "E2 review",
+                max_expanded=_MAX_E2_REVIEW_EXPANDED,
+            )
             names = {
                 "decisions/acceptance.json",
                 "ensembles/2021_2022.csv", "ensembles/2022_2023.csv", "ensembles/2023_2024.csv",
