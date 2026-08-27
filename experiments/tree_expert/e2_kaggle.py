@@ -137,7 +137,24 @@ def _artifact_candidates(root: Path, kinds: set[str]) -> list[tuple[Path, str]]:
         if kind in kinds:
             archives.append((path, kind))
     unique = {str(path.resolve()): (path, kind) for path, kind in (*expanded, *archives)}
-    return list(unique.values())
+    candidates = list(unique.values())
+    handoff_roots = tuple(
+        path.resolve()
+        for path, kind in candidates
+        if kind == "tree_expert_e2_handoff_v1" and path.is_dir()
+    )
+    return [
+        (path, kind)
+        for path, kind in candidates
+        if not (
+            kind == "tree_expert_e2_resume_v1"
+            and any(
+                path.resolve() != handoff
+                and path.resolve().is_relative_to(handoff)
+                for handoff in handoff_roots
+            )
+        )
+    ]
 
 
 def discover_inputs(

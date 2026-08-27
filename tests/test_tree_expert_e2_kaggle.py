@@ -60,6 +60,26 @@ def test_optional_resume_rejects_ambiguous_sources(tmp_path: Path) -> None:
         discover_inputs(tmp_path, official_hashes=hashes)
 
 
+def test_expanded_handoff_and_nested_resume_are_one_source(tmp_path: Path) -> None:
+    hashes, _ = _write_inputs(tmp_path)
+    handoff = tmp_path / "tree_expert_e2_handoff"
+    handoff.mkdir()
+    (handoff / "handoff_manifest.json").write_text(
+        json.dumps({"artifact_kind": "tree_expert_e2_handoff_v1"}),
+        encoding="utf-8",
+    )
+    resume = handoff / "tree_expert_e2_resume"
+    resume.mkdir()
+    (resume / "manifest.json").write_text(
+        json.dumps({"artifact_kind": "tree_expert_e2_resume_v1"}),
+        encoding="utf-8",
+    )
+
+    discovered = discover_inputs(tmp_path, official_hashes=hashes)
+
+    assert discovered.resume == handoff
+
+
 def test_requires_two_cuda_devices() -> None:
     fake = SimpleNamespace(cuda=SimpleNamespace(device_count=lambda: 1))
     with pytest.raises(E2KaggleError, match="two CUDA"):
