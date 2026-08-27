@@ -210,3 +210,29 @@ def run_t3_job(
         raise
     except Exception as error:
         return _failure(output, job, error)
+
+
+def load_t3_job_result(output_dir: Path, expected_job_id: str) -> T3JobResult:
+    output = Path(output_dir)
+    try:
+        metrics = json.loads((output / "metrics.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise T3TrainingError("job metrics cannot be loaded") from error
+    if type(metrics) is not dict or metrics.get("job_id") != expected_job_id:
+        raise T3TrainingError("job metrics identity differs")
+    status = metrics.get("status")
+    if status == "failed":
+        return T3JobResult(
+            "failed", expected_job_id, pd.DataFrame(), None, None, None, None,
+            None, None, str(metrics.get("failure")),
+        )
+    predictions_path = output / "predictions.csv"
+    model_path = output / "checkpoint.cbm"
+    if status != "completed" or not predictions_path.is_file() or not model_path.is_file():
+        raise T3TrainingError("completed job files differ")
+    predictions = pd.read_csv(predictions_path)
+    return T3JobResult(
+        "completed", expected_job_id, predictions,
+        float(metrics["brier"]), float(metrics["baseline_brier"]), float(metrics["gain"]),
+        int(metrics["best_iteration"]), model_path, predictions_path, None,
+    )
