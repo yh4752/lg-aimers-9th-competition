@@ -1,0 +1,71 @@
+{
+  "schema_version": 1,
+  "campaign_id": "tree_hierarchical_residual_v1",
+  "review_only": false,
+  "submission_package": false,
+  "inputs": {
+    "official_train_sha256": "d2081186b458b49f60b082be480c273135833e15ba59a76d033af28bcf8763ff",
+    "official_history_sha256": "f7818f9ee0ccefe7c2cf69fa99efe6e5cb882d8b886dd96d2394bcf3b53f33a9",
+    "e2_handoff_sha256": "4dd0c9012b9a59e5235b76d6fe1f6ded4df4b404cab0082c0f3084b8c384050f"
+  },
+  "folds": [[2020, 2021], [2021, 2022], [2022, 2023], [2023, 2024]],
+  "structure_folds": [[2021, 2022], [2022, 2023]],
+  "confirmation_fold": [2023, 2024],
+  "seeds": [3407, 42, 2026],
+  "profiles": {
+    "hc_strong": {"identity_k": 400.0, "context_k": 200.0, "interaction_k": 1600.0},
+    "hc_balanced": {"identity_k": 200.0, "context_k": 100.0, "interaction_k": 800.0},
+    "hc_light": {"identity_k": 80.0, "context_k": 40.0, "interaction_k": 320.0}
+  },
+  "minimum_group_rows": {"identity": 20, "context": 50, "interaction": 100},
+  "profile_tie_order": ["hc_strong", "hc_balanced", "hc_light"],
+  "calibration_alphas": [0.25, 0.5, 0.75, 1.0],
+  "seed_ensemble": "arithmetic_probability_mean",
+  "full_fit_iterations": {"rule": "median_best_iteration_plus_one", "minimum": 50, "maximum": 800},
+  "residual_catboost": {
+    "iterations": 800,
+    "depth": 8,
+    "learning_rate": 0.04,
+    "l2_leaf_reg": 5.0,
+    "random_strength": 0.5,
+    "bootstrap_type": "Bayesian",
+    "bagging_temperature": 0.5,
+    "border_count": 128,
+    "max_ctr_complexity": 2,
+    "one_hot_max_size": 16,
+    "od_type": "Iter",
+    "od_wait": 60,
+    "task_type": "GPU",
+    "allow_writing_files": true,
+    "loss_function": "RMSE"
+  },
+  "calibration": {"effect_clip": 0.25, "probability_clip": 0.00001, "ece_bins": 10},
+  "gates": {
+    "c1_weighted_gain": 0.00010,
+    "c1_confirmation_gain": 0.0,
+    "c1_min_fold_gain": -0.00005,
+    "c1_max_segment_regression": 0.00035,
+    "c2_weighted_gain": 0.00013,
+    "c2_incremental_gain": 0.00003,
+    "c2_min_fold_gain": -0.00003,
+    "c2_max_segment_regression": 0.00020,
+    "bootstrap_repeats": 1000,
+    "bootstrap_seed": 3407,
+    "minimum_segment_rows": 5000,
+    "simpler_tie_margin": 0.00002,
+    "required_non_worse_seeds": 2,
+    "seed_fold_tolerance": 0.0
+  },
+  "runtime": {
+    "h1_wall_seconds": 21600,
+    "h2_wall_seconds": 28800,
+    "h3_wall_seconds": 18000,
+    "new_job_guard_seconds": 600,
+    "final_fit_guard_seconds": 1800,
+    "snapshot_interval_seconds": 900,
+    "inference_rows": 245789,
+    "inference_max_seconds": 480,
+    "model_state_max_bytes": 2147483648,
+    "probability_tolerance": 1e-12
+  }
+}
