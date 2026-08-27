@@ -5,7 +5,14 @@ import threading
 import time
 
 from experiments.tree_expert.t3_contracts import T3Job
-from experiments.tree_expert.t3_runner import T3CampaignState, run_pending_jobs
+import pytest
+
+from experiments.tree_expert.t3_runner import (
+    T3CampaignState,
+    T3RunnerError,
+    require_full_fit_window,
+    run_pending_jobs,
+)
 
 
 def jobs():
@@ -67,3 +74,17 @@ def test_runner_stops_before_new_job_guard(tmp_path):
     )
     assert executor.started == []
     assert active.completed_jobs == set()
+
+
+def test_full_fit_requires_a_dedicated_time_window():
+    with pytest.raises(T3RunnerError, match="full fit deferred"):
+        require_full_fit_window(
+            wall_deadline=13_599.0,
+            clock=lambda: 10_000.0,
+            guard_seconds=3_600,
+        )
+    require_full_fit_window(
+        wall_deadline=13_600.0,
+        clock=lambda: 10_000.0,
+        guard_seconds=3_600,
+    )

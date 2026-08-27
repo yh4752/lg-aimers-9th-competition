@@ -38,6 +38,7 @@
   "runtime": {
     "wall_seconds": 28800,
     "new_job_guard_seconds": 600,
+    "full_fit_guard_seconds": 3600,
     "snapshot_interval_seconds": 600,
     "inference_max_seconds": 480,
     "rss_max_bytes": 23622320128,

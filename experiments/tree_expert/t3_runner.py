@@ -139,7 +139,20 @@ def run_pending_jobs(
                     on_progress()
 
 
+def require_full_fit_window(
+    *,
+    wall_deadline: float,
+    clock: Clock = time.monotonic,
+    guard_seconds: int,
+) -> None:
+    if type(guard_seconds) is not int or guard_seconds <= 0:
+        raise T3RunnerError("full-fit guard differs")
+    if wall_deadline - clock() < guard_seconds:
+        raise T3RunnerError("full fit deferred; resume required")
+
+
 _CODE_MEMBERS = (
+    "experiments/tree_expert/contracts.py",
     "experiments/tree_expert/features.py",
     "experiments/tree_expert/t3_artifacts.py",
     "experiments/tree_expert/t3_contract.json",
@@ -368,6 +381,13 @@ def run_t3_campaign(
         acceptance_status = acceptance.status
         (decisions / "acceptance.json").write_text(_canonical(acceptance_payload(acceptance)))
         if acceptance.status == "accepted":
+            _write_state(state)
+            publish_stable_resume(output, snapshot_root, bindings)
+            require_full_fit_window(
+                wall_deadline=deadline,
+                clock=clock,
+                guard_seconds=contract.full_fit_guard_seconds,
+            )
             full_fit = full_fit_t3(
                 decision=acceptance, train=train, output_dir=output / "full_fit",
                 iteration_evidence=_iteration_evidence(state, structure), gpu_ids=(0, 1),

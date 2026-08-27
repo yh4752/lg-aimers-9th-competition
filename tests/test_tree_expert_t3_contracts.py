@@ -13,6 +13,7 @@ def test_t3_contract_fixes_the_small_search_space():
     assert contract.structure_seed == 3407
     assert contract.confirmation_seeds == (42, 2026)
     assert contract.wall_seconds == 28_800
+    assert contract.full_fit_guard_seconds == 3_600
     with pytest.raises(FrozenInstanceError):
         contract.structure_seed = 42
 

@@ -48,6 +48,7 @@ class T3Contract:
     gates: T3Gates
     wall_seconds: int
     new_job_guard_seconds: int
+    full_fit_guard_seconds: int
     snapshot_interval_seconds: int
     inference_max_seconds: int
     rss_max_bytes: int
@@ -130,7 +131,8 @@ def load_t3_contract(path: Path = DEFAULT_T3_CONTRACT) -> T3Contract:
     runtime = _object(
         root["runtime"],
         {
-            "wall_seconds", "new_job_guard_seconds", "snapshot_interval_seconds",
+            "wall_seconds", "new_job_guard_seconds", "full_fit_guard_seconds",
+            "snapshot_interval_seconds",
             "inference_max_seconds", "rss_max_bytes", "probability_tolerance",
         },
         "T3 runtime",
@@ -154,6 +156,7 @@ def load_t3_contract(path: Path = DEFAULT_T3_CONTRACT) -> T3Contract:
         ),
         wall_seconds=_int(runtime["wall_seconds"], "wall seconds"),
         new_job_guard_seconds=_int(runtime["new_job_guard_seconds"], "job guard"),
+        full_fit_guard_seconds=_int(runtime["full_fit_guard_seconds"], "full-fit guard"),
         snapshot_interval_seconds=_int(runtime["snapshot_interval_seconds"], "snapshot interval"),
         inference_max_seconds=_int(runtime["inference_max_seconds"], "inference seconds"),
         rss_max_bytes=_int(runtime["rss_max_bytes"], "RSS bytes"),
