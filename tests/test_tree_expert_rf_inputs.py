@@ -141,6 +141,22 @@ def test_prepare_and_verify_rf_input_round_trip(tmp_path: Path) -> None:
     assert (verified.full_fit_root / "models/catboost_seed_3407.cbm").is_file()
 
 
+def test_prepared_input_hides_nested_delivery_from_kaggle_auto_extract(tmp_path: Path) -> None:
+    handoff = make_e2_handoff(tmp_path / "e2.zip")
+    digest = file_sha256(handoff)
+
+    archive = prepare_rf_input(
+        e2_handoff=handoff,
+        output=tmp_path / "rf_input.zip",
+        expected_e2_sha256=digest,
+    )
+
+    with ZipFile(archive) as source:
+        names = set(source.namelist())
+    assert "e2/model_delivery.bin" in names
+    assert "e2/model_delivery.zip" not in names
+
+
 def test_rf_input_rejects_modified_member(tmp_path: Path) -> None:
     handoff = make_e2_handoff(tmp_path / "e2.zip")
     digest = file_sha256(handoff)

@@ -23,7 +23,7 @@ class RFInputError(ValueError):
 FOLDS = ((2021, 2022), (2022, 2023), (2023, 2024))
 INPUT_KIND = "tree_expert_rf_input_v1"
 _FOLD_MEMBERS = {fold: f"e2/fold_{fold[0]}_{fold[1]}.csv" for fold in FOLDS}
-_MODEL_DELIVERY = "e2/model_delivery.zip"
+_MODEL_DELIVERY = "e2/model_delivery.bin"
 _PAYLOAD_NAMES = {
     "e2/acceptance.json",
     "e2/handoff_manifest.json",
