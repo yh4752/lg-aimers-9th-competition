@@ -169,8 +169,12 @@ def _artifact_metadata(
     identity: AuditIdentity,
 ) -> dict[str, object]:
     from .tabm_candidate import CANDIDATE_ID
+    from .tree_expert_e2_candidate import (
+        TREE_E2_ADAPTER_ID,
+        TREE_E2_CANDIDATE_ID,
+    )
 
-    if request.adapter_id != CANDIDATE_ID:
+    if request.adapter_id not in {CANDIDATE_ID, TREE_E2_ADAPTER_ID}:
         return {
             "candidate_id": identity.candidate_id,
             "model_sha256": model_sha256,
@@ -179,6 +183,51 @@ def _artifact_metadata(
         }
     manifest_path = _safe_existing(model_dir.parent / "candidate_manifest.json", root)
     manifest = _load(manifest_path)
+    if request.adapter_id == TREE_E2_ADAPTER_ID:
+        expected_keys = {
+            "schema_version",
+            "artifact_kind",
+            "candidate_id",
+            "adapter_id",
+            "handoff_sha256",
+            "delivery_sha256",
+            "delivery_manifest_sha256",
+            "model_sha256",
+            "members",
+            "seeds",
+            "iterations",
+        }
+        members = {name: sha256(data).hexdigest() for name, data in model_files}
+        if (
+            set(manifest) != expected_keys
+            or manifest["schema_version"] != 1
+            or manifest["artifact_kind"]
+            != "tree_expert_e2_submission_candidate_v1"
+            or manifest["candidate_id"] != TREE_E2_CANDIDATE_ID
+            or manifest["candidate_id"] != identity.candidate_id
+            or manifest["adapter_id"] != TREE_E2_ADAPTER_ID
+            or manifest["model_sha256"] != model_sha256
+            or manifest["members"] != members
+            or manifest["seeds"] != [42, 2026, 3407]
+            or manifest["iterations"] != {"42": 78, "2026": 86, "3407": 149}
+            or identity.preprocessing_sha256
+            != members.get("frozen_state/feature_state.json")
+        ):
+            raise SubmissionAuditError("Tree E2 candidate manifest differs from audited model")
+        return {
+            key: manifest[key]
+            for key in (
+                "candidate_id",
+                "adapter_id",
+                "handoff_sha256",
+                "delivery_sha256",
+                "delivery_manifest_sha256",
+                "model_sha256",
+                "members",
+                "seeds",
+                "iterations",
+            )
+        }
     expected_keys = {
         "schema_version",
         "artifact_kind",
