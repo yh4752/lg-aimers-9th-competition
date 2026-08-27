@@ -91,3 +91,13 @@ def test_audit_rejects_duplicate_row_identity(audit_frame: pd.DataFrame) -> None
 
     with pytest.raises(FailureAuditError, match="row_id must be unique"):
         run_failure_label_audit(changed, contract=_small_contract())
+
+
+def test_audit_stops_before_work_after_deadline(audit_frame: pd.DataFrame) -> None:
+    with pytest.raises(FailureAuditError, match="wall deadline reached"):
+        run_failure_label_audit(
+            audit_frame,
+            contract=_small_contract(),
+            wall_deadline=1.0,
+            clock=lambda: 2.0,
+        )

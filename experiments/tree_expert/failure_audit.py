@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import time
 from types import MappingProxyType
-from typing import Mapping
+from typing import Callable, Mapping
 
 import pandas as pd
 
@@ -107,6 +108,9 @@ def run_failure_label_audit(
     rows: pd.DataFrame,
     *,
     contract: FailureAuditContract,
+    wall_deadline: float | None = None,
+    clock: Callable[[], float] = time.monotonic,
+    log: Callable[[str], None] | None = None,
 ) -> FailureAuditResult:
     source = _validated_rows(rows)
     cutoff_results: dict[str, CutoffAudit] = {}
@@ -114,6 +118,10 @@ def run_failure_label_audit(
     exclusion_records: list[dict[str, object]] = []
 
     for audit_id, cutoff_year in contract.cutoffs:
+        if wall_deadline is not None and clock() >= wall_deadline:
+            raise FailureAuditError("wall deadline reached")
+        if log is not None:
+            log(f"FAIL_AUDIT_CUTOFF_START cutoff={audit_id}")
         prefix = source.loc[source["season"].le(cutoff_year)].copy(deep=True)
         if prefix.empty:
             raise FailureAuditError(f"audit prefix is empty: {audit_id}")
@@ -123,6 +131,8 @@ def run_failure_label_audit(
             delta_tolerance=contract.delta_tolerance,
         )
         failed = _quality_failures(recovery, contract)
+        if wall_deadline is not None and clock() >= wall_deadline:
+            raise FailureAuditError("wall deadline reached")
         cutoff_results[audit_id] = CutoffAudit(
             audit_id=audit_id,
             cutoff_year=cutoff_year,
@@ -139,6 +149,11 @@ def run_failure_label_audit(
             class_counts=recovery.class_counts,
             exclusion_counts=recovery.exclusion_counts,
         )
+        if log is not None:
+            log(
+                f"FAIL_AUDIT_CUTOFF_RESULT cutoff={audit_id} "
+                f"status={'passed' if not failed else 'failed'}"
+            )
         for season in sorted(recovery.rows["season"].unique()):
             season_rows = recovery.rows.loc[recovery.rows["season"].eq(season)]
             labeled = season_rows.loc[season_rows["status"].eq("labeled")]
