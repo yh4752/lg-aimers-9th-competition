@@ -36,3 +36,23 @@ Kaggle Notebook에 다음 데이터셋을 연결한다.
 ```
 
 마지막이 `TREE_EXPERT_ERROR`라면 전체 로그와 가장 최근 resume ZIP도 같이 전달한다. `TREE_E2_HANDOFF_READY`에 `delivery=yes`가 표시되더라도 이는 모델 전달 파일일 뿐이다. 별도의 로컬 규칙·형식 감사를 통과하기 전에는 제출물로 취급하지 않는다.
+
+## 3. 2026-08-27 감사 오류 복구
+
+`TreeFeatureError: S1 transform season differs from valid_year`로 끝난 실행은 학습 실패가 아니다. 승인된 세 모델과 검증 결과는 직전 handoff에 남아 있으므로 전체 학습을 다시 하지 않는다.
+
+새 Kaggle Version에는 아래 세 데이터셋만 연결한다.
+
+1. `lg-aimers-9th-data`
+2. 기존 `tree_expert_e2_input` 데이터셋
+3. 실패한 `tree_expert_e2_handoff.zip`으로 만든 데이터셋
+
+이 문서와 같은 커밋에서 다시 생성한 `experiments/tree_expert/KAGGLE_E2_CELL.py`를 한 셀로 실행한다. 복구 코드는 이전 코드 해시, 정확한 오류 문구, 승인 결정, 세 모델의 해시가 모두 일치할 때만 감사 단계로 되돌아간다. B0-B3 검증과 full-fit 학습은 재사용하며 보통 5–15분 안에 끝난다.
+
+정상 복구의 마지막 로그는 다음 형태다.
+
+```text
+TREE_E2_HANDOFF_READY ... status=accepted delivery=yes
+```
+
+완료 후 새로 생성된 `tree_expert_e2_handoff.zip` 하나만 전달한다. 이전 handoff와 새 handoff를 동시에 다음 실행 입력으로 연결하면 중복 resume으로 판정될 수 있으므로 연결하지 않는다.

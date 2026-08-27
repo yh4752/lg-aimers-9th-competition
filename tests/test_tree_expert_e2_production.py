@@ -21,6 +21,7 @@ def test_inference_audit_rows_use_fixed_training_rows_without_target(tmp_path: P
     ).to_csv(path, index=False)
     rows = build_inference_audit_rows(path, row_count=2)
     assert rows["row_id"].tolist() == ["a", "b"]
+    assert rows["season"].tolist() == [2025, 2025]
     assert "control_success" not in rows
 
 

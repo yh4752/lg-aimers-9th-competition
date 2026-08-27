@@ -14,7 +14,13 @@ from zipfile import ZipFile
 import numpy as np
 import pandas as pd
 
-from .e2_artifacts import E2DeliverySources, file_sha256, verify_e2_resume, write_e2_bundles
+from .e2_artifacts import (
+    E2ArtifactError,
+    E2DeliverySources,
+    file_sha256,
+    verify_e2_resume,
+    write_e2_bundles,
+)
 from .e2_baseline import load_reused_baselines, run_f1_baseline
 from .e2_contracts import E2Contract, E2Job, build_structure_jobs, load_e2_contract
 from .e2_decisions import (
@@ -43,6 +49,17 @@ from .e2_training import expected_job_identity, reusable_completed_job, run_e2_f
 
 class E2ProductionError(RuntimeError):
     """Raised when full E2 evidence cannot be produced without guessing."""
+
+
+_LEGACY_AUDIT_CODE_SHA256 = (
+    "def3bb532fcddf1ea3ef47baaaac7dfc39c4c8cbb1f35f25936e1d65a76f629f"
+)
+_LEGACY_AUDIT_RESUME_SHA256 = (
+    "51502704eb2e702722bca965a594e43fae79e88c5ffb3d3a8b10f188540b2396"
+)
+_REGISTERED_AUDIT_ERROR = (
+    "TreeFeatureError: S1 transform season differs from valid_year"
+)
 
 
 def _jsonable(value: object) -> object:
@@ -125,6 +142,7 @@ def build_inference_audit_rows(train_path: Path, *, row_count: int) -> pd.DataFr
     eligible = rows.loc[seasons.eq(2024)].iloc[:row_count].copy(deep=True)
     if len(eligible) != row_count or "control_success" not in eligible:
         raise E2ProductionError("inference audit source rows differ")
+    eligible["season"] = 2025
     return eligible.drop(columns="control_success").reset_index(drop=True)
 
 
@@ -546,17 +564,104 @@ class ProductionRuntime:
         )
 
 
-def _restore_resume(path: Path, output: Path, bindings: Mapping[str, str]) -> Path:
-    verify_e2_resume(path, bindings)
+def _validate_audit_recovery(archive: ZipFile, state: dict[str, object]) -> None:
+    decisions = state.get("decisions")
+    if (
+        state.get("status") != "failed"
+        or state.get("phase") != "TERMINAL"
+        or type(decisions) is not dict
+        or decisions.get("ACCEPTANCE", {}).get("status") != "accepted"
+        or decisions.get("AUDIT")
+        != {"status": "failed", "error": _REGISTERED_AUDIT_ERROR}
+    ):
+        raise E2ProductionError("resume is not the registered audit failure")
+    required = {
+        "decisions/acceptance.json",
+        "decisions/accepted_token.json",
+        "full_fit/full_fit_manifest.json",
+        "full_fit/frozen_state/feature_state.json",
+        *(f"full_fit/models/catboost_seed_{seed}.cbm" for seed in (42, 2026, 3407)),
+    }
+    names = set(archive.namelist())
+    if not required.issubset(names) or "audits/inference.json" in names:
+        raise E2ProductionError("audit recovery evidence differs")
+    acceptance = archive.read("decisions/acceptance.json")
+    token = json.loads(archive.read("decisions/accepted_token.json"))
+    full_fit = json.loads(archive.read("full_fit/full_fit_manifest.json"))
+    if (
+        type(token) is not dict
+        or token.get("candidate_id") != "c1_anchor_residual"
+        or token.get("predictor") != "catboost"
+        or token.get("seeds") != [42, 2026, 3407]
+        or token.get("decision_sha256") != sha256(acceptance).hexdigest()
+        or type(full_fit) is not dict
+        or full_fit.get("candidate_id") != token["candidate_id"]
+        or full_fit.get("predictor") != token["predictor"]
+    ):
+        raise E2ProductionError("audit recovery acceptance evidence differs")
+    expected_models = {
+        str(seed): sha256(
+            archive.read(f"full_fit/models/catboost_seed_{seed}.cbm")
+        ).hexdigest()
+        for seed in (42, 2026, 3407)
+    }
+    if full_fit.get("model_sha256") != expected_models:
+        raise E2ProductionError("audit recovery model evidence differs")
+
+
+def restore_resume_for_current_runtime(
+    path: Path,
+    output: Path,
+    bindings: Mapping[str, str],
+    *,
+    legacy_audit_code_sha256: str = _LEGACY_AUDIT_CODE_SHA256,
+    legacy_audit_resume_sha256: str = _LEGACY_AUDIT_RESUME_SHA256,
+) -> Path:
+    current = dict(bindings)
+    migrate_audit = False
+    try:
+        verify_e2_resume(path, current)
+    except E2ArtifactError:
+        if file_sha256(path) != legacy_audit_resume_sha256:
+            raise E2ProductionError("legacy audit resume SHA-256 differs")
+        legacy = dict(current)
+        legacy["code_sha256"] = legacy_audit_code_sha256
+        verify_e2_resume(path, legacy)
+        migrate_audit = True
+
+    destination = Path(output)
+    destination.mkdir(parents=True, exist_ok=True)
     with ZipFile(path) as archive:
+        state = json.loads(archive.read("state/stage_state.json"))
+        if migrate_audit:
+            _validate_audit_recovery(archive, state)
         for name in archive.namelist():
             if name == "manifest.json":
                 continue
             target_name = "stage_state.json" if name == "state/stage_state.json" else name
-            target = output / target_name
+            target = (destination / target_name).resolve()
+            if not target.is_relative_to(destination.resolve()):
+                raise E2ProductionError("unsafe resume destination")
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_bytes(archive.read(name))
-    return output / "stage_state.json"
+
+    state_path = destination / "stage_state.json"
+    if migrate_audit:
+        decisions = dict(state["decisions"])
+        decisions.pop("AUDIT")
+        artifact_paths = dict(state["artifact_paths"])
+        artifact_paths.pop("inference_audit", None)
+        state.update(
+            status="running",
+            phase="AUDIT",
+            bindings=current,
+            active={},
+            decisions=decisions,
+            artifact_paths=artifact_paths,
+            failed=[item for item in state["failed"] if item != "inference_audit"],
+        )
+        _write_json(state_path, state)
+    return state_path
 
 
 def run_production_campaign(
@@ -585,7 +690,7 @@ def run_production_campaign(
     }
     state_path = output / "stage_state.json"
     if resume_bundle is not None and not state_path.is_file():
-        _restore_resume(Path(resume_bundle), output, bindings)
+        restore_resume_for_current_runtime(Path(resume_bundle), output, bindings)
     runtime = ProductionRuntime(data=data, evidence=evidence, output=output, contract=contract)
     return run_e2_campaign(
         runtime=runtime,
