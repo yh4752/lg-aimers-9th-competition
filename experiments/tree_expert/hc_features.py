@@ -270,3 +270,88 @@ def build_rolling_hierarchy(
         )
         output[year] = transform_hierarchy(valid_rows, state)
     return MappingProxyType(output)
+
+
+def hierarchy_state_payload(state: HierarchyState) -> dict[str, object]:
+    return {
+        "schema_version": 1,
+        "artifact_kind": "tree_hierarchical_feature_state_v1",
+        "cutoff_year": state.cutoff_year,
+        "profile_name": state.profile_name,
+        "source_seasons": list(state.source_seasons),
+        "global_count": state.global_count,
+        "global_rate": state.global_rate,
+        "levels": {
+            name: {
+                "keys": list(level.keys),
+                "parent_level": level.parent_level,
+                "strength": level.strength,
+                "minimum_rows": level.minimum_rows,
+                "entries": [
+                    {
+                        "key": list(key),
+                        "count": entry.count,
+                        "raw_rate": entry.raw_rate,
+                        "parent_rate": entry.parent_rate,
+                        "shrunk_rate": entry.shrunk_rate,
+                        "parent_level": entry.parent_level,
+                        "parent_key": list(entry.parent_key),
+                    }
+                    for key, entry in sorted(level.lookup.items())
+                ],
+            }
+            for name, level in state.levels.items()
+        },
+    }
+
+
+def hierarchy_state_from_payload(payload: Mapping[str, object]) -> HierarchyState:
+    if (
+        type(payload) is not dict
+        or payload.get("schema_version") != 1
+        or payload.get("artifact_kind") != "tree_hierarchical_feature_state_v1"
+        or type(payload.get("levels")) is not dict
+        or set(payload["levels"]) != {name for name, _, _, _ in _LEVELS}
+    ):
+        raise HCFeatureError("hierarchy state payload differs")
+    levels: dict[str, HierarchyLevelState] = {}
+    for name, keys, parent_level, _ in _LEVELS:
+        raw = payload["levels"][name]
+        if (
+            type(raw) is not dict
+            or tuple(raw.get("keys", ())) != keys
+            or raw.get("parent_level") != parent_level
+            or type(raw.get("entries")) is not list
+        ):
+            raise HCFeatureError(f"hierarchy level payload differs: {name}")
+        lookup: dict[tuple[str, ...], HierarchyEntry] = {}
+        for item in raw["entries"]:
+            if type(item) is not dict:
+                raise HCFeatureError(f"hierarchy entry payload differs: {name}")
+            key = tuple(str(value) for value in item["key"])
+            if len(key) != len(keys) or key in lookup:
+                raise HCFeatureError(f"hierarchy entry key differs: {name}")
+            lookup[key] = HierarchyEntry(
+                count=int(item["count"]),
+                raw_rate=float(item["raw_rate"]),
+                parent_rate=float(item["parent_rate"]),
+                shrunk_rate=float(item["shrunk_rate"]),
+                parent_level=str(item["parent_level"]),
+                parent_key=tuple(str(value) for value in item["parent_key"]),
+            )
+        levels[name] = HierarchyLevelState(
+            name=name,
+            keys=keys,
+            parent_level=parent_level,
+            strength=float(raw["strength"]),
+            minimum_rows=int(raw["minimum_rows"]),
+            lookup=MappingProxyType(lookup),
+        )
+    return HierarchyState(
+        cutoff_year=int(payload["cutoff_year"]),
+        profile_name=str(payload["profile_name"]),
+        source_seasons=tuple(int(value) for value in payload["source_seasons"]),
+        global_count=int(payload["global_count"]),
+        global_rate=float(payload["global_rate"]),
+        levels=MappingProxyType(levels),
+    )

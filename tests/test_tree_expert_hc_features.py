@@ -7,6 +7,8 @@ from experiments.tree_expert.hc_features import (
     HCFeatureError,
     build_rolling_hierarchy,
     fit_hierarchy,
+    hierarchy_state_from_payload,
+    hierarchy_state_payload,
     shrink,
     transform_hierarchy,
 )
@@ -107,3 +109,20 @@ def test_fit_rejects_rows_after_cutoff():
             profile=load_hc_contract().profiles["hc_balanced"],
             minimum_group_rows={"identity": 1, "context": 1, "interaction": 1},
         )
+
+
+def test_hierarchy_state_json_round_trip_preserves_predictions():
+    rows = _rows()
+    state = fit_hierarchy(
+        rows.loc[rows["season"].le(2022)],
+        cutoff_year=2022,
+        profile_name="hc_balanced",
+        profile=load_hc_contract().profiles["hc_balanced"],
+        minimum_group_rows={"identity": 1, "context": 1, "interaction": 1},
+    )
+    restored = hierarchy_state_from_payload(hierarchy_state_payload(state))
+    query = rows.loc[rows["season"].eq(2023)].drop(columns="control_success")
+    pd.testing.assert_frame_equal(
+        transform_hierarchy(query, state),
+        transform_hierarchy(query, restored),
+    )

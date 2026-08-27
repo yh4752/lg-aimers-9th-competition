@@ -291,3 +291,89 @@ def select_calibration_alpha(predictions: Mapping[float, pd.DataFrame]) -> float
         scores.append((float(np.mean(np.square(probability - target))), float(alpha)))
     best = min(score for score, _ in scores)
     return min(alpha for score, alpha in scores if score <= best + 1e-12)
+
+
+def calibration_state_payload(state: CalibrationState) -> dict[str, object]:
+    return {
+        "schema_version": 1,
+        "artifact_kind": "tree_hierarchical_calibration_state_v1",
+        "prediction_year": state.prediction_year,
+        "profile_name": state.profile_name,
+        "source": {str(year): kind for year, kind in state.source.items()},
+        "global_effect": state.global_effect,
+        "effect_clip": state.effect_clip,
+        "probability_clip": state.probability_clip,
+        "levels": {
+            name: {
+                "keys": list(level.keys),
+                "parent_level": level.parent_level,
+                "minimum_rows": level.minimum_rows,
+                "strength": level.strength,
+                "entries": [
+                    {
+                        "key": list(key),
+                        "count": entry.count,
+                        "raw_delta": entry.raw_delta,
+                        "parent_cumulative": entry.parent_cumulative,
+                        "cumulative_effect": entry.cumulative_effect,
+                        "incremental_effect": entry.incremental_effect,
+                    }
+                    for key, entry in sorted(level.lookup.items())
+                ],
+            }
+            for name, level in state.levels.items()
+        },
+    }
+
+
+def calibration_state_from_payload(payload: Mapping[str, object]) -> CalibrationState:
+    if (
+        type(payload) is not dict
+        or payload.get("schema_version") != 1
+        or payload.get("artifact_kind") != "tree_hierarchical_calibration_state_v1"
+        or type(payload.get("levels")) is not dict
+        or set(payload["levels"]) != set(_KEYS)
+        or type(payload.get("source")) is not dict
+    ):
+        raise HCCalibrationError("calibration state payload differs")
+    levels: dict[str, CalibrationLevel] = {}
+    for name, keys in _KEYS.items():
+        raw = payload["levels"][name]
+        if (
+            type(raw) is not dict
+            or tuple(raw.get("keys", ())) != keys
+            or raw.get("parent_level") != _PARENT[name]
+            or type(raw.get("entries")) is not list
+        ):
+            raise HCCalibrationError(f"calibration level payload differs: {name}")
+        lookup: dict[tuple[str, ...], CalibrationEntry] = {}
+        for item in raw["entries"]:
+            key = tuple(str(value) for value in item["key"])
+            if len(key) != len(keys) or key in lookup:
+                raise HCCalibrationError(f"calibration entry key differs: {name}")
+            lookup[key] = CalibrationEntry(
+                count=int(item["count"]),
+                raw_delta=float(item["raw_delta"]),
+                parent_cumulative=float(item["parent_cumulative"]),
+                cumulative_effect=float(item["cumulative_effect"]),
+                incremental_effect=float(item["incremental_effect"]),
+            )
+        levels[name] = CalibrationLevel(
+            name=name,
+            keys=keys,
+            parent_level=_PARENT[name],
+            minimum_rows=int(raw["minimum_rows"]),
+            strength=float(raw["strength"]),
+            lookup=MappingProxyType(lookup),
+        )
+    return CalibrationState(
+        prediction_year=int(payload["prediction_year"]),
+        profile_name=str(payload["profile_name"]),
+        source=MappingProxyType(
+            {int(year): str(kind) for year, kind in payload["source"].items()}
+        ),
+        global_effect=float(payload["global_effect"]),
+        levels=MappingProxyType(levels),
+        effect_clip=float(payload["effect_clip"]),
+        probability_clip=float(payload["probability_clip"]),
+    )

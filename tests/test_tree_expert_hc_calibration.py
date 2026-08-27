@@ -6,6 +6,8 @@ from experiments.tree_expert.hc_calibration import (
     HCCalibrationError,
     apply_calibrator,
     fit_rolling_calibrator,
+    calibration_state_from_payload,
+    calibration_state_payload,
     select_calibration_alpha,
 )
 from experiments.tree_expert.hc_contracts import load_hc_contract
@@ -141,3 +143,22 @@ def test_calibrator_rejects_current_or_future_source_rows():
             profile=load_hc_contract().profiles["hc_balanced"],
             minimum_group_rows={"identity": 1, "context": 1, "interaction": 1},
         )
+
+
+def test_calibration_state_json_round_trip_preserves_predictions():
+    source, c1 = _sources()
+    contract = load_hc_contract()
+    state = fit_rolling_calibrator(
+        2024,
+        source,
+        c1,
+        profile_name="hc_balanced",
+        profile=contract.profiles["hc_balanced"],
+        minimum_group_rows={"identity": 1, "context": 1, "interaction": 1},
+    )
+    restored = calibration_state_from_payload(calibration_state_payload(state))
+    query = _frame(2024, "p1").head(8)
+    pd.testing.assert_series_equal(
+        apply_calibrator(query, state, alpha=0.5)["p2"],
+        apply_calibrator(query, restored, alpha=0.5)["p2"],
+    )
