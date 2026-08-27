@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "campaign_id": "failure_expert_label_audit_v1",
+  "review_only": true,
+  "submission_package": false,
+  "official_train_sha256": "d2081186b458b49f60b082be480c273135833e15ba59a76d033af28bcf8763ff",
+  "official_history_sha256": "f7818f9ee0ccefe7c2cf69fa99efe6e5cb882d8b886dd96d2394bcf3b53f33a9",
+  "cutoffs": [{"audit_id": "A1", "year": 2021}, {"audit_id": "A2", "year": 2022}, {"audit_id": "A3", "year": 2023}, {"audit_id": "A4", "year": 2024}],
+  "types": ["middle", "reverse", "other_failure"],
+  "delta_tolerance": 0.02,
+  "quality_gates": {"minimum_coverage": 0.98, "minimum_binary_delta_fraction": 0.999, "minimum_success_agreement": 0.999, "maximum_middle_reverse_overlap": 0.001},
+  "sample_gates": {"minimum_positive_rows": 5000, "minimum_negative_rows": 5000},
+  "runtime": {"wall_seconds": 1800, "maximum_rss_bytes": 12884901888}
+}
