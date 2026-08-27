@@ -23,6 +23,7 @@ class DiscoveredT3Inputs:
 
 _RUNTIME_MEMBERS = (
     "experiments/tree_expert/__init__.py",
+    "experiments/tree_expert/contracts.py",
     "experiments/tree_expert/features.py",
     "experiments/tree_expert/t3_artifacts.py",
     "experiments/tree_expert/t3_contract.json",

@@ -1,5 +1,9 @@
 import json
+import io
 from pathlib import Path
+import subprocess
+import sys
+import tarfile
 from zipfile import ZipFile
 
 import pytest
@@ -8,6 +12,7 @@ from experiments.tree_expert.t3_kaggle import (
     T3KaggleError,
     build_t3_kaggle_cell,
     discover_t3_inputs,
+    runtime_archive,
     runtime_member_names,
 )
 
@@ -15,10 +20,30 @@ from experiments.tree_expert.t3_kaggle import (
 def test_t3_runtime_archive_contains_every_direct_dependency():
     members = runtime_member_names()
     assert "experiments/tree_expert/t3_runner.py" in members
+    assert "experiments/tree_expert/contracts.py" in members
     assert "experiments/tree_expert/t3_state.py" in members
     assert "experiments/tree_expert/features.py" in members
     assert "experiments/temporal_portfolio/seasonal_features.py" in members
     assert "experiments/independent_dl/feature_sources/trackman.py" in members
+
+
+def test_t3_runtime_archive_imports_in_isolation(tmp_path):
+    with tarfile.open(fileobj=io.BytesIO(runtime_archive()), mode="r:gz") as archive:
+        archive.extractall(tmp_path, filter="data")
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import experiments.tree_expert.t3_kaggle; "
+            "import experiments.tree_expert.t3_runner; "
+            "import experiments.tree_expert.t3_inference",
+        ],
+        cwd=tmp_path,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
 
 
 def test_discovery_accepts_unpacked_input_and_at_most_one_resume(tmp_path):
