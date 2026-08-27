@@ -132,6 +132,31 @@ def _source_payloads(path: Path, label: str) -> dict[str, bytes]:
         raise HCInputError(f"{label} is not a valid ZIP") from error
 
 
+def _rebuilt_zip_payload(source: Path, label: str) -> bytes:
+    root = Path(source)
+    if root.is_symlink() or not root.is_dir():
+        raise HCInputError(f"unsafe expanded {label}")
+    members: dict[str, bytes] = {}
+    total = 0
+    for path in sorted(root.rglob("*")):
+        if path.is_symlink():
+            raise HCInputError(f"unsafe expanded {label} member")
+        if path.is_file():
+            name = path.relative_to(root).as_posix()
+            payload = path.read_bytes()
+            total += len(payload)
+            if len(payload) > _MAX_MEMBER or total > _MAX_TOTAL:
+                raise HCInputError(f"expanded {label} size exceeds limit")
+            members[name] = payload
+    if not members:
+        raise HCInputError(f"expanded {label} is empty")
+    output = io.BytesIO()
+    with ZipFile(output, "w", compression=ZIP_DEFLATED, compresslevel=6) as archive:
+        for name, payload in sorted(members.items()):
+            archive.writestr(_info(name), payload)
+    return output.getvalue()
+
+
 def _hc_input_payloads(path: Path) -> dict[str, bytes]:
     source = Path(path)
     if not source.is_dir():
@@ -147,9 +172,14 @@ def _hc_input_payloads(path: Path) -> dict[str, bytes]:
             target = target / part
             if target.is_symlink():
                 raise HCInputError(f"unsafe HC input member: {name}")
-        if not target.is_file():
+        if target.is_file():
+            payload = target.read_bytes()
+        elif name.endswith(".zip") and target.with_suffix("").is_dir():
+            payload = _rebuilt_zip_payload(
+                target.with_suffix(""), f"HC input member {name}"
+            )
+        else:
             raise HCInputError(f"HC input member is absent: {name}")
-        payload = target.read_bytes()
         total += len(payload)
         if len(payload) > _MAX_MEMBER or total > _MAX_TOTAL:
             raise HCInputError("HC input expanded size exceeds limit")

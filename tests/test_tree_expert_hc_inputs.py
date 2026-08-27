@@ -204,6 +204,32 @@ def test_expanded_kaggle_input_ignores_unregistered_wrapper_files(tmp_path):
     assert verified.e2_handoff_sha256 == expected
 
 
+def test_expanded_kaggle_input_rebuilds_nested_model_delivery(tmp_path):
+    handoff = _accepted_handoff(tmp_path / "e2.zip")
+    expected = sha256(handoff.read_bytes()).hexdigest()
+    archive = prepare_hc_input(
+        e2_handoff=handoff,
+        output=tmp_path / "hc_input.zip",
+        expected_e2_sha256=expected,
+    )
+    expanded = tmp_path / "kaggle_recursive_extract"
+    with ZipFile(archive) as source:
+        source.extractall(expanded)
+    nested_zip = expanded / "e2/model_delivery.zip"
+    nested_dir = expanded / "e2/model_delivery"
+    with ZipFile(nested_zip) as source:
+        source.extractall(nested_dir)
+    nested_zip.unlink()
+
+    verified = verify_and_extract_hc_input(
+        expanded,
+        tmp_path / "verified_nested",
+        expected_e2_sha256=expected,
+    )
+    assert verified.e2_delivery.is_file()
+    assert verified.e2_delivery.read_bytes() == _delivery()
+
+
 def test_two_distinct_input_identities_are_rejected(tmp_path):
     first = tmp_path / "first"
     second = tmp_path / "second"
