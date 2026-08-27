@@ -5,6 +5,7 @@ from hashlib import sha256
 import json
 import os
 from pathlib import Path, PurePosixPath
+import shutil
 import stat
 import tempfile
 from typing import Mapping
@@ -161,6 +162,17 @@ def create_resume_bundle(
             if path.is_symlink():
                 raise HCArtifactError(f"completed job has a symlink: {job_id}")
             members[f"jobs/{job_id}/{path.relative_to(job_root).as_posix()}"] = path.read_bytes()
+    for directory_name in ("evidence", "decisions", "states"):
+        directory = root / directory_name
+        if not directory.exists():
+            continue
+        if directory.is_symlink() or not directory.is_dir():
+            raise HCArtifactError(f"resume shared directory differs: {directory_name}")
+        for path in sorted(directory.rglob("*")):
+            if path.is_symlink():
+                raise HCArtifactError(f"resume shared member is a symlink: {directory_name}")
+            if path.is_file():
+                members[f"{directory_name}/{path.relative_to(directory).as_posix()}"] = path.read_bytes()
     manifest = _canonical(
         {
             "schema_version": 1,
@@ -204,6 +216,30 @@ def verify_resume_bundle(path: Path, bindings: HCBindings) -> VerifiedResume:
     if actual_prefixes != expected_prefixes:
         raise HCArtifactError("resume completed jobs differ")
     return VerifiedResume(Path(path), sha256(manifest_bytes).hexdigest(), state.status, state.stage)
+
+
+def restore_resume_bundle(path: Path, destination: Path, bindings: HCBindings) -> Path:
+    verify_resume_bundle(Path(path), bindings)
+    payloads = _safe_payloads(Path(path))
+    output = Path(destination)
+    if output.exists() and (output.is_symlink() or any(output.iterdir())):
+        raise HCArtifactError("resume destination is not empty")
+    temporary = output.with_name(f".{output.name}.tmp")
+    if temporary.exists():
+        shutil.rmtree(temporary)
+    temporary.mkdir(parents=True)
+    try:
+        for name, payload in sorted(payloads.items()):
+            if name == "manifest.json":
+                continue
+            target = temporary / name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(payload)
+        os.replace(temporary, output)
+    finally:
+        if temporary.exists():
+            shutil.rmtree(temporary)
+    return output
 
 
 def create_review_bundle(

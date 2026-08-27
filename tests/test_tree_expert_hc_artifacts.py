@@ -8,6 +8,7 @@ from experiments.tree_expert.hc_artifacts import (
     create_handoff,
     create_model_delivery,
     create_resume_bundle,
+    restore_resume_bundle,
     verify_handoff,
     verify_resume_bundle,
 )
@@ -88,3 +89,18 @@ def test_resume_rejects_binding_change(tmp_path: Path):
     changed = HCBindings("0" * 64, *tuple(str(index) * 64 for index in range(2, 7)))
     with pytest.raises(HCArtifactError, match="bindings differ"):
         verify_resume_bundle(resume, changed)
+
+
+def test_resume_restores_completed_jobs_and_shared_evidence(tmp_path: Path):
+    root, state = _campaign(tmp_path)
+    evidence = root / "evidence/source_e2_2021.csv"
+    evidence.parent.mkdir(parents=True)
+    evidence.write_text("row_id,probability\nr1,0.5\n")
+    decision = root / "decisions/profile.json"
+    decision.parent.mkdir(parents=True)
+    decision.write_text('{"profile":"hc_balanced"}')
+    resume = create_resume_bundle(root, tmp_path / "resume.zip", _bindings(), state)
+    restored = restore_resume_bundle(resume, tmp_path / "restored", _bindings())
+    assert (restored / "jobs/job_a/model.cbm").read_bytes() == b"model"
+    assert (restored / "evidence/source_e2_2021.csv").is_file()
+    assert (restored / "decisions/profile.json").is_file()
