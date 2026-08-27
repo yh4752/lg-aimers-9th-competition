@@ -200,6 +200,28 @@ def test_rf_input_accepts_expanded_directory(tmp_path: Path) -> None:
     assert verified.manifest_sha256
 
 
+def test_rf_input_ignores_unconsumed_kaggle_dataset_metadata(tmp_path: Path) -> None:
+    handoff = make_e2_handoff(tmp_path / "e2.zip")
+    digest = file_sha256(handoff)
+    archive = prepare_rf_input(
+        e2_handoff=handoff,
+        output=tmp_path / "rf_input.zip",
+        expected_e2_sha256=digest,
+    )
+    expanded = tmp_path / "expanded"
+    with ZipFile(archive) as source:
+        source.extractall(expanded)
+    (expanded / "dataset-metadata.json").write_text('{"id":"private/rf-input"}')
+
+    verified = verify_and_extract_rf_input(
+        expanded,
+        tmp_path / "verified",
+        expected_e2_sha256=digest,
+    )
+
+    assert verified.manifest_sha256
+
+
 def test_verify_official_data_accepts_exactly_one_root_in_testing(tmp_path: Path) -> None:
     (tmp_path / "train.csv").write_text("row_id,control_success\na,1\n")
     (tmp_path / "trackman_history.csv").write_text("pitcher_id\np1\n")

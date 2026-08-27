@@ -285,15 +285,41 @@ def prepare_rf_input(
 def _source_payloads(path: Path) -> dict[str, bytes]:
     source = Path(path)
     if source.is_dir():
-        files = [item for item in source.rglob("*") if item.is_file()]
-        if any(item.is_symlink() for item in files):
-            raise RFInputError("RF input directory contains a symlink")
-        names = [item.relative_to(source).as_posix() for item in files]
-        if len(names) != len(set(names)):
-            raise RFInputError("RF input directory names differ")
-        if sum(item.stat().st_size for item in files) > _MAX_INPUT_EXPANDED:
-            raise RFInputError("RF input expanded size exceeds limit")
-        return {name: (source / name).read_bytes() for name in sorted(names)}
+        manifest_path = source / "manifest.json"
+        if manifest_path.is_symlink() or not manifest_path.is_file():
+            raise RFInputError("RF input directory manifest is absent")
+        manifest_payload = manifest_path.read_bytes()
+        manifest = _json(manifest_payload, "RF input manifest")
+        declared = manifest.get("members")
+        if type(declared) is not dict:
+            raise RFInputError("RF input directory manifest members differ")
+        payloads = {"manifest.json": manifest_payload}
+        total = len(manifest_payload)
+        root = source.resolve()
+        for name in sorted(declared):
+            member = PurePosixPath(name)
+            if (
+                type(name) is not str
+                or member.is_absolute()
+                or ".." in member.parts
+                or "\\" in name
+                or name == "manifest.json"
+            ):
+                raise RFInputError("unsafe RF input directory member")
+            target = source / name
+            resolved = target.resolve()
+            if (
+                target.is_symlink()
+                or not target.is_file()
+                or not resolved.is_relative_to(root)
+            ):
+                raise RFInputError(f"RF input directory member is absent: {name}")
+            payload = target.read_bytes()
+            total += len(payload)
+            if total > _MAX_INPUT_EXPANDED:
+                raise RFInputError("RF input expanded size exceeds limit")
+            payloads[name] = payload
+        return payloads
     try:
         with ZipFile(source) as archive:
             infos = _safe_infos(archive, "RF input", _MAX_INPUT_EXPANDED)
