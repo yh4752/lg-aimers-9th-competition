@@ -178,6 +178,9 @@ def materialize_oof_feature_rows(
         if probability.isna().any() or not probability.between(0, 1).all():
             raise HCTrainingError(f"OOF baseline probability differs: {year}")
         diagnostics = valid_labeled.drop(columns="control_success").reset_index(drop=True)
+        for name in ("pitcher_id_known", "batter_id_known"):
+            if name in baseline:
+                diagnostics[name] = baseline[name].astype(str).to_numpy()
         materialized = pd.concat([diagnostics, tree_frame, hierarchy], axis=1)
         materialized["target"] = valid_labeled["control_success"].to_numpy(dtype="float64")
         materialized["p0"] = probability.to_numpy(dtype="float64")

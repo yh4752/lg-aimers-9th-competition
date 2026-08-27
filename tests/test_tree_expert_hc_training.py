@@ -150,7 +150,13 @@ def test_oof_feature_materialization_freezes_each_year_at_previous_season():
         records.append(record)
         if year >= 2021:
             predictions[year] = pd.DataFrame(
-                {"row_id": [f"r{year}"], "target": [year % 2], "probability": [0.5]}
+                {
+                    "row_id": [f"r{year}"],
+                    "target": [year % 2],
+                    "probability": [0.5],
+                    "pitcher_id_known": ["known"],
+                    "batter_id_known": ["known"],
+                }
             )
     official = pd.DataFrame(records)
     cutoffs = []
@@ -184,3 +190,5 @@ def test_oof_feature_materialization_freezes_each_year_at_previous_season():
     assert "tree__num" in materialized.feature_columns
     assert "tree__cat" in materialized.categorical_columns
     assert "p0" in materialized.feature_columns
+    assert materialized.frame["pitcher_id_known"].tolist() == ["known"] * 4
+    assert materialized.frame["batter_id_known"].tolist() == ["known"] * 4
