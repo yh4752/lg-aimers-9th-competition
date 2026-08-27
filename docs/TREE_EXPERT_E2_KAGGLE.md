@@ -47,6 +47,8 @@ Kaggle Notebook에 다음 데이터셋을 연결한다.
 2. 기존 `tree_expert_e2_input` 데이터셋
 3. 실패한 `tree_expert_e2_handoff.zip`으로 만든 데이터셋
 
+Kaggle 화면에서 handoff 아래에 `tree_expert_e2_resume/`, `tree_expert_e2_review/`, `handoff_manifest.json`이 보이는 것은 정상이다. Kaggle이 중첩 ZIP까지 자동으로 푼 형태이며, 현재 셀은 내부 resume을 별도 입력으로 중복 계산하지 않고 원본 SHA-256과 같은 ZIP으로 복원한다. 내부 폴더를 삭제하거나 다시 압축하지 않는다.
+
 이 문서와 같은 커밋에서 다시 생성한 `experiments/tree_expert/KAGGLE_E2_CELL.py`를 한 셀로 실행한다. 복구 코드는 이전 코드 해시, 정확한 오류 문구, 승인 결정, 세 모델의 해시가 모두 일치할 때만 감사 단계로 되돌아간다. B0-B3 검증과 full-fit 학습은 재사용하며 보통 5–15분 안에 끝난다.
 
 정상 복구의 마지막 로그는 다음 형태다.

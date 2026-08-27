@@ -9,7 +9,7 @@ import json
 from pathlib import Path
 import tarfile
 from typing import Mapping
-from zipfile import ZipFile
+from zipfile import ZIP_DEFLATED, ZipFile, ZipInfo
 
 from .e2_contracts import load_e2_contract
 
@@ -292,14 +292,15 @@ try:
     print("TREE_E2_DEPENDENCIES_READY catboost=1.2.10 tabm=0.0.3 rtdl_num_embeddings=0.0.12", flush=True)
 
     STAGE = "inputs"
-    from experiments.tree_expert.e2_kaggle import discover_inputs
+    from experiments.tree_expert.e2_kaggle import discover_inputs, materialize_resume_source
     found = discover_inputs(Path("/kaggle/input"))
     compact = materialize_artifact(found.e2_input, "tree_expert_e2_input.zip")
     resume = None
     if found.resume is not None:
-        resume_source = materialize_artifact(found.resume, "tree_expert_e2_resume_source.zip")
-        from experiments.tree_expert.e2_kaggle import extract_resume_from_source
-        resume = extract_resume_from_source(resume_source, WORK / "materialized" / "tree_expert_e2_resume.zip")
+        resume = materialize_resume_source(
+            found.resume,
+            WORK / "materialized" / "tree_expert_e2_resume.zip",
+        )
     print(f"TREE_E2_INPUTS_FOUND official={{found.official_data}} compact={{compact}} resume={{resume}}", flush=True)
 
     STAGE = "gpu"
@@ -356,6 +357,64 @@ def extract_resume_from_source(source: Path, output: Path) -> Path:
     destination.parent.mkdir(parents=True, exist_ok=True)
     destination.write_bytes(payload)
     return destination
+
+
+def _zip_expanded_resume(source: Path, output: Path) -> Path:
+    root = Path(source)
+    if root.is_symlink() or not root.is_dir():
+        raise E2KaggleError("expanded resume directory differs")
+    members = []
+    for path in sorted(root.rglob("*")):
+        if path.is_symlink():
+            raise E2KaggleError("expanded resume symlink is forbidden")
+        if path.is_file():
+            members.append(path)
+    if not members:
+        raise E2KaggleError("expanded resume is empty")
+    destination = Path(output)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temporary = destination.with_name(f".{destination.name}.tmp")
+    with ZipFile(temporary, "w", compression=ZIP_DEFLATED, compresslevel=6) as archive:
+        for path in members:
+            info = ZipInfo(
+                path.relative_to(root).as_posix(),
+                date_time=(2026, 1, 1, 0, 0, 0),
+            )
+            info.compress_type = ZIP_DEFLATED
+            info.external_attr = 0o100644 << 16
+            archive.writestr(info, path.read_bytes())
+    temporary.replace(destination)
+    return destination
+
+
+def materialize_resume_source(source: Path, output: Path) -> Path:
+    path = Path(source)
+    kind = _artifact_kind(path)
+    if kind == "tree_expert_e2_resume_v1":
+        return path if path.is_file() else _zip_expanded_resume(path, output)
+    if kind != "tree_expert_e2_handoff_v1":
+        raise E2KaggleError("resume source identity differs")
+    if path.is_file():
+        return extract_resume_from_source(path, output)
+
+    nested_archive = path / "tree_expert_e2_resume.zip"
+    if nested_archive.is_symlink():
+        raise E2KaggleError("nested resume symlink is forbidden")
+    if nested_archive.is_file():
+        if _artifact_kind(nested_archive) != "tree_expert_e2_resume_v1":
+            raise E2KaggleError("nested resume identity differs")
+        return nested_archive
+
+    nested_directories = {
+        manifest.parent.resolve(): manifest.parent
+        for manifest in sorted(path.rglob("manifest.json"))
+        if _artifact_kind(manifest.parent) == "tree_expert_e2_resume_v1"
+    }
+    if len(nested_directories) != 1:
+        raise E2KaggleError(
+            f"nested resume count must be one; found={len(nested_directories)}"
+        )
+    return _zip_expanded_resume(next(iter(nested_directories.values())), output)
 
 
 def run_kaggle_campaign(**kwargs: object) -> object:

@@ -9,9 +9,11 @@ import subprocess
 import sys
 import tarfile
 from types import SimpleNamespace
+from zipfile import ZIP_DEFLATED, ZipFile, ZipInfo
 
 import pytest
 
+from experiments.tree_expert import e2_kaggle
 from experiments.tree_expert.e2_kaggle import (
     _runtime_archive,
     E2KaggleError,
@@ -38,6 +40,16 @@ def _write_inputs(root: Path) -> tuple[dict[str, str], Path]:
         "official_train_sha256": sha256(train.read_bytes()).hexdigest(),
         "official_history_sha256": sha256(history.read_bytes()).hexdigest(),
     }, compact
+
+
+def _write_deterministic_zip(path: Path, members: dict[str, bytes]) -> Path:
+    with ZipFile(path, "w", compression=ZIP_DEFLATED, compresslevel=6) as archive:
+        for name, payload in sorted(members.items()):
+            info = ZipInfo(name, date_time=(2026, 1, 1, 0, 0, 0))
+            info.compress_type = ZIP_DEFLATED
+            info.external_attr = 0o100644 << 16
+            archive.writestr(info, payload)
+    return path
 
 
 def test_discovers_one_official_data_and_one_e2_input(tmp_path: Path) -> None:
@@ -78,6 +90,58 @@ def test_expanded_handoff_and_nested_resume_are_one_source(tmp_path: Path) -> No
     discovered = discover_inputs(tmp_path, official_hashes=hashes)
 
     assert discovered.resume == handoff
+
+
+def test_expanded_handoff_rebuilds_exact_resume_archive(tmp_path: Path) -> None:
+    original = _write_deterministic_zip(
+        tmp_path / "original_resume.zip",
+        {
+            "manifest.json": json.dumps(
+                {"artifact_kind": "tree_expert_e2_resume_v1"},
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode(),
+            "state/stage_state.json": b"{}",
+        },
+    )
+    handoff = tmp_path / "tree_expert_e2_handoff"
+    handoff.mkdir()
+    (handoff / "handoff_manifest.json").write_text(
+        json.dumps({"artifact_kind": "tree_expert_e2_handoff_v1"}),
+        encoding="utf-8",
+    )
+    expanded_resume = handoff / "tree_expert_e2_resume"
+    with ZipFile(original) as archive:
+        archive.extractall(expanded_resume)
+
+    rebuilt = e2_kaggle.materialize_resume_source(
+        handoff,
+        tmp_path / "rebuilt_resume.zip",
+    )
+
+    assert sha256(rebuilt.read_bytes()).hexdigest() == sha256(original.read_bytes()).hexdigest()
+
+
+def test_expanded_handoff_rejects_multiple_nested_resumes(tmp_path: Path) -> None:
+    handoff = tmp_path / "tree_expert_e2_handoff"
+    handoff.mkdir()
+    (handoff / "handoff_manifest.json").write_text(
+        json.dumps({"artifact_kind": "tree_expert_e2_handoff_v1"}),
+        encoding="utf-8",
+    )
+    for name in ("first", "second"):
+        resume = handoff / name
+        resume.mkdir()
+        (resume / "manifest.json").write_text(
+            json.dumps({"artifact_kind": "tree_expert_e2_resume_v1"}),
+            encoding="utf-8",
+        )
+
+    with pytest.raises(E2KaggleError, match="nested resume count"):
+        e2_kaggle.materialize_resume_source(
+            handoff,
+            tmp_path / "rebuilt_resume.zip",
+        )
 
 
 def test_requires_two_cuda_devices() -> None:

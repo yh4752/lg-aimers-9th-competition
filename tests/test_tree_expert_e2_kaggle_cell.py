@@ -9,6 +9,7 @@ def test_generated_cell_is_small_has_markers_and_no_auto_download(tmp_path: Path
     assert path.stat().st_size < 1_000_000
     assert "TREE_E2_HANDOFF_READY" in source
     assert "TREE_EXPERT_ERROR stage=" in source
+    assert "materialize_resume_source" in source
     assert "files.download" not in source
     assert "submission.csv" not in source
     compile(source, str(path), "exec")
