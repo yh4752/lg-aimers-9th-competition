@@ -6,6 +6,7 @@ import pytest
 from experiments.tree_expert.failure_labels import (
     FailureLabelError,
     audit_failure_labels,
+    recover_failure_labels,
 )
 
 
@@ -58,3 +59,26 @@ def test_failed_label_gate_skips_only_c3() -> None:
 
     assert result.status == "skipped_unreliable_labels"
     assert result.labels.size == 0
+
+
+def test_detailed_recovery_reports_labels_and_exclusions_by_source_position() -> None:
+    result = recover_failure_labels(
+        _failure_rows(), valid_year=2024, delta_tolerance=1e-9
+    )
+
+    assert result.rows.loc[result.rows["status"].eq("labeled"), "label"].tolist() == [
+        "success",
+        "middle",
+        "reverse",
+        "other_failure",
+    ]
+    assert result.rows["source_position"].is_unique
+    assert result.exclusion_counts["no_successor"] == 1
+
+
+def test_detailed_recovery_marks_duplicate_count() -> None:
+    rows = pd.concat([_failure_rows(), _failure_rows().iloc[[2]]], ignore_index=True)
+
+    result = recover_failure_labels(rows, valid_year=2024, delta_tolerance=1e-9)
+
+    assert result.exclusion_counts["duplicate_count"] >= 1
