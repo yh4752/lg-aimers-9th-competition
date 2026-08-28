@@ -35,18 +35,17 @@ HeteroJob(
 )
 ```
 
-### Task 2: Build and verify compact E2 OOF input
+### Task 2: Reuse and verify the compact T3/E2 OOF input
 
 **Files:**
-- Create: `experiments/tree_expert/hetero_inputs.py`
-- Create: `tools/prepare_tree_expert_hetero_input.py`
-- Test: `tests/test_tree_expert_hetero_inputs.py`
+- Reuse: `experiments/tree_expert/t3_inputs.py`
+- Reuse: `tools/prepare_tree_expert_t3_input.py`
+- Test: `tests/test_tree_expert_t3_inputs.py`
 
-- [ ] Write a failing round-trip test using a synthetic accepted E2 handoff.
-- [ ] Write failing tests for changed fold bytes, row order, target, duplicate IDs, unsafe members, and wrong E2 SHA-256.
-- [ ] Run the input tests and verify failures come from missing APIs.
-- [ ] Implement `prepare_hetero_input()` and `verify_and_extract_hetero_input()` with deterministic ZIP timestamps and member hashes.
-- [ ] Run tests and commit `feat: prepare hetero residual inputs`.
+- [ ] Run the existing round-trip, changed-fold, row-order, target, duplicate-ID, unsafe-member, and wrong-E2-SHA tests.
+- [ ] Confirm `hetero_contract.json` and `t3_contract.json` bind the same official train, history, and E2 handoff SHA-256 values.
+- [ ] Import `verify_and_extract_t3_input()` from the sealed runtime instead of adding a second archive implementation.
+- [ ] Record the reuse decision in this plan; no production file or commit is needed for this task.
 
 The payload set is exactly:
 
