@@ -15,12 +15,14 @@
 **Files:**
 - Inspect: `experiments/tree_expert/failure_audit_contract.json`
 - Inspect: `experiments/tree_expert/failure_audit_contracts.py`
+- Test: `tests/test_tree_expert_failure_audit_contracts.py`
 - Test: `tests/test_tree_expert_failure_audit.py`
 
 - [ ] **Step 1: Run the contract tests**
 
 ```bash
 artifacts/tabm_submission_python311/bin/python -m pytest \
+  tests/test_tree_expert_failure_audit_contracts.py \
   tests/test_tree_expert_failure_audit.py -q
 ```
 
@@ -73,14 +75,14 @@ Expected: review ZIP only; no model or submission entry point.
 - Inspect: `experiments/tree_expert/failure_audit_kaggle.py`
 - Inspect: `experiments/tree_expert/KAGGLE_FAILURE_AUDIT_CELL.py`
 - Test: `tests/test_tree_expert_failure_audit_kaggle.py`
-- Test: `tests/test_tree_expert_failure_audit_kaggle_cell.py`
+- Test: `tests/test_tree_expert_failure_audit_cell.py`
 
 - [ ] **Step 1: Run cell and runtime-inventory tests**
 
 ```bash
 artifacts/tabm_submission_python311/bin/python -m pytest \
   tests/test_tree_expert_failure_audit_kaggle.py \
-  tests/test_tree_expert_failure_audit_kaggle_cell.py -q
+  tests/test_tree_expert_failure_audit_cell.py -q
 ```
 
 Expected: embedded runtime identity, official hash checks, syntax, deterministic rendering, and one-megabyte limit pass.
@@ -112,20 +114,22 @@ Expected: one stable size and SHA-256 are reported for the user.
 
 **Files:**
 - Test: `tests/test_tree_expert_failure_labels.py`
+- Test: `tests/test_tree_expert_failure_audit_contracts.py`
 - Test: `tests/test_tree_expert_failure_audit.py`
 - Test: `tests/test_tree_expert_failure_audit_artifacts.py`
 - Test: `tests/test_tree_expert_failure_audit_kaggle.py`
-- Test: `tests/test_tree_expert_failure_audit_kaggle_cell.py`
+- Test: `tests/test_tree_expert_failure_audit_cell.py`
 
 - [ ] **Step 1: Run all S0 tests together**
 
 ```bash
 artifacts/tabm_submission_python311/bin/python -m pytest \
   tests/test_tree_expert_failure_labels.py \
+  tests/test_tree_expert_failure_audit_contracts.py \
   tests/test_tree_expert_failure_audit.py \
   tests/test_tree_expert_failure_audit_artifacts.py \
   tests/test_tree_expert_failure_audit_kaggle.py \
-  tests/test_tree_expert_failure_audit_kaggle_cell.py -q
+  tests/test_tree_expert_failure_audit_cell.py -q
 ```
 
 Expected: all focused tests pass with zero failures.
