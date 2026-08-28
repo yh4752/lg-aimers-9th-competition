@@ -85,13 +85,17 @@ def _correlation(left: np.ndarray, right: np.ndarray) -> float:
 
 
 def _bootstrap(gain: np.ndarray, repeats: int, seed: int) -> tuple[float, float]:
+    block_size = 1024
+    starts = np.arange(0, len(gain), block_size)
+    sums = np.add.reduceat(gain, starts)
+    counts = np.minimum(block_size, len(gain) - starts)
     generator = np.random.default_rng(seed)
     values = np.empty(repeats, dtype="float64")
     chunk = 100
     for start in range(0, repeats, chunk):
         count = min(chunk, repeats - start)
-        indexes = generator.integers(0, len(gain), size=(count, len(gain)))
-        values[start:start + count] = gain[indexes].mean(axis=1)
+        indexes = generator.integers(0, len(sums), size=(count, len(sums)))
+        values[start:start + count] = sums[indexes].sum(axis=1) / counts[indexes].sum(axis=1)
     lower, upper = np.quantile(values, [0.025, 0.975])
     return float(lower), float(upper)
 

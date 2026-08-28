@@ -112,16 +112,17 @@ def _fit(model: BinaryClassifier, family: str, train: HeteroFeatureBatch, valid:
     if family == "xgboost":
         kwargs["verbose"] = 50
     else:
-        try:
-            import lightgbm as lgb
-        except ImportError as error:
-            raise HeteroTrainingError("lightgbm==4.6.0 is required") from error
-        kwargs["callbacks"] = [lgb.early_stopping(80), lgb.log_evaluation(50)]
+        if model.__class__.__module__.split(".")[0] == "lightgbm":
+            try:
+                import lightgbm as lgb
+            except ImportError as error:
+                raise HeteroTrainingError("lightgbm==4.6.0 is required") from error
+            kwargs["callbacks"] = [lgb.early_stopping(80), lgb.log_evaluation(50)]
     model.fit(train.matrix, np.asarray(train.target, dtype="int8"), **kwargs)
 
 
 def _save_model(model: BinaryClassifier, family: str, path: Path) -> None:
-    temporary = path.with_name(f".{path.name}.tmp")
+    temporary = path.with_name(f".{path.stem}.tmp{path.suffix}")
     temporary.unlink(missing_ok=True)
     if hasattr(model, "save_model"):
         model.save_model(str(temporary))  # type: ignore[attr-defined]

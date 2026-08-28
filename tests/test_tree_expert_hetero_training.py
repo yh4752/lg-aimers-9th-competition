@@ -77,6 +77,19 @@ def test_job_learns_binary_target_directly_and_preserves_baseline(tmp_path):
     assert result.model_path.is_file()
 
 
+def test_lightgbm_adapter_also_learns_binary_target_directly(tmp_path):
+    model = RecordingClassifier()
+    harness = Harness()
+    result = run_hetero_job(
+        job=HeteroJob("job", "lightgbm", 2023, 2024, 3407),
+        train=_train(), baseline=_baseline(), output_dir=tmp_path,
+        model_factory=lambda *_args, **_kwargs: model,
+        feature_builder=harness.fit, feature_transformer=harness.transform,
+    )
+    assert result.status == "completed"
+    np.testing.assert_array_equal(model.target, [0, 1, 0])
+
+
 def test_baseline_row_order_is_a_hard_boundary(tmp_path):
     bad = _baseline().copy()
     bad.loc[0, "row_id"] = "wrong"
