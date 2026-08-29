@@ -37,6 +37,7 @@ def test_rendered_cell_is_deterministic_small_and_has_no_submission(tmp_path):
     assert first.stat().st_size < 1_000_000
     text = first.read_text()
     assert "S4_HANDOFF_READY" in text and "S4_SUCCESS" in text
+    assert "S4_RECOVERY_READY" in text
     assert "files.download" not in text
     assert "submission/package.py" not in text
     assert len(runtime_identity_sha256(Path(__file__).resolve().parents[1])) == 64

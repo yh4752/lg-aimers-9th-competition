@@ -158,6 +158,17 @@ def test_compaction_requires_every_completed_full_chain_output(tmp_path: Path) -
         )
 
 
+def test_compaction_refuses_to_overwrite_existing_output(tmp_path: Path) -> None:
+    source, contract = _source_fixture(tmp_path)
+    output = tmp_path / "recovery.zip"
+    output.write_bytes(b"keep")
+    with pytest.raises(FileExistsError):
+        compact_recovery_handoff(
+            source, output, destination_code_sha256="9" * 64, contract=contract,
+        )
+    assert output.read_bytes() == b"keep"
+
+
 def test_expanded_recovery_input_materializes_identical_resume(tmp_path: Path) -> None:
     source, contract = _source_fixture(tmp_path)
     recovery = compact_recovery_handoff(
