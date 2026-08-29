@@ -6,7 +6,7 @@ import json
 import os
 from pathlib import Path, PurePosixPath
 import shutil
-from typing import Mapping
+from typing import Mapping, TypeAlias
 from zipfile import BadZipFile, ZIP_DEFLATED, ZipFile, ZipInfo
 
 from .s4_state import load_s4_state
@@ -34,6 +34,9 @@ _KINDS = {
 }
 _MAX_FILES = 4096
 _MAX_BYTES = 12 * 1024 * 1024 * 1024
+_STREAM_BLOCK_BYTES = 1024 * 1024
+_MINIMUM_SNAPSHOT_WORK_BYTES = 256 * 1024 * 1024
+Payload: TypeAlias = bytes | Path
 
 
 def file_sha256(path: Path) -> str:
@@ -63,15 +66,39 @@ def _validate_bindings(bindings: S4Bindings) -> None:
         raise S4ArtifactError("artifact bindings differ")
 
 
+def _payload_evidence(payload: Payload) -> tuple[int, str]:
+    if isinstance(payload, bytes):
+        return len(payload), sha256(payload).hexdigest()
+    path = Path(payload)
+    if path.is_symlink() or not path.is_file():
+        raise S4ArtifactError("artifact source is not a regular file")
+    digest = sha256()
+    size = 0
+    with path.open("rb") as handle:
+        for block in iter(lambda: handle.read(_STREAM_BLOCK_BYTES), b""):
+            size += len(block)
+            digest.update(block)
+    return size, digest.hexdigest()
+
+
+def _write_member(archive: ZipFile, name: str, payload: Payload) -> None:
+    if isinstance(payload, bytes):
+        archive.writestr(_zip_info(name), payload)
+        return
+    with Path(payload).open("rb") as source, archive.open(_zip_info(name), "w") as target:
+        shutil.copyfileobj(source, target, length=_STREAM_BLOCK_BYTES)
+
+
 def _write_payloads(
-    payloads: Mapping[str, bytes], destination: Path, kind: str, bindings: S4Bindings,
+    payloads: Mapping[str, Payload], destination: Path, kind: str, bindings: S4Bindings,
     *, extra: Mapping[str, object] | None = None,
 ) -> Path:
     _validate_bindings(bindings)
     if kind not in _KINDS or not payloads or "manifest.json" in payloads:
         raise S4ArtifactError("artifact payload differs")
     names = sorted(payloads)
-    if len(names) > _MAX_FILES or sum(len(payloads[name]) for name in names) > _MAX_BYTES:
+    evidence = {name: _payload_evidence(payloads[name]) for name in names}
+    if len(names) > _MAX_FILES or sum(evidence[name][0] for name in names) > _MAX_BYTES:
         raise S4ArtifactError("artifact expansion exceeds limit")
     for name in names:
         path = PurePosixPath(name)
@@ -82,7 +109,7 @@ def _write_payloads(
         "artifact_kind": _KINDS[kind],
         "bindings": asdict(bindings),
         "members": {
-            name: {"sha256": sha256(payloads[name]).hexdigest(), "size": len(payloads[name])}
+            name: {"sha256": evidence[name][1], "size": evidence[name][0]}
             for name in names
         },
     }
@@ -98,7 +125,7 @@ def _write_payloads(
     try:
         with ZipFile(temporary, "w") as archive:
             for name in names:
-                archive.writestr(_zip_info(name), payloads[name])
+                _write_member(archive, name, payloads[name])
             archive.writestr(_zip_info("manifest.json"), _canonical(manifest))
         os.replace(temporary, output)
     finally:
@@ -106,7 +133,7 @@ def _write_payloads(
     return output
 
 
-def _root_payloads(root: Path, include) -> dict[str, bytes]:
+def _root_payloads(root: Path, include) -> dict[str, Path]:
     source = Path(root)
     if not source.is_dir():
         raise S4ArtifactError("campaign root differs")
@@ -118,7 +145,7 @@ def _root_payloads(root: Path, include) -> dict[str, bytes]:
             continue
         name = path.relative_to(source).as_posix()
         if include(name):
-            output[name] = path.read_bytes()
+            output[name] = path
     if not output:
         raise S4ArtifactError("campaign source is empty")
     return output
@@ -187,6 +214,50 @@ def create_s4_model_delivery(root: Path, destination: Path, bindings: S4Bindings
     payloads = {f"models/{name}": value for name, value in models.items()}
     payloads["accepted/token.json"] = token
     return _write_payloads(payloads, destination, "delivery", bindings, extra={"delivery": True})
+
+
+def estimate_s4_handoff_peak_bytes(
+    root: Path,
+    *,
+    include_delivery: bool = False,
+    log_path: Path | None = None,
+) -> int:
+    source = Path(root)
+    state = load_s4_state(source / "state/state.json")
+    completed = set(state.completed_jobs)
+
+    def resume_member(name: str) -> bool:
+        parts = PurePosixPath(name).parts
+        if name.startswith("bundles/") or name.endswith(".tmp"):
+            return False
+        if name == "verified_e2_input.zip" or name.startswith("verified_e2/"):
+            return False
+        if parts and parts[0] == "jobs":
+            return len(parts) >= 3 and parts[1] in completed and parts[-1] == "result.json"
+        if parts and parts[0] == "anchor_basis" and state.phase != "anchors":
+            return False
+        return True
+
+    def review_member(name: str) -> bool:
+        parts = PurePosixPath(name).parts
+        if not parts or name.endswith((".zip", ".tmp", ".cbm", ".pt", ".bin", ".pkl", ".joblib")):
+            return False
+        return (
+            name == "s4_campaign.log"
+            or parts[0] in {"state", "diagnostics", "decisions", "confirmation"}
+            or (parts[0] == "full_chains" and parts[-1] == "config.json")
+            or (parts[0] == "jobs" and parts[-1] == "result.json")
+        )
+
+    def size(payloads: Mapping[str, Path]) -> int:
+        return sum(path.stat().st_size for path in payloads.values())
+
+    nested = size(_root_payloads(source, resume_member)) + size(_root_payloads(source, review_member))
+    if include_delivery:
+        nested += size(_root_payloads(source / "models", lambda _name: True))
+    if log_path is not None and Path(log_path).is_file():
+        nested += Path(log_path).stat().st_size
+    return max(_MINIMUM_SNAPSHOT_WORK_BYTES, 2 * nested)
 
 
 def _safe_infos(archive: ZipFile) -> dict[str, ZipInfo]:
@@ -268,26 +339,38 @@ def create_s4_handoff(
     source = Path(root)
     bundles = source / "bundles"
     bundles.mkdir(parents=True, exist_ok=True)
-    review = create_s4_review(source, bundles / "review.zip", bindings)
-    resume = create_s4_resume(source, bundles / "resume.zip", bindings)
-    payloads = {"review.zip": review.read_bytes(), "resume.zip": resume.read_bytes()}
-    status = "review_ready"
-    if include_delivery:
-        delivery = create_s4_model_delivery(source, bundles / "model_delivery.zip", bindings)
-        payloads["model_delivery.zip"] = delivery.read_bytes()
-        status = "delivery_ready"
-    else:
-        state = load_s4_state(source / "state/state.json")
-        if any(value == "accepted" for value in state.decisions.values()):
-            status = "accepted_review_ready"
-        elif state.phase == "completed":
-            status = "completed_no_candidate"
-    if log_path is not None:
-        payloads["campaign.log"] = Path(log_path).read_bytes()
-    return _write_payloads(
-        payloads,
-        destination,
-        "handoff",
-        bindings,
-        extra={"status": status, "delivery": include_delivery, "submission_package": False},
-    )
+    generated: list[Path] = []
+    try:
+        review = create_s4_review(source, bundles / "review.zip", bindings)
+        generated.append(review)
+        resume = create_s4_resume(source, bundles / "resume.zip", bindings)
+        generated.append(resume)
+        payloads: dict[str, Payload] = {"review.zip": review, "resume.zip": resume}
+        status = "review_ready"
+        if include_delivery:
+            delivery = create_s4_model_delivery(source, bundles / "model_delivery.zip", bindings)
+            generated.append(delivery)
+            payloads["model_delivery.zip"] = delivery
+            status = "delivery_ready"
+        else:
+            state = load_s4_state(source / "state/state.json")
+            if any(value == "accepted" for value in state.decisions.values()):
+                status = "accepted_review_ready"
+            elif state.phase == "completed":
+                status = "completed_no_candidate"
+        if log_path is not None:
+            payloads["campaign.log"] = Path(log_path)
+        return _write_payloads(
+            payloads,
+            destination,
+            "handoff",
+            bindings,
+            extra={"status": status, "delivery": include_delivery, "submission_package": False},
+        )
+    finally:
+        for path in generated:
+            path.unlink(missing_ok=True)
+        try:
+            bundles.rmdir()
+        except OSError:
+            pass

@@ -2,15 +2,19 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
+import errno
 import json
 from pathlib import Path
+import shutil
 import threading
 import time
 from typing import Mapping, Protocol
 
 from .s4_artifacts import (
+    S4ArtifactError,
     S4Bindings,
     create_s4_handoff,
+    estimate_s4_handoff_peak_bytes,
     restore_s4_resume,
 )
 from .s4_contracts import load_s4_contract
@@ -27,6 +31,9 @@ from .s4_state import (
 
 class S4RunnerError(RuntimeError):
     pass
+
+
+_DISK_RESERVE_BYTES = 512 * 1024 * 1024
 
 
 @dataclass(frozen=True)
@@ -101,6 +108,7 @@ def run_s4_campaign(
     resume_bundle: Path | None = None,
     gpu_ids: tuple[int, int] = (0, 1),
     clock=time.monotonic,
+    disk_usage=shutil.disk_usage,
 ) -> S4CampaignResult:
     if len(gpu_ids) != 2 or len(set(gpu_ids)) != 2:
         raise S4RunnerError("S4 requires two distinct GPU workers")
@@ -115,6 +123,46 @@ def run_s4_campaign(
     lock = threading.Lock()
     last_snapshot = clock()
     caught: BaseException | None = None
+    final_snapshot_ready = False
+
+    def publish_snapshot(*, final: bool) -> bool:
+        include_delivery = (
+            (root / "accepted/token.json").is_file()
+            and (root / "models").is_dir()
+        )
+        estimated = estimate_s4_handoff_peak_bytes(
+            root, include_delivery=include_delivery, log_path=log_path
+        )
+        free = int(disk_usage(handoff.parent).free)
+        _append(
+            log_path,
+            f"S4_DISK_STATUS free_bytes={free} estimated_peak_bytes={estimated}",
+        )
+        if free < estimated + _DISK_RESERVE_BYTES:
+            _append(log_path, "S4_SNAPSHOT_SKIPPED reason=insufficient_space")
+            if final and not handoff.is_file():
+                raise S4ArtifactError("insufficient space for final S4 handoff")
+            return False
+        try:
+            create_s4_handoff(
+                root,
+                handoff,
+                bindings,
+                include_delivery=include_delivery,
+                log_path=log_path,
+            )
+        except OSError as error:
+            if error.errno not in {errno.ENOSPC, errno.EDQUOT}:
+                raise
+            _append(log_path, "S4_SNAPSHOT_SKIPPED reason=insufficient_space")
+            if final and not handoff.is_file():
+                raise S4ArtifactError("insufficient space for final S4 handoff") from error
+            return False
+        _append(
+            log_path,
+            f"S4_SNAPSHOT_READY path={handoff} size_bytes={handoff.stat().st_size}",
+        )
+        return True
 
     def execute(job: S4Job, gpu_id: int) -> str:
         nonlocal active, maximum_active
@@ -167,7 +215,7 @@ def run_s4_campaign(
                         state = mark_completed(state, job.job_id) if status == "completed" else mark_failed(state, job.job_id)
                         save_s4_state(state, root / "state/state.json")
                 if clock() - last_snapshot >= contract.runtime.snapshot_interval_seconds:
-                    create_s4_handoff(root, handoff, bindings, log_path=log_path)
+                    publish_snapshot(final=False)
                     last_snapshot = clock()
                 if first_error is not None:
                     raise first_error
@@ -184,17 +232,13 @@ def run_s4_campaign(
         caught = error
         _append(log_path, f"S4_ERROR type={type(error).__name__} message={str(error).replace(' ', '_')}")
     finally:
-        create_s4_handoff(
-            root,
-            handoff,
-            bindings,
-            include_delivery=(root / "accepted/token.json").is_file() and (root / "models").is_dir(),
-            log_path=log_path,
-        )
-        _append(log_path, f"S4_HANDOFF_READY path={handoff}")
+        final_snapshot_ready = publish_snapshot(final=True)
+        if handoff.is_file():
+            status = "current" if final_snapshot_ready else "previous"
+            _append(log_path, f"S4_HANDOFF_READY path={handoff} status={status}")
     if caught is not None:
         raise caught
-    status = "completed" if state.phase == "completed" else "incomplete"
+    status = "completed" if state.phase == "completed" and final_snapshot_ready else "incomplete"
     if status == "completed":
         _append(log_path, f"S4_SUCCESS status={status} handoff={handoff}")
     return S4CampaignResult(

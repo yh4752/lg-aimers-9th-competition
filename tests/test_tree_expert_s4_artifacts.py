@@ -101,3 +101,29 @@ def test_review_keeps_decisions_and_confirmation_but_drops_raw_search_tables(tmp
     assert "confirmation/c02/2024.csv" in names
     assert "full_chains/c02/2024.csv" not in names
     assert not any(name.startswith("residual_predictions/") for name in names)
+
+
+def test_resume_streams_file_payloads_without_path_read_bytes(tmp_path, monkeypatch):
+    root = _root(tmp_path)
+    payload = root / "confirmation/c02/2024.csv"
+    payload.parent.mkdir(parents=True)
+    payload.write_bytes(b"row_id,p\n1,0.5\n")
+    original = Path.read_bytes
+
+    def guarded_read_bytes(path):
+        if path == payload:
+            raise AssertionError("file-backed payload was read into memory")
+        return original(path)
+
+    monkeypatch.setattr(Path, "read_bytes", guarded_read_bytes)
+    resume = create_s4_resume(root, tmp_path / "resume.zip", _bindings())
+    with ZipFile(resume) as archive:
+        assert archive.read("confirmation/c02/2024.csv") == b"row_id,p\n1,0.5\n"
+
+
+def test_committed_handoff_removes_nested_bundle_copies(tmp_path):
+    root = _root(tmp_path)
+    handoff = create_s4_handoff(root, tmp_path / "handoff.zip", _bindings())
+    assert handoff.is_file()
+    assert not (root / "bundles/review.zip").exists()
+    assert not (root / "bundles/resume.zip").exists()
