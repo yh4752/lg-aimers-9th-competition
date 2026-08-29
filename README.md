@@ -1,116 +1,136 @@
 # LG Aimers 9th Competition
 
-투구 직전 정보로 `control_success=1` 확률을 예측하는 DACON 대회의 실험 코드와
-검증 기록을 관리한다. 내부 선택은 누출 없는 시간 전이 Brier Score를 사용하며,
-공식 제출 결과와 로컬 검증 결과를 구분한다.
+야구 투구 직전의 정보만 보고 제구 성공 확률을 예측한 프로젝트입니다. 단순히 모델을
+많이 돌리기보다, 과거 시즌으로 학습하고 다음 시즌을 맞히는 검증 방식을 먼저 세운
+뒤 전처리와 모델을 한 단계씩 비교했습니다.
+
+현재 가장 좋은 규칙 준수 제출은 **Tree Expert E2**이며 Public 점수는
+**`977.3809532715`**입니다. 첫 CatBoost 제출 `828.9963889533`에서 약 148.38점,
+첫 TabM 제출 `872.3920184667`에서 약 104.99점 올랐습니다.
 
 ## 한눈에 보기
 
-| 항목 | 현재 상태 |
+| 항목 | 내용 |
 |---|---|
-| 현재 기준선 | R9 temporal OOF, 3개 시즌 전이 746,504행 |
-| 기준선 Brier | `0.24825099524638927` |
-| 닫힌 계열 | FwFM standalone 및 F 제한 blend |
-| 기각된 구성 | TabM residual, calibration의 고정 세 변형 |
-| 열린 계열 | TabM seed ensemble·행 단위 파생변수, segment-aware calibration |
-| XGBoost v3 | Public `820.9583317093`; 현재 규칙 재검토 전 패키지 차단 |
-| XGBoost rescue | 2024 `0.24826687414041645`, technical verified, Public 미확인 |
-| TabM 첫 제출 | Public `872.3920184667`; 규칙 준수 단일 모델 |
-| 다음 주력 | 기존 OOF seed 앙상블 감사 후 행 단위 파생변수 검증 |
-| 규칙 안전선 | `competition_rules` → `experiment_contract.json` → 전체행 evidence → `submission/package.py` |
+| 예측 대상 | 각 투구의 `control_success=1` 확률 |
+| 현재 기준선 | Tree Expert E2: CatBoost 3개 seed anchor residual 모델 |
+| 최고 Public | `977.3809532715` |
+| 핵심 전처리 | 학습 데이터에서 고정한 수치·범주 변환과 같은 행의 투수·타자 손잡이 조합 |
+| 검증 방식 | 2021→2022, 2022→2023, 2023→2024 시간 전이 검증 |
+| 규칙 안전선 | 평가 행 하나만으로 예측하고 다른 평가 행의 통계·순서·정답을 쓰지 않음 |
+| 다음 후보 | XGBoost·LightGBM 잔차 보정 S3, 코드 준비 완료·아직 미실행 |
 
-점수가 같은 표에 있어도 검증 프로토콜이 다르면 직접 순위를 매기지 않는다. R9은
-세 개 시즌 전이, XGBoost v3는 네 개 역사 fold 선택 후 2024 holdout을 사용했다.
+## 이 프로젝트에서 풀려고 한 문제
 
-## 현재 결론
+확률 예측은 정답만 맞히는 것으로 끝나지 않습니다. 성공 확률을 `0.9`라고 말했는데
+실패했다면, `0.6`이라고 말했을 때보다 더 큰 책임을 져야 합니다. 이 차이를 재는 값이
+**Brier Score**입니다. 예측 확률과 실제 정답의 차이를 제곱해 평균하며 낮을수록
+좋습니다. DACON Public 점수는 Brier가 좋아질수록 높아지는 별도 점수이므로, 이
+저장소에서는 로컬 Brier와 Public 점수를 구분해 기록합니다.
 
-- R9은 새 후보를 비교하는 검증된 anchor다.
-- FwFM은 단독, 제한 blend와 종료 감사까지 끝나 계열을 닫았다.
-- TabM residual 한 구성은 기각됐지만 다른 독립 TabM 후보를 막지 않는다.
-- Calibration 세 변형은 평균 Brier를 개선했지만 calibration gap과 fold 안정성
-  gate를 통과하지 못했다. Family는 열려 있다.
-- XGBoost v3의 depth 6·63 leaves 4-member ensemble은 Public
-  `820.9583317093`을 기록했다. 더 큰 depth 8·127·255 leaves가 자동으로 더 좋지는
-  않았으며, 넓은 탐색 후 중간 용량·seed ensemble·시즌 보정을 함께 선택한 결과다.
-  다만 평가 분포 평균 이동 보정이 포함되어 현재 독립 예측 규칙 아래에서는 재사용·
-  재패키징하지 않는다. 점수는 역사 기록으로만 보존한다.
-- 확정 전처리 `dl_standard + hand_matchup`의 단일 TabM은 Public
-  `872.3920184667`을 기록했다. 최대 43 epoch 검증의 최적 시점이 2~3 epoch였으므로
-  학습시간 연장보다 seed 앙상블과 행 단위 파생변수를 먼저 검증한다.
+또 하나의 어려움은 시간입니다. 2024년 경기 결과를 본 모델로 2023년을 맞히면 실제
+운영 상황보다 쉬운 시험이 됩니다. 그래서 과거 시즌만 학습한 모델이 바로 다음 시즌을
+예측하게 했습니다. 이를 **시간 전이 검증**이라고 부릅니다.
 
-## 규칙 안전선
+## 점수가 바뀐 과정
 
-모든 ML·DL 후보는 현재 정책 `dacon-236743-2026-08-15`, 후보별
-`experiment_contract.json`, `current_row_only` 소스 gate와 전체행 독립성 감사를
-순서대로 통과해야 한다. 실제 제출 ZIP은 `submission/package.py`만 만들 수 있으며,
-규칙을 통과하지 못하면 파일 생성 전에 중단한다. 데이터, 모델과 ZIP은 저장소에
-올리지 않는다.
-팀·계정, 중복 참가, 일일 제출 잔여량, 마감과 업로드 파일 선택은 사용자가 확인한다.
+| 순서 | 제출 | Public | 해석 |
+|---:|---|---:|---|
+| 1 | CatBoost 초기 기준선 | `828.9963889533` | 범주형 변수가 많은 표 데이터의 출발점 |
+| 2 | XGBoost 공격적 탐색 | `820.9583317093` | 점수는 확인했지만 현재 규칙과 맞지 않는 평균 이동 보정 때문에 격리 |
+| 3 | TabM + `hand_matchup` | `872.3920184667` | 전처리 5단계 검증을 통과한 첫 딥러닝 제출 |
+| 4 | Tree Expert E2 | **`977.3809532715`** | 기존 확률을 기준으로 CatBoost가 남은 오차만 보정하고 3개 seed를 평균 |
 
-## 문서
+이 표는 Public 제출 결과만 보여 줍니다. 서로 다른 로컬 검증 프로토콜의 Brier는 같은
+순위표에 놓지 않았습니다. 정확한 수치와 탈락한 후보는
+[실험 장부](reports/EXPERIMENT_LEDGER.md)에 기록했습니다.
 
-### R/F 경기 유형 전문가
+## 무엇을 바꿨나
 
-기존 977점 CatBoost 모델을 고정하고 정규 시즌(R)과 F 경기의 전용 모델이
-시간 순서 검증에서 추가 개선을 만드는지 확인하는 독립 실험이다. Kaggle
-실행 결과가 `accepted`인 경우에만 제출 후보 제작 단계로 넘어간다.
+### 1. 전처리를 감으로 정하지 않았다
 
-- [실험 설계](docs/superpowers/specs/2026-08-27-rf-expert-experiment-design.md)
-- [구현 계획](docs/superpowers/plans/2026-08-27-rf-expert-experiment.md)
+정규화, Yeo-Johnson 변환, 선수별 평활화, ID 빈도, 결측 표시, 같은 행 안의 상호작용을
+단계적으로 비교했습니다. 그 결과 모든 모델에 변환을 많이 넣는 방식보다, 투수와
+타자의 손잡이 조합인 `hand_matchup`을 더한 구성이 TabM과 CatBoost에서 일관되게
+좋았습니다. 최종 전처리는 `dl_standard + hand_matchup`으로 고정했습니다.
 
-### 실패 유형 라벨 감사
+### 2. 한 모델이 모든 것을 다시 맞히게 하지 않았다
 
-공식 학습 데이터의 누적 상태로 `middle`, `reverse`, `other_failure`를 시간 cutoff별로
-복원할 수 있는지 확인하는 CPU 감사다. 최소 한 유형이 모든 고정 gate를 통과해야만
-실패 유형 전문가 OOF 설계로 넘어간다. 아직 Kaggle 감사 결과가 없으므로 어떤 유형도
-학습 후보로 확정하지 않았다.
+Tree Expert E2는 기존 확률을 **anchor**, 즉 출발점으로 둡니다. 새 CatBoost는 정답
+전체가 아니라 기존 예측이 반복해서 놓친 부분만 보정합니다. 이런 방식을
+**residual correction**이라고 합니다. 세 시간 구간에서 모두 개선됐고, 서로 다른
+seed 3개의 평균도 검증을 통과했습니다.
 
-- [감사 설계](docs/superpowers/specs/2026-08-27-failure-expert-label-audit-design.md)
-- [구현 계획](docs/superpowers/plans/2026-08-27-failure-expert-label-audit.md)
+### 3. 좋아 보이는 결과도 제출 조건에서 다시 확인했다
 
-- [실험 장부](reports/EXPERIMENT_LEDGER.md): 완료된 모든 실행과 판정
-- [실험 라운드](docs/rounds/README.md): 가설, 결과, 배운 점과 다음 결정
-- [실험 실행 계약](docs/EXPERIMENT_CONTRACT.md): 역할, 상태와 패키지 gate
-- [로드맵](docs/ROADMAP.md): 다음 후보와 코드 이전 순서
-- [저장소 이전 설계](docs/superpowers/specs/2026-08-11-competition-repository-migration-design.md)
-- [TabM Kaggle 실행 안내](docs/TABM_CHAMPION_KAGGLE.md): A–D 입력, 시간, 로그와 전달 파일
-- [TabM 행 단위 파생변수 실행 안내](docs/TABM_ROW_FEATURE_PROXY_RUNBOOK.md): Stage P 입력, Colab 재개와 검토 파일
-- [CatBoost·TabM 블렌드 실행 안내](docs/CATBOOST_TABM_BLEND_COLAB.md): Stage C 재사용, Colab 재개와 판정 파일
-- [CatBoost 50:50 배포 정렬 재검증 실행 안내](docs/CATBOOST_50_50_REALIGN_RUNBOOK.md): 세 fold 재검증, T4 재개와 조건부 전체 학습
-- [CatBoost 고정 트리 수·전체 학습 안내](docs/CATBOOST_DEPLOYMENT_TRAINING_COLAB.md): 70:30 고정 블렌드 확인, 중단 재개와 전달 파일
-- [계층적 문맥 TabM H1/H2/H3 Colab 실행](docs/HIERARCHICAL_TABM_COLAB.md): 시간 전이·segment gate, 중단 재개와 전달 파일
-- [TabM 첫 공식 제출](docs/rounds/07-tabm-first-submission.md): 모델, 점수와 해석
-- [TabM 점수 개선 설계](docs/superpowers/specs/2026-08-15-tabm-score-improvement-design.md): 다음 실험 순서와 gate
+TabM 70%와 CatBoost 30%의 OOF 혼합은 weighted Brier를 `0.0001787611`
+개선했습니다. 하지만 실제 배포 조건과 같은 CatBoost 트리 수로 다시 맞추자 어느
+설정도 모든 시간 구간을 통과하지 못했습니다. 점수가 좋아 보였더라도 제출물로 만들지
+않았습니다. 최근 시즌과 과거 시즌을 따로 학습한 T3, 계층 보정, 실패 유형 전문가도
+각자의 검증 기준에서 탈락했습니다.
 
 ## 검증 프로토콜
 
-- 모델 및 변환 상태는 과거 학습 구간에서만 fit한다.
-- 다음 시즌 검증 행에는 고정된 상태만 적용한다.
-- 평가 데이터의 다른 행, 행 순서와 배치 크기를 특징 생성에 사용하지 않는다.
-- 평균 Brier뿐 아니라 fold, 사전 지정 segment와 calibration 안정성을 확인한다.
-- Public 점수에 맞춰 사후 가중치를 선택하지 않는다.
+- 전처리와 모델은 과거 학습 구간에서만 맞춥니다.
+- 다음 시즌 검증 행에는 이미 고정된 상태만 적용합니다.
+- OOF 예측은 해당 행의 정답을 학습에 쓰지 않은 모델이 만듭니다.
+- 평균 Brier뿐 아니라 시즌별 결과, 사전 지정 구간, calibration과 seed 안정성을 봅니다.
+- 행 순서를 뒤집거나 섞고, 배치 크기를 바꾸고, 한 행만 넣어도 예측이 같은지 검사합니다.
+- Public 점수를 본 뒤 가중치를 다시 고르지 않습니다.
 
-## 실행 역할
+## 대회 규칙을 코드로 지킨 방법
 
-Codex는 코드와 작은 합성·정적 테스트를 작성한다. 공식 데이터 전처리, 전체 OOF,
-GPU 학습, Colab 장시간 실행과 실제 제출 평가는 사용자가 수행한다. acceptance와
-현재 artifact 해시가 모두 통과하기 전에는 제출 패키지를 만들지 않는다.
+모든 후보는 `competition_rules` 정책, 후보별 `experiment_contract.json`,
+`current_row_only` 소스 검사와 전체 행 독립성 감사를 차례로 통과해야 합니다. 실제
+제출 ZIP은 `submission/package.py`만 만들 수 있고, acceptance와 현재 산출물 해시가
+맞지 않으면 패키징 전에 중단합니다. 현재 정책 식별자는
+`dacon-236743-2026-08-15`이며 이전 공지 기준
+`dacon-236743-2026-08-13`도 저장소 계약 검사에 남아 있습니다.
 
-## 데이터와 대용량 결과
+평가 데이터 전체의 평균·빈도·순위, 평가 행 사이의 누적값, 다른 평가 행의 예측은
+특징으로 사용하지 않습니다. 팀·계정 상태, 일일 제출 가능 횟수와 실제 업로드 파일은
+사용자가 마지막으로 확인합니다.
 
-원본 데이터, 대용량 OOF, 모델과 ZIP은 Git에 넣지 않고
+## 실패 실험도 남긴 이유
+
+이 프로젝트에서는 `rejected`를 실행 오류와 구분합니다. 실행은 정상적으로 끝났지만
+정해 둔 기준을 넘지 못했다는 뜻입니다. FwFM, 초기 TabM residual, 일부 calibration,
+seed 평균, T3 시간 가중, 계층 보정, 실패 유형 라벨 감사가 이 범주에 들어갑니다.
+실패를 남겨 두면 같은 가설을 이름만 바꿔 반복하지 않고, 다음 실험의 범위를 줄일 수
+있습니다.
+
+전체 흐름은 [실험 여정](docs/EXPERIMENT_JOURNEY.md), 숫자와 판정은
+[실험 장부](reports/EXPERIMENT_LEDGER.md), 초기 라운드별 기록은
+[실험 라운드](docs/rounds/README.md)에서 확인할 수 있습니다.
+
+## 작업 분담
+
+사용자는 실험 방향을 승인하고 Kaggle·Colab에서 전체 데이터 학습을 실행했으며,
+로그와 결과 번들을 확인해 최종 제출 여부를 결정했습니다. AI는 실험 코드, 재개 가능한
+실행 구조, 규칙·산출물 검사와 결과 정리를 보조했습니다. 모델의 채택과 폐기는 Public
+점수만이 아니라 사용자가 실행해 얻은 OOF 근거와 사전에 정한 기준으로 판단했습니다.
+
+## 저장소 안내
+
+- [실험 여정](docs/EXPERIMENT_JOURNEY.md): 문제 인식부터 현재 후보까지의 흐름
+- [실험 장부](reports/EXPERIMENT_LEDGER.md): 완료된 실행의 수치와 판정
+- [실험 실행 계약](docs/EXPERIMENT_CONTRACT.md): 상태, 실행 역할과 제출 gate
+- [전처리 Stage 1~5](docs/rounds/06-budgeted-preprocessing-campaign.md): 전처리 비교 근거
+- [TabM 첫 제출](docs/rounds/07-tabm-first-submission.md): 872점 제출 해석
+- [S3 실행 안내](docs/TREE_HETERO_KAGGLE.md): 현재 독립 후보의 입력과 판정 기준
+- [로드맵](docs/ROADMAP.md): 연구 후보와 코드 이전 원칙
+
+원본 데이터, 대형 OOF, 모델과 ZIP은 Git에 올리지 않습니다. 이런 파일은
 [Google Drive 실행 저장소](https://drive.google.com/drive/folders/1SG8lbCKCsznkaiWpGFYOF0abc3WPA9kL)에
-보관한다. Git에는 판정에 필요한 작은 JSON, 논리 실행 ID와 SHA-256만 둔다.
-
-## 팀 참고 자료
-
-R9 이후 CatBoost 계보, R25 TabM 잔차와 R32 분모 보정 연구는 동료의
-[LG Aimers 9th 저장소](https://github.com/castle9612/lg_aimers_9th)를 참고한다.
-전체 코드를 병합하지 않고 다음 실험에 필요한 기능만 누출·행 독립성 검토 후
-출처와 함께 선별 이식한다.
+보관하고, Git에는 작은 JSON evidence와 SHA-256 식별값만 남깁니다.
 
 ## 다음 후보
 
-현재 첫 TabM 제출까지 완료했다. 다음 실행 대상은 새 학습이 아니라 Stage C의 기존
-seed별 OOF 예측을 읽는 앙상블 감사다. 이 감사가 사전 등록 gate를 통과한 경우에만
-추가 seed 전체 학습을 수행하고, 실패하면 행 단위 파생변수 검증으로 이동한다.
+현재 실행 대기 중인 독립 후보는 XGBoost·LightGBM 잔차 보정 S3입니다. E2를
+폐기하지 않고 고정 anchor로 둔 채, 두 트리 계열이 서로 다른 오차를 5~15%만 보정할
+수 있는지 세 시간 전이에서 확인합니다. 코드는 준비됐지만 아직 성능 결과는 없으므로
+현재 최고 모델이나 제출 후보라고 부르지 않습니다.
+
+1130점대 외부 사례에서 R/F 전문가, 시즌별 통계, 다중 seed와 이종 트리라는 가설을
+얻었지만 코드를 복제하지 않았습니다. 우리 데이터 계보와 검증 계약 안에서 하나씩
+다시 실험하며, 통과한 후보만 다음 제출 단계로 보냅니다.
