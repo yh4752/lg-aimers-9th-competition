@@ -190,7 +190,7 @@ def run_s4_campaign(
                 raise S4RunnerError("duplicate phase job identity")
             pending = [
                 job for job in jobs
-                if job.job_id not in state.completed_jobs and job.job_id not in state.failed_jobs
+                if job.job_id not in state.completed_jobs
             ]
             stopped = False
             for offset in range(0, len(pending), 2):
@@ -219,7 +219,7 @@ def run_s4_campaign(
                     last_snapshot = clock()
                 if first_error is not None:
                     raise first_error
-            terminal = set(state.completed_jobs) | set(state.failed_jobs)
+            terminal = set(state.completed_jobs)
             if stopped or any(job.job_id not in terminal for job in jobs):
                 break
             state = runtime.finalize_phase(phase, state, root)

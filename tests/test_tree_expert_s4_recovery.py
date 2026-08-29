@@ -22,8 +22,8 @@ from experiments.tree_expert.s4_production import prune_after_full_chain_selecti
 from experiments.tree_expert.s4_state import S4State, save_s4_state
 
 
-SOURCE_SHA = "c8becb4037e511ff5d28d0fd146e1a9ec73923125cb4fb9c4467ba3cab6f8e9d"
-PREDECESSOR_SHA = "5e73e15269723679d421f88ddbb04141941b5760a9d7257c550b42183acd35c8"
+SOURCE_SHA = "618b394805551445196f8484f967cc2f97b0dbad922506a850c01c51e07ce2f0"
+PREDECESSOR_SHA = "b63dc98f6fa55e873b0fb995b0ec76da35e31ca461184f9b454fc2f5303777fd"
 
 
 def _contract_payload() -> dict[str, object]:
@@ -60,13 +60,17 @@ def test_recovery_contract_rejects_malformed_sha() -> None:
 
 
 def _source_fixture(
-    tmp_path: Path, *, omit: str | None = None
+    tmp_path: Path,
+    *,
+    omit: str | None = None,
+    phase: str = "full_chains",
+    selected_indices: tuple[int, ...] | None = None,
 ) -> tuple[Path, S4RecoveryContract]:
     bindings = S4Bindings(*("a" * 64, "b" * 64, "c" * 64, "d" * 64, "e" * 64, "f" * 64))
     root = tmp_path / "campaign"
     completed = tuple(f"full_chains__{index:02d}" for index in range(14))
     save_s4_state(
-        S4State("full_chains", completed, (), MappingProxyType({})),
+        S4State(phase, completed, (), MappingProxyType({})),
         root / "state/state.json",
     )
     payloads = {
@@ -87,7 +91,14 @@ def _source_fixture(
         path = root / name
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(payload)
-    for index in range(14):
+    chain_indices = range(14) if selected_indices is None else selected_indices
+    if selected_indices is not None:
+        selection = root / "decisions/confirmation_selection.json"
+        selection.write_text(
+            '{"indices":[' + ",".join(str(value) for value in selected_indices)
+            + '],"selection_folds":["2021->2022","2022->2023"]}'
+        )
+    for index in chain_indices:
         base = root / "full_chains" / f"c{index:02d}"
         base.mkdir(parents=True, exist_ok=True)
         (base / "config.json").write_text("{}", encoding="utf-8")
@@ -167,6 +178,25 @@ def test_compaction_refuses_to_overwrite_existing_output(tmp_path: Path) -> None
             source, output, destination_code_sha256="9" * 64, contract=contract,
         )
     assert output.read_bytes() == b"keep"
+
+
+def test_confirmation_recovery_accepts_pruned_unselected_full_chains(tmp_path: Path) -> None:
+    source, contract = _source_fixture(
+        tmp_path, phase="confirmation", selected_indices=(0, 2)
+    )
+    result = compact_recovery_handoff(
+        source,
+        tmp_path / "recovery.zip",
+        destination_code_sha256="9" * 64,
+        contract=contract,
+    )
+    verified = verify_recovery_input(
+        result.path, expected_code_sha256="9" * 64, contract=contract,
+    )
+    assert verified.state_phase == "confirmation"
+    assert "full_chains/c00/2024.csv" in verified.resume_members
+    assert "full_chains/c02/2024.csv" in verified.resume_members
+    assert "full_chains/c01/config.json" not in verified.resume_members
 
 
 def test_expanded_recovery_input_materializes_identical_resume(tmp_path: Path) -> None:

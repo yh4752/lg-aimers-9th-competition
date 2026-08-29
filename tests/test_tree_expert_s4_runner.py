@@ -1,15 +1,15 @@
 from dataclasses import dataclass
 from pathlib import Path
-from types import SimpleNamespace
+from types import MappingProxyType, SimpleNamespace
 import threading
 import time
 
 import pytest
 
-from experiments.tree_expert.s4_artifacts import S4Bindings
+from experiments.tree_expert.s4_artifacts import S4Bindings, create_s4_resume
 from experiments.tree_expert.s4_artifacts import S4ArtifactError
 from experiments.tree_expert.s4_runner import S4Job, run_s4_campaign
-from experiments.tree_expert.s4_state import S4State, record_s4_decision
+from experiments.tree_expert.s4_state import S4State, record_s4_decision, save_s4_state
 
 
 class FakeRuntime:
@@ -118,3 +118,24 @@ def test_low_space_finalization_requires_at_least_one_handoff(tmp_path):
             wall_deadline=time.monotonic() + 10000,
             disk_usage=lambda _path: SimpleNamespace(total=1, used=1, free=0),
         )
+
+
+def test_resumed_campaign_retries_failed_jobs(tmp_path):
+    previous = tmp_path / "previous"
+    save_s4_state(
+        S4State(
+            "anchors", ("anchors__01",), ("anchors__00",), MappingProxyType({})
+        ),
+        previous / "state/state.json",
+    )
+    (previous / "diagnostics").mkdir()
+    (previous / "diagnostics/campaign.json").write_text("{}")
+    resume = create_s4_resume(previous, tmp_path / "resume.zip", _bindings())
+
+    result = run_s4_campaign(
+        _bindings(), tmp_path / "campaign", runtime=FakeRuntime(),
+        wall_deadline=time.monotonic() + 10000, resume_bundle=resume,
+    )
+
+    assert "anchors__00" in result.started_jobs
+    assert result.state.failed_jobs == ()

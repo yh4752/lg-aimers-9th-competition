@@ -225,29 +225,36 @@ class ProductionS4Runtime:
             raise S4ProductionError("official training seasons differ")
         self.e2: VerifiedT3Input | None = None
         self.baselines: dict[tuple[int, int], pd.DataFrame] = {}
+        self._e2_lock = threading.Lock()
         self._cache: dict[tuple[int, int], FoldCache] = {}
         self._cache_lock = threading.Lock()
 
     def _ensure_e2(self) -> VerifiedT3Input:
         if self.e2 is not None:
             return self.e2
-        archive = self.root / "verified_e2_input.zip"
-        extracted = self.root / "verified_e2"
-        if not archive.exists():
-            prepare_t3_input(
-                e2_handoff=self.verified.e2_handoff,
-                output=archive,
+        with self._e2_lock:
+            if self.e2 is not None:
+                return self.e2
+            archive = self.root / "verified_e2_input.zip"
+            extracted = self.root / "verified_e2"
+            if not archive.exists():
+                prepare_t3_input(
+                    e2_handoff=self.verified.e2_handoff,
+                    output=archive,
+                    expected_e2_sha256=self.verified.e2_handoff_sha256,
+                )
+            if extracted.exists():
+                shutil.rmtree(extracted)
+            self.e2 = verify_and_extract_t3_input(
+                archive,
+                extracted,
                 expected_e2_sha256=self.verified.e2_handoff_sha256,
             )
-        if extracted.exists():
-            shutil.rmtree(extracted)
-        self.e2 = verify_and_extract_t3_input(
-            archive,
-            extracted,
-            expected_e2_sha256=self.verified.e2_handoff_sha256,
-        )
-        self.baselines = {fold: pd.read_csv(path) for fold, path in self.e2.fold_predictions.items()}
-        return self.e2
+            self.baselines = {
+                fold: pd.read_csv(path)
+                for fold, path in self.e2.fold_predictions.items()
+            }
+            return self.e2
 
     def _fold_cache(self, fold: tuple[int, int]) -> FoldCache:
         with self._cache_lock:

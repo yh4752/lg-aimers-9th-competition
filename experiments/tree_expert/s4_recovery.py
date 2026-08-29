@@ -308,6 +308,36 @@ def _required_full_chain_members(indices: tuple[int, ...]) -> set[str]:
     return required
 
 
+def _selected_confirmation_indices(
+    source: ZipFile,
+    infos: Mapping[str, ZipInfo],
+    declared: Mapping[str, object],
+    completed_full_chains: tuple[int, ...],
+) -> tuple[int, ...]:
+    name = "decisions/confirmation_selection.json"
+    if name not in infos or name not in declared:
+        raise S4RecoveryError("confirmation selection is absent")
+    payload = source.read(infos[name])
+    expected_size, expected_sha = _member_evidence(
+        declared[name], "confirmation selection"
+    )
+    if len(payload) != expected_size or sha256(payload).hexdigest() != expected_sha:
+        raise S4RecoveryError("confirmation selection differs")
+    selection = _json(payload, "confirmation selection")
+    if (
+        set(selection) != {"indices", "selection_folds"}
+        or selection.get("selection_folds") != ["2021->2022", "2022->2023"]
+        or type(selection.get("indices")) is not list
+        or not selection["indices"]
+        or any(type(value) is not int for value in selection["indices"])
+    ):
+        raise S4RecoveryError("confirmation selection identity differs")
+    indices = tuple(int(value) for value in selection["indices"])
+    if len(set(indices)) != len(indices) or not set(indices).issubset(completed_full_chains):
+        raise S4RecoveryError("confirmation selection identity differs")
+    return indices
+
+
 def _compact_resume(
     source_resume: Path,
     destination: Path,
@@ -333,7 +363,14 @@ def _compact_resume(
             retained_names = tuple(
                 name for name in sorted(declared) if _retain_resume_member(name, phase)
             )
-            missing = _required_full_chain_members(completed_full_chains) - set(retained_names)
+            required_indices = completed_full_chains
+            if phase == "confirmation":
+                required_indices = _selected_confirmation_indices(
+                    source, infos, declared, completed_full_chains
+                )
+            elif phase in {"full_fit", "completed"}:
+                required_indices = ()
+            missing = _required_full_chain_members(required_indices) - set(retained_names)
             if missing:
                 raise S4RecoveryError(
                     f"completed full-chain output is absent: {sorted(missing)[0]}"

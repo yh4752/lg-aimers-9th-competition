@@ -25,7 +25,7 @@ def test_recovery_runbook_explains_one_cell_rerun_and_return_artifact():
         "Save Version",
         "S4_RECOVERY_READY",
         "S4_DISK_STATUS",
-        "full_chains__14",
+        "confirmation__00__2021_2022__s42",
         "anchor_residual_hierarchical_handoff.zip",
     ):
         assert phrase in text

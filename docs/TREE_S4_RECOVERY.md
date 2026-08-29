@@ -2,7 +2,7 @@
 
 ## 목적
 
-이 절차는 저장 공간 부족으로 중단된 S4 실험을 처음부터 다시 학습하지 않고 이어서 실행하기 위한 것입니다. 기존 handoff의 파일 해시와 내부 manifest를 검증한 뒤, 이미 끝난 14개 full-chain 결과와 다음 단계에 필요한 데이터만 남긴 복구 입력을 만듭니다.
+이 절차는 저장 공간 부족이나 안전 스냅샷 이후 중단된 S4 실험을 처음부터 다시 학습하지 않고 이어서 실행하기 위한 것입니다. 기존 handoff의 파일 해시와 내부 manifest를 검증한 뒤, 이미 끝난 full-chain 결과와 다음 단계에 필요한 데이터만 남긴 복구 입력을 만듭니다.
 
 이 단계는 후보 검증을 계속하는 연구 단계입니다. **DACON 제출 ZIP을 만들지 않습니다.** 제출 파일은 acceptance gate를 통과한 후보가 확인된 뒤 별도로 제작합니다.
 
@@ -48,11 +48,11 @@ Accelerator를 **T4 x2**로 설정하고, [KAGGLE_S4_CELL.py](../experiments/tre
 S4_CODE_READY ...
 S4_INPUTS_VERIFIED ...
 S4_GPU_READY count=2 ...
-S4_RECOVERY_READY ... phase=full_chains completed_full_chains=14
-S4_JOB_START job=full_chains__14 ...
+S4_RECOVERY_READY ... phase=confirmation completed_full_chains=15
+S4_JOB_START job=confirmation__00__2021_2022__s42 ...
 ```
 
-첫 미완료 작업은 `full_chains__14`입니다. 이후 후보 선택과 confirmation 검증을 진행합니다. 예상 GPU 시간은 약 30분~2시간이며, Kaggle 혼잡도와 CatBoost 실행 편차에 따라 더 길어질 수 있습니다.
+현재 복구 기준에서는 실패 표식이 남은 confirmation 작업부터 다시 실행합니다. 이후 나머지 시드 검증을 진행합니다. 예상 GPU 시간은 약 20분~1시간이며, Kaggle 혼잡도와 CatBoost 실행 편차에 따라 더 길어질 수 있습니다.
 
 저장 시 다음 로그로 남은 공간과 스냅샷 상태를 확인할 수 있습니다.
 
