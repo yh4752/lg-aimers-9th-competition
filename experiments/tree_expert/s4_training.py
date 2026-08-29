@@ -128,5 +128,6 @@ def fit_residual_estimator(
     prediction = _finite_vector(model.predict(x_valid), "model prediction")
     if len(prediction) != len(x_valid):
         raise S4TrainingError("prediction rows differ")
-    best = int(getattr(model, "best_iteration_", getattr(model, "best_iteration", -1)))
+    raw_best = getattr(model, "best_iteration_", getattr(model, "best_iteration", -1))
+    best = -1 if raw_best is None else int(raw_best)
     return S4FitResult(prediction, best, model)

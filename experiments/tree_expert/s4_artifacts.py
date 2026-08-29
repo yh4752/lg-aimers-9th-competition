@@ -130,7 +130,7 @@ def create_s4_resume(root: Path, destination: Path, bindings: S4Bindings) -> Pat
 
     def include(name: str) -> bool:
         parts = PurePosixPath(name).parts
-        if name.startswith("bundles/") or name.endswith((".zip", ".tmp")):
+        if name.startswith("bundles/") or name.endswith(".tmp"):
             return False
         if parts and parts[0] == "jobs":
             return len(parts) >= 3 and parts[1] in completed
