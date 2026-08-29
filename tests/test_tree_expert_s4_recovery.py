@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from dataclasses import asdict, replace
 from types import MappingProxyType
+from zipfile import ZipFile
 
 import pytest
 
@@ -11,6 +12,7 @@ from experiments.tree_expert.s4_recovery import (
     S4RecoveryError,
     compact_recovery_handoff,
     load_recovery_contract,
+    materialize_recovery_resume,
     parse_recovery_contract,
     verify_recovery_input,
 )
@@ -152,3 +154,32 @@ def test_compaction_requires_every_completed_full_chain_output(tmp_path: Path) -
             destination_code_sha256="9" * 64,
             contract=contract,
         )
+
+
+def test_expanded_recovery_input_materializes_identical_resume(tmp_path: Path) -> None:
+    source, contract = _source_fixture(tmp_path)
+    recovery = compact_recovery_handoff(
+        source,
+        tmp_path / "recovery.zip",
+        destination_code_sha256="9" * 64,
+        contract=contract,
+    )
+    expanded = tmp_path / "expanded"
+    with ZipFile(recovery.path) as archive:
+        expected_resume = archive.read("resume.zip")
+        archive.extractall(expanded)
+    resume_archive = expanded / "resume.zip"
+    resume_root = expanded / "resume"
+    with ZipFile(resume_archive) as archive:
+        archive.extractall(resume_root)
+    resume_archive.unlink()
+
+    verified = materialize_recovery_resume(
+        expanded,
+        tmp_path / "materialized_resume.zip",
+        expected_code_sha256="9" * 64,
+        contract=contract,
+    )
+
+    assert (tmp_path / "materialized_resume.zip").read_bytes() == expected_resume
+    assert verified.state_phase == "full_chains"

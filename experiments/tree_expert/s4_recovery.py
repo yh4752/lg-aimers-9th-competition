@@ -454,69 +454,213 @@ def verify_recovery_input(
     expected_code_sha256: str,
     contract: S4RecoveryContract | None = None,
 ) -> VerifiedRecoveryInput:
+    path = Path(source)
+    with tempfile.TemporaryDirectory(prefix=".s4_verify_") as temp_name:
+        return materialize_recovery_resume(
+            path,
+            Path(temp_name) / "resume.zip",
+            expected_code_sha256=expected_code_sha256,
+            contract=contract,
+        )
+
+
+def _validate_recovery_manifest(
+    manifest_bytes: bytes,
+    contract: S4RecoveryContract,
+    expected_bindings: Mapping[str, str],
+) -> dict[str, object]:
+    manifest = _json(manifest_bytes, "S4 recovery input manifest")
+    if (
+        manifest.get("schema_version") != 1
+        or manifest.get("artifact_kind") != RECOVERY_INPUT_KIND
+        or manifest.get("source_handoff_sha256") != contract.source_handoff_sha256
+        or manifest.get("predecessor_code_sha256") != contract.predecessor_code_sha256
+        or manifest.get("destination_bindings") != dict(expected_bindings)
+    ):
+        raise S4RecoveryError("S4 recovery input identity differs")
+    declared = manifest.get("members")
+    if type(declared) is not dict or set(declared) != {
+        "resume.zip", "source_handoff_manifest.json"
+    }:
+        raise S4RecoveryError("S4 recovery input member manifest differs")
+    return manifest
+
+
+def _verify_source_manifest(payload: bytes, contract: S4RecoveryContract) -> None:
+    manifest = _json(payload, "recovery source handoff manifest")
+    if (
+        manifest.get("artifact_kind") != "tree_s4_handoff_v1"
+        or manifest.get("bindings") != dict(contract.source_bindings)
+        or manifest.get("submission_package") is not False
+    ):
+        raise S4RecoveryError("recovery source handoff manifest differs")
+
+
+def _rebuild_expanded_resume(source: Path, destination: Path) -> None:
+    root = Path(source)
+    if root.is_symlink() or not root.is_dir():
+        raise S4RecoveryError("expanded compact resume source differs")
+    manifest_path = root / "manifest.json"
+    if manifest_path.is_symlink() or not manifest_path.is_file():
+        raise S4RecoveryError("expanded compact resume manifest is absent")
+    manifest_bytes = manifest_path.read_bytes()
+    manifest = _json(manifest_bytes, "expanded compact resume manifest")
+    declared = manifest.get("members")
+    if type(declared) is not dict:
+        raise S4RecoveryError("expanded compact resume member manifest differs")
+    with ZipFile(destination, "w", compression=ZIP_DEFLATED, compresslevel=6) as archive:
+        for name, evidence in sorted(declared.items()):
+            pure = PurePosixPath(name)
+            if pure.is_absolute() or ".." in pure.parts or "\\" in name:
+                raise S4RecoveryError(f"unsafe expanded compact resume member: {name}")
+            target = root.joinpath(*pure.parts)
+            if target.is_symlink() or not target.is_file():
+                raise S4RecoveryError(f"expanded compact resume member is absent: {name}")
+            expected_size, expected_sha = _member_evidence(
+                evidence, f"expanded compact resume member {name}"
+            )
+            digest = sha256()
+            size = 0
+            with target.open("rb") as input_handle, archive.open(_zip_info(name), "w") as output_handle:
+                for block in iter(lambda: input_handle.read(4 * 1024 * 1024), b""):
+                    digest.update(block)
+                    size += len(block)
+                    output_handle.write(block)
+            if size != expected_size or digest.hexdigest() != expected_sha:
+                raise S4RecoveryError(f"expanded compact resume member differs: {name}")
+        archive.writestr(_zip_info("manifest.json"), manifest_bytes)
+
+
+def _verify_compact_resume(
+    path: Path,
+    expected_bindings: Mapping[str, str],
+    contract: S4RecoveryContract,
+) -> tuple[str, tuple[int, ...], tuple[str, ...]]:
+    try:
+        with ZipFile(path) as archive:
+            infos = _safe_infos(archive, "compact S4 resume")
+            if "manifest.json" not in infos or "state/state.json" not in infos:
+                raise S4RecoveryError("compact S4 resume members differ")
+            manifest = _json(
+                archive.read(infos["manifest.json"]), "compact S4 resume manifest"
+            )
+            if (
+                manifest.get("artifact_kind") != "tree_s4_resume_v1"
+                or manifest.get("bindings") != dict(expected_bindings)
+                or manifest.get("recovery_source_handoff_sha256")
+                != contract.source_handoff_sha256
+            ):
+                raise S4RecoveryError("compact S4 resume identity differs")
+            declared = manifest.get("members")
+            if type(declared) is not dict or set(declared) != set(infos) - {"manifest.json"}:
+                raise S4RecoveryError("compact S4 resume member manifest differs")
+            state_payload = b""
+            for name, evidence in sorted(declared.items()):
+                expected_size, expected_sha = _member_evidence(
+                    evidence, f"compact S4 resume member {name}"
+                )
+                digest = sha256()
+                size = 0
+                chunks = [] if name == "state/state.json" else None
+                with archive.open(infos[name]) as member:
+                    for block in iter(lambda: member.read(4 * 1024 * 1024), b""):
+                        digest.update(block)
+                        size += len(block)
+                        if chunks is not None:
+                            chunks.append(block)
+                if size != expected_size or digest.hexdigest() != expected_sha:
+                    raise S4RecoveryError(f"compact S4 resume member differs: {name}")
+                if chunks is not None:
+                    state_payload = b"".join(chunks)
+            phase, completed = _state_identity(state_payload)
+            return phase, completed, tuple(sorted(declared))
+    except (OSError, BadZipFile) as error:
+        if isinstance(error, S4RecoveryError):
+            raise
+        raise S4RecoveryError("compact S4 resume is not a valid ZIP") from error
+
+
+def materialize_recovery_resume(
+    source: Path,
+    destination: Path,
+    *,
+    expected_code_sha256: str,
+    contract: S4RecoveryContract | None = None,
+) -> VerifiedRecoveryInput:
     recovery = load_recovery_contract() if contract is None else contract
     expected_bindings = asdict(_destination_bindings(recovery, expected_code_sha256))
     path = Path(source)
+    output = Path(destination)
+    if output.exists() or output.is_symlink():
+        raise FileExistsError(output)
+    output.parent.mkdir(parents=True, exist_ok=True)
     try:
-        with ZipFile(path) as archive:
-            infos = _safe_infos(archive, "S4 recovery input")
-            required = {"resume.zip", "source_handoff_manifest.json", "manifest.json"}
-            if set(infos) != required:
-                raise S4RecoveryError("S4 recovery input members differ")
-            manifest_bytes = archive.read(infos["manifest.json"])
-            manifest = _json(manifest_bytes, "S4 recovery input manifest")
-            if (
-                manifest.get("schema_version") != 1
-                or manifest.get("artifact_kind") != RECOVERY_INPUT_KIND
-                or manifest.get("source_handoff_sha256") != recovery.source_handoff_sha256
-                or manifest.get("predecessor_code_sha256") != recovery.predecessor_code_sha256
-                or manifest.get("destination_bindings") != expected_bindings
-            ):
-                raise S4RecoveryError("S4 recovery input identity differs")
-            declared = manifest.get("members")
-            if type(declared) is not dict or set(declared) != required - {"manifest.json"}:
-                raise S4RecoveryError("S4 recovery input member manifest differs")
-            with tempfile.TemporaryDirectory(prefix=".s4_verify_", dir=path.parent) as temp_name:
-                resume_path = Path(temp_name) / "resume.zip"
+        if path.is_dir():
+            if path.is_symlink():
+                raise S4RecoveryError("unsafe expanded S4 recovery input")
+            manifest_path = path / "manifest.json"
+            source_manifest_path = path / "source_handoff_manifest.json"
+            if any(item.is_symlink() or not item.is_file() for item in (manifest_path, source_manifest_path)):
+                raise S4RecoveryError("expanded S4 recovery input members differ")
+            manifest_bytes = manifest_path.read_bytes()
+            manifest = _validate_recovery_manifest(manifest_bytes, recovery, expected_bindings)
+            source_manifest = source_manifest_path.read_bytes()
+            _verify_source_manifest(source_manifest, recovery)
+            resume_file = path / "resume.zip"
+            resume_root = path / "resume"
+            if resume_file.is_file() and not resume_file.is_symlink():
+                shutil.copyfile(resume_file, output)
+            elif resume_root.is_dir() and not resume_root.is_symlink():
+                _rebuild_expanded_resume(resume_root, output)
+            else:
+                raise S4RecoveryError("expanded S4 recovery resume is absent")
+            payloads = {
+                "resume.zip": (output.stat().st_size, _file_sha256(output)),
+                "source_handoff_manifest.json": (
+                    len(source_manifest), sha256(source_manifest).hexdigest()
+                ),
+            }
+            for name, actual in payloads.items():
+                if actual != _member_evidence(manifest["members"][name], f"S4 recovery input member {name}"):
+                    raise S4RecoveryError(f"S4 recovery input member differs: {name}")
+        else:
+            with ZipFile(path) as archive:
+                infos = _safe_infos(archive, "S4 recovery input")
+                required = {"resume.zip", "source_handoff_manifest.json", "manifest.json"}
+                if set(infos) != required:
+                    raise S4RecoveryError("S4 recovery input members differ")
+                manifest_bytes = archive.read(infos["manifest.json"])
+                manifest = _validate_recovery_manifest(
+                    manifest_bytes, recovery, expected_bindings
+                )
+                source_manifest = archive.read(infos["source_handoff_manifest.json"])
+                _verify_source_manifest(source_manifest, recovery)
                 for name in ("resume.zip", "source_handoff_manifest.json"):
                     expected_size, expected_sha = _member_evidence(
-                        declared[name], f"S4 recovery input member {name}"
+                        manifest["members"][name], f"S4 recovery input member {name}"
                     )
                     with archive.open(infos[name]) as member:
                         if name == "resume.zip":
-                            with resume_path.open("wb") as target:
+                            with output.open("wb") as target:
                                 size, digest = _copy_and_digest(member, target)
                         else:
                             size, digest = _copy_and_digest(member)
                     if size != expected_size or digest != expected_sha:
                         raise S4RecoveryError(f"S4 recovery input member differs: {name}")
-                with ZipFile(resume_path) as resume:
-                    resume_infos = _safe_infos(resume, "compact S4 resume")
-                    resume_manifest = _json(
-                        resume.read(resume_infos["manifest.json"]), "compact S4 resume manifest"
-                    )
-                    if (
-                        resume_manifest.get("artifact_kind") != "tree_s4_resume_v1"
-                        or resume_manifest.get("bindings") != expected_bindings
-                        or resume_manifest.get("recovery_source_handoff_sha256")
-                        != recovery.source_handoff_sha256
-                    ):
-                        raise S4RecoveryError("compact S4 resume identity differs")
-                    resume_members = resume_manifest.get("members")
-                    if type(resume_members) is not dict or set(resume_members) != set(resume_infos) - {"manifest.json"}:
-                        raise S4RecoveryError("compact S4 resume member manifest differs")
-                    phase, completed = _state_identity(resume.read("state/state.json"))
-                    if phase != manifest.get("state_phase") or list(completed) != manifest.get("completed_full_chains"):
-                        raise S4RecoveryError("S4 recovery state binding differs")
-            return VerifiedRecoveryInput(
-                source=path,
-                manifest_sha256=sha256(manifest_bytes).hexdigest(),
-                source_handoff_sha256=recovery.source_handoff_sha256,
-                destination_bindings=MappingProxyType(expected_bindings),
-                state_phase=phase,
-                completed_full_chains=completed,
-                resume_members=tuple(sorted(resume_members)),
-            )
+        phase, completed, resume_members = _verify_compact_resume(
+            output, expected_bindings, recovery
+        )
+        if phase != manifest.get("state_phase") or list(completed) != manifest.get("completed_full_chains"):
+            raise S4RecoveryError("S4 recovery state binding differs")
+        return VerifiedRecoveryInput(
+            source=path,
+            manifest_sha256=sha256(manifest_bytes).hexdigest(),
+            source_handoff_sha256=recovery.source_handoff_sha256,
+            destination_bindings=MappingProxyType(expected_bindings),
+            state_phase=phase,
+            completed_full_chains=completed,
+            resume_members=resume_members,
+        )
     except (OSError, BadZipFile, KeyError) as error:
         if isinstance(error, S4RecoveryError):
             raise

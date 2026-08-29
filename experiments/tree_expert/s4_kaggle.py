@@ -34,6 +34,8 @@ _RUNTIME_MEMBERS = (
     "experiments/tree_expert/hc_metrics.py",
     "experiments/tree_expert/s4_contract.json",
     "experiments/tree_expert/s4_contracts.py",
+    "experiments/tree_expert/s4_recovery_contract.json",
+    "experiments/tree_expert/s4_recovery.py",
     "experiments/tree_expert/s4_inputs.py",
     "experiments/tree_expert/s4_temporal.py",
     "experiments/tree_expert/s4_features.py",
@@ -57,6 +59,7 @@ _RUNTIME_MEMBERS = (
 class DiscoveredS4Inputs:
     official_data: Path
     s4_input: Path
+    recovery_input: Path | None
     previous_handoff: Path | None
 
 
@@ -147,7 +150,15 @@ def discover_s4_inputs(
     previous = _logical_candidates(source, "tree_s4_handoff_v1")
     if len(previous) > 1:
         raise S4KaggleError(f"S4 handoff count must be zero or one; found={len(previous)}")
-    return DiscoveredS4Inputs(official[0], compact[0], previous[0] if previous else None)
+    recovery = _logical_candidates(source, "tree_s4_recovery_input_v1")
+    if len(recovery) > 1:
+        raise S4KaggleError(f"S4 recovery input count must be zero or one; found={len(recovery)}")
+    if recovery and previous:
+        raise S4KaggleError("S4 recovery input and previous handoff are mutually exclusive")
+    return DiscoveredS4Inputs(
+        official[0], compact[0], recovery[0] if recovery else None,
+        previous[0] if previous else None,
+    )
 
 
 def verify_gpu(torch_module: object) -> tuple[str, str]:
@@ -263,6 +274,7 @@ try:
     STAGE = "inputs"
     import torch
     from experiments.tree_expert.s4_kaggle import discover_s4_inputs, materialize_resume_from_handoff, verify_gpu
+    from experiments.tree_expert.s4_recovery import materialize_recovery_resume
     from experiments.tree_expert.s4_inputs import verify_and_extract_s4_input
     from experiments.tree_expert.t3_inputs import verify_official_data
     from experiments.tree_expert.s4_artifacts import S4Bindings
@@ -276,9 +288,20 @@ try:
         official.train_sha256, official.history_sha256, verified.e2_handoff_sha256,
     )
     resume = None
-    if found.previous_handoff is not None:
+    if found.recovery_input is not None:
+        recovered = materialize_recovery_resume(
+            found.recovery_input, Path("/kaggle/working/tree_s4_resume.zip"),
+            expected_code_sha256=RUNTIME_CODE_SHA256,
+        )
+        resume = Path("/kaggle/working/tree_s4_resume.zip")
+        print(
+            f"S4_RECOVERY_READY source={{found.recovery_input}} phase={{recovered.state_phase}} "
+            f"completed_full_chains={{len(recovered.completed_full_chains)}}",
+            flush=True,
+        )
+    elif found.previous_handoff is not None:
         resume = materialize_resume_from_handoff(found.previous_handoff, Path("/kaggle/working/tree_s4_resume.zip"), bindings)
-    print(f"S4_INPUTS_VERIFIED official={{found.official_data}} input={{found.s4_input}} previous={{found.previous_handoff}}", flush=True)
+    print(f"S4_INPUTS_VERIFIED official={{found.official_data}} input={{found.s4_input}} recovery={{found.recovery_input}} previous={{found.previous_handoff}}", flush=True)
     print(f"S4_GPU_READY count=2 names={{' | '.join(names)}}", flush=True)
 
     STAGE = "campaign"
