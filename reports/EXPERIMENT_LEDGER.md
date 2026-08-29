@@ -22,29 +22,32 @@
 | 14 | `xgboost_aggressive_capacity_v1` | XGBoost | 역사 fold 구조 탐색·최근 시즌 ensemble | depthwise d6·lossguide l63 4-member, local Brier `0.2479270213638507` | public scored; rules quarantine | `820.9583317093` | [result](acceptances/xgboost_aggressive_capacity_public_result.json) |
 | 15 | `tabm_hand_matchup_version_d_seed3407_v1` | TabM | 2022→2023·2023→2024 후 전체 학습 | 최신 Brier `0.2481108023`, 이전 Brier `0.2508657359`, 전체 학습 3 epoch | accepted; public scored | `872.3920184667` | [result](acceptances/tabm_hand_matchup_public_result.json) |
 | 16 | `tabm_seed_ensemble` | TabM seed 평균 | 2022→2023·2023→2024 OOF 499,032행 | seed 3407 Brier `0.2494662366`; 두 평균 모두 `0.000318` 이상 악화 | rejected; keep seed 3407 | — | [rejection](rejections/tabm_seed_ensemble_rejection.json) |
-| 17 | `tree_expert_e2_c1_catboost` | anchor residual CatBoost 3시드 | 2021→2022·2022→2023·2023→2024, 전체 245,789행 독립성 감사 | weighted gain `0.0008375137`, worst fold gain `0.0003439904`, bootstrap lower `0.0006692336`; 행 독립성 최대 오차 `0` | accepted; public scored | `977.3809532715` | E2 handoff SHA-256 `4dd0c901…384050f` |
-| 18 | `tree_expert_t3_temporal_dual_v1` | 최근 시즌·감쇠 다중 시즌 CatBoost 잔차 전문가 | 2021→2022·2022→2023 구조 선택, 2023→2024 확인, 3시드 재검증 | decay `0.35/0.55/0.75`, 최근 모델 비중 `0.70/0.80/0.90`; 전체 행 가중 Brier와 fold·segment gate 적용 | implementation ready; not run | — | T3 input SHA-256 `b1c0a991…41728` |
+| 17 | `tree_expert_e2_c1_catboost` | anchor residual CatBoost 3개 seed | 2021→2022·2022→2023·2023→2024, 전체 245,789행 독립성 감사 | weighted gain `0.0008375137`, worst fold gain `0.0003439904`, bootstrap lower `0.0006692336`; 행 독립성 최대 오차 `0` | accepted; public scored | `977.3809532715` | E2 handoff SHA-256 `4dd0c901…384050f` |
+| 18 | `tree_expert_t3_temporal_dual_v1` | 최근 시즌·감쇠 다중 시즌 CatBoost 잔차 전문가 | 2021→2022·2022→2023 구조 선택, 2023→2024 확인 | 선택 decay `0.75`, 최근 비중 `0.70`; weighted gain `-0.0000505772`, 두 fold 악화, 최대 segment 회귀 `0.0015859681` | rejected; structure gate failed | — | T3 handoff SHA-256 `5157f1d0…d680b` |
+| 19 | `catboost_tabm_fixed_blend_v1` | TabM·CatBoost 고정 확률 혼합 | 2022→2023·2023→2024 정렬 OOF | TabM 70%·CatBoost 30%; Brier `0.2494662366`→`0.2492874755`, gain `0.0001787611`, 두 fold 개선 | OOF blend passed; deployment pending | — | delivery SHA-256 `ab7ca41e…dcfa` |
+| 20 | `catboost_deployment_alignment_v1` | 고정 트리 수 CatBoost·TabM 70:30 | 2022→2023·2023→2024 배포 정렬 | 트리 수 `4/32/64/128/192/296/400` 모두 실패; 4트리는 전체 gain `0.0000320407`이나 최근 fold `+0.0001464537` 악화 | deployment blocked | — | review SHA-256 `fc65693a…41e8` |
+| 21 | `tree_hierarchical_residual_v1` | E2 anchor + 계층 잔차·보정 | 2021→2022·2022→2023 구조, 2023→2024 확인 | C1 gain `0.0000629719`이나 최소 fold `-0.0000083590`·seed 일관성 실패; C2도 네 gate 실패 | completed, no candidate; C0 fallback | — | handoff SHA-256 `fb6200aa…c896` |
+| 22 | `failure_expert_label_audit_v1` | 실패 유형 라벨 CPU 감사 | 2021·2022·2023·2024 cutoff | coverage `0.9644~0.9650`, middle·reverse overlap `0.0716~0.0744`; 세 유형 모두 공통 gate 실패 | ineligible; no model training | — | review SHA-256 `0e03e2b5…ba8c` |
 
 ## 현재 결론
 
-- R9은 누출 없는 공통 비교 기반이다.
-- FwFM standalone, 제한 blend와 종료 감사가 모두 끝나 FwFM 계열은 닫혔다.
-- TabM residual 후보만 기각됐으며 다른 TabM 설계를 자동으로 막지 않는다.
-- Calibration의 고정된 세 변형은 기각됐지만 segment-aware family는 열려 있다.
-- XGBoost의 넓은 구조·seed·후처리 탐색은 Public `820.9583317093`을 기록했다.
-  큰 트리를 사전 배제하지 않되, 실제 선택은 중간 용량의 d6·l63 ensemble이었다.
-  이 제출의 평가 분포 평균 이동 보정은 현재 독립 예측 규칙에서 허용되지 않으므로
-  점수와 연구 교훈만 보존하고 모델·ZIP·후처리를 재사용하거나 패키징하지 않는다.
-- 규칙 준수 단일 TabM은 Public `872.3920184667`을 기록해 현재 확인된 제출 중 가장
-  높다. 최대 43 epoch 검증에서 최적 checkpoint가 2~3 epoch였으므로 같은 모델을 더
-  오래 학습하지 않는다. 기존 OOF seed 앙상블도 단일 seed 3407보다 나빠 기각했다.
-  다음 순서는 행 단위 파생변수, 규칙 준수 CatBoost blend와 OOF 보정이다.
-- Tree Expert E2의 `c1_anchor_residual`은 세 시간 fold에서 모두 양의 개선을 보였고,
-  CatBoost seed 42·2026·3407 평균이 최종 후보로 승인됐다. 245,789행 reverse·shuffle·
-  rebatch·singleton 감사에서 예측 차이는 모두 `0`이었다. 제출 ZIP은 기존 단일
-  패키저로 만들었으며 SHA-256은 `8bc33042b9258049f905df0c733b1153d1cedfac39cb0732b2a7e154629d779a`다.
-  Public 점수는 `977.3809532715`였다. 이전 규칙 준수 제출보다 올랐지만 1130점대와의
-  차이는 남았다. 다음 실험 T3는 E2를 버리지 않고, 직전 시즌 전용 모델과 과거 시즌
-  감쇠 모델을 분리해 시간 가중 구조 자체를 검증한다.
-- 대용량 OOF, 모델과 ZIP은 Google Drive에 두고 이 장부는 작은 evidence와 실행
-  ID로 원본을 식별한다.
+- R9은 누출 없는 공통 비교 기반이다. FwFM은 단독·제한 blend·종료 감사까지 끝나
+  계열을 닫았고, calibration의 고정 세 변형은 기각하되 다른 독립 구성은 열어 뒀다.
+- XGBoost 공격적 탐색은 Public `820.9583317093`을 기록했지만 평가 예측 평균 이동
+  보정이 현재 독립 예측 규칙과 맞지 않는다. 점수와 교훈만 보존하고 모델·후처리는
+  재사용하거나 패키징하지 않는다.
+- 확정 전처리의 단일 TabM은 Public `872.3920184667`을 기록했다. 최대 43 epoch
+  검증의 최적 시점은 2~3 epoch였고, OOF seed 평균도 단일 seed보다 나빠 같은 모델을
+  더 오래 학습하거나 seed만 늘리는 방향은 종료했다.
+- 현재 최고 제출은 Tree Expert E2다. 세 시간 fold에서 모두 좋아졌고 CatBoost seed
+  42·2026·3407 평균이 승인됐다. 245,789행 reverse·shuffle·rebatch·singleton
+  감사의 최대 예측 차이는 `0`이었다. 제출 ZIP SHA-256은
+  `8bc33042b9258049f905df0c733b1153d1cedfac39cb0732b2a7e154629d779a`,
+  Public 점수는 `977.3809532715`다.
+- E2 이후 T3 시간 가중, 계층 잔차와 실패 유형 라벨은 각자의 사전 gate에서 탈락했다.
+  CatBoost·TabM 70:30은 정렬 OOF에서 좋아졌지만 배포와 같은 트리 수로 다시 맞추지
+  못해 제출을 차단했다. 이 판정은 E2를 취소하지 않으며 해당 추가 구성만 막는다.
+- 다음 독립 후보는 E2 anchor를 고정한 XGBoost·LightGBM 잔차 보정 S3다. 코드는
+  준비됐지만 사용자 실행 결과가 없으므로 완료 실험 행이나 제출 후보로 기록하지 않는다.
+- 대용량 OOF, 모델과 ZIP은 Google Drive에 두고 이 장부는 작은 evidence와 실행 ID,
+  SHA-256으로 원본을 식별한다.
