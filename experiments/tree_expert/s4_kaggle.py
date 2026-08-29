@@ -11,7 +11,6 @@ import tarfile
 from typing import Mapping
 from zipfile import ZIP_DEFLATED, ZipFile, ZipInfo
 
-from .hc_kaggle import runtime_member_names as hc_runtime_member_names
 from .s4_contracts import contract_sha256, load_s4_contract
 
 
@@ -19,7 +18,20 @@ class S4KaggleError(ValueError):
     pass
 
 
-_S4_MEMBERS = (
+_RUNTIME_MEMBERS = (
+    "experiments/independent_dl/__init__.py",
+    "experiments/independent_dl/feature_sources/__init__.py",
+    "experiments/independent_dl/feature_sources/seasonal.py",
+    "experiments/independent_dl/feature_sources/trackman.py",
+    "experiments/temporal_portfolio/__init__.py",
+    "experiments/temporal_portfolio/seasonal_features.py",
+    "experiments/temporal_portfolio/trackman_pitcher.py",
+    "experiments/tree_expert/features.py",
+    "experiments/tree_expert/hc_contract.json",
+    "experiments/tree_expert/hc_contracts.py",
+    "experiments/tree_expert/hc_features.py",
+    "experiments/tree_expert/hc_calibration.py",
+    "experiments/tree_expert/hc_metrics.py",
     "experiments/tree_expert/s4_contract.json",
     "experiments/tree_expert/s4_contracts.py",
     "experiments/tree_expert/s4_inputs.py",
@@ -39,7 +51,6 @@ _S4_MEMBERS = (
     "experiments/tree_expert/t3_contracts.py",
     "experiments/tree_expert/t3_inputs.py",
 )
-_RUNTIME_MEMBERS = tuple(dict.fromkeys((*hc_runtime_member_names(), *_S4_MEMBERS)))
 
 
 @dataclass(frozen=True)

@@ -99,3 +99,14 @@ def test_distinct_inputs_are_rejected(tmp_path: Path) -> None:
     (changed / "manifest.json").write_text(json.dumps(manifest, sort_keys=True, separators=(",", ":")))
     with pytest.raises(S4InputError, match="distinct S4 input identities"):
         discover_s4_input_candidates((first, changed))
+
+
+def test_tampered_e2_handoff_member_is_rejected(tmp_path: Path) -> None:
+    handoff = _e2_handoff(tmp_path / "e2.zip")
+    with ZipFile(handoff) as archive:
+        members = {name: archive.read(name) for name in archive.namelist()}
+    members["tree_expert_e2.log"] = b"changed\n"
+    handoff.write_bytes(_zip(members))
+    expected = sha256(handoff.read_bytes()).hexdigest()
+    with pytest.raises(S4InputError, match="E2 handoff member differs"):
+        prepare_s4_input(handoff, tmp_path / "s4.zip", expected_e2_sha256=expected)

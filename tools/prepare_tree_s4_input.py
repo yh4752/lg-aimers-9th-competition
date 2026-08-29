@@ -8,8 +8,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from experiments.tree_expert.s4_inputs import prepare_s4_input
-from experiments.tree_expert.e2_artifacts import file_sha256
+from experiments.tree_expert.s4_inputs import file_sha256, prepare_s4_input
 
 
 def main() -> int:

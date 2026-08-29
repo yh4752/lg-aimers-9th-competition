@@ -5,6 +5,7 @@ import pytest
 from experiments.tree_expert.s4_kaggle import (
     S4KaggleError,
     build_s4_kaggle_cell,
+    runtime_member_names,
     runtime_identity_sha256,
     verify_gpu,
 )
@@ -42,3 +43,10 @@ def test_committed_cell_matches_renderer(tmp_path):
     rendered = build_s4_kaggle_cell(tmp_path / "rendered.py")
     committed = Path("experiments/tree_expert/KAGGLE_S4_CELL.py")
     assert rendered.read_bytes() == committed.read_bytes()
+
+
+def test_runtime_inventory_is_s4_scoped():
+    members = runtime_member_names()
+    assert "experiments/tree_expert/s4_production.py" in members
+    assert not any(name.startswith("experiments/tabm_campaign/") for name in members)
+    assert not any("/e2_" in name for name in members)

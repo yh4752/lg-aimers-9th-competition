@@ -10,7 +10,6 @@ import tempfile
 from typing import Iterable
 from zipfile import BadZipFile, ZIP_DEFLATED, ZipFile, ZipInfo
 
-from .e2_artifacts import E2ArtifactError, file_sha256, verify_e2_handoff
 from .s4_contracts import load_s4_contract
 
 
@@ -22,6 +21,8 @@ INPUT_KIND = "tree_s4_input_v1"
 _TIME = (2026, 1, 1, 0, 0, 0)
 _MEMBERS = {"e2/handoff.zip", "manifest.json"}
 _MAX_BYTES = 8 * 1024 * 1024 * 1024
+_MAX_MEMBER_BYTES = 2 * 1024 * 1024 * 1024
+_MAX_RATIO = 250.0
 
 
 @dataclass(frozen=True)
@@ -35,6 +36,86 @@ class VerifiedS4Input:
 
 def _canonical(value: object) -> bytes:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False).encode()
+
+
+def file_sha256(path: Path) -> str:
+    source = Path(path)
+    if source.is_symlink() or not source.is_file():
+        raise S4InputError("artifact source is not a regular file")
+    digest = sha256()
+    with source.open("rb") as handle:
+        for block in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def _verify_e2_handoff(path: Path) -> bool:
+    source = Path(path)
+    if source.is_symlink() or not source.is_file():
+        raise S4InputError("E2 handoff source is not a regular file")
+    try:
+        with ZipFile(source) as archive:
+            infos = archive.infolist()
+            names = [info.filename for info in infos]
+            if len(names) != len(set(names)):
+                raise S4InputError("E2 handoff has duplicate members")
+            total = 0
+            for info in infos:
+                pure = PurePosixPath(info.filename)
+                mode = info.external_attr >> 16
+                ratio = info.file_size / max(1, info.compress_size)
+                if (
+                    info.flag_bits & 1 or info.is_dir() or pure.is_absolute()
+                    or not pure.parts or any(part in {"", ".", ".."} for part in pure.parts)
+                    or "\\" in info.filename or stat.S_ISLNK(mode)
+                    or info.file_size > _MAX_MEMBER_BYTES
+                    or (info.file_size >= 64 * 1024 and ratio > _MAX_RATIO)
+                ):
+                    raise S4InputError(f"unsafe E2 handoff member: {info.filename}")
+                total += info.file_size
+            if total > _MAX_BYTES or "handoff_manifest.json" not in names:
+                raise S4InputError("E2 handoff members differ")
+            manifest_bytes = archive.read("handoff_manifest.json")
+            manifest = json.loads(manifest_bytes)
+            expected_keys = {
+                "schema_version", "artifact_kind", "campaign_id", "review_only",
+                "submission_package", "status", "delivery", "members",
+            }
+            if (
+                type(manifest) is not dict or set(manifest) != expected_keys
+                or manifest["schema_version"] != 1
+                or manifest["artifact_kind"] != "tree_expert_e2_handoff_v1"
+                or manifest["campaign_id"] != "tree_expert_e2_v1"
+                or manifest["submission_package"] is not False
+                or type(manifest["delivery"]) is not bool
+                or manifest["review_only"] is not (not manifest["delivery"])
+            ):
+                raise S4InputError("E2 handoff identity differs")
+            expected_names = {
+                "handoff_manifest.json", "tree_expert_e2_review.zip",
+                "tree_expert_e2_resume.zip", "tree_expert_e2.log",
+            }
+            if manifest["delivery"]:
+                expected_names.add("tree_expert_e2_model_delivery.zip")
+            if set(names) != expected_names:
+                raise S4InputError("E2 handoff members differ")
+            declared = manifest.get("members")
+            if type(declared) is not dict or set(declared) != expected_names - {"handoff_manifest.json"}:
+                raise S4InputError("E2 handoff manifest members differ")
+            for name, evidence in declared.items():
+                if type(evidence) is not dict or set(evidence) != {"size", "sha256"}:
+                    raise S4InputError(f"E2 handoff member evidence differs: {name}")
+                digest = sha256()
+                with archive.open(name) as handle:
+                    for block in iter(lambda: handle.read(1024 * 1024), b""):
+                        digest.update(block)
+                if evidence["size"] != archive.getinfo(name).file_size or evidence["sha256"] != digest.hexdigest():
+                    raise S4InputError(f"E2 handoff member differs: {name}")
+            return bool(manifest["delivery"])
+    except S4InputError:
+        raise
+    except (OSError, BadZipFile, UnicodeDecodeError, json.JSONDecodeError, KeyError) as error:
+        raise S4InputError(f"E2 handoff is invalid: {error}") from error
 
 
 def _info(name: str) -> ZipInfo:
@@ -95,12 +176,9 @@ def prepare_s4_input(
 ) -> Path:
     source = Path(e2_handoff)
     expected = expected_e2_sha256 or load_s4_contract().inputs["e2_handoff_sha256"]
-    try:
-        verified = verify_e2_handoff(source)
-    except E2ArtifactError as error:
-        raise S4InputError(f"E2 handoff is invalid: {error}") from error
+    delivery = _verify_e2_handoff(source)
     actual = file_sha256(source)
-    if not verified.delivery or actual != expected:
+    if not delivery or actual != expected:
         raise S4InputError("E2 handoff identity differs")
     payload = source.read_bytes()
     manifest = _manifest(payload, actual)
@@ -148,11 +226,7 @@ def verify_and_extract_s4_input(
     root.mkdir(parents=True)
     handoff_path = root / "e2_handoff.zip"
     handoff_path.write_bytes(handoff)
-    try:
-        verified = verify_e2_handoff(handoff_path)
-    except E2ArtifactError as error:
-        raise S4InputError(f"embedded E2 handoff is invalid: {error}") from error
-    if not verified.delivery:
+    if not _verify_e2_handoff(handoff_path):
         raise S4InputError("embedded E2 delivery is absent")
     return VerifiedS4Input(
         artifact_kind=INPUT_KIND,
