@@ -1,0 +1,15 @@
+{
+  "artifact_kind": "tree_s4_recovery_contract_v1",
+  "predecessor_code_sha256": "5e73e15269723679d421f88ddbb04141941b5760a9d7257c550b42183acd35c8",
+  "s4_contract_sha256": "1f0b74929dcae52fec38868471dc32ac5fa3fa3226ef88e5a389e9670a4845b9",
+  "schema_version": 1,
+  "source_bindings": {
+    "code_sha256": "5e73e15269723679d421f88ddbb04141941b5760a9d7257c550b42183acd35c8",
+    "contract_sha256": "1f0b74929dcae52fec38868471dc32ac5fa3fa3226ef88e5a389e9670a4845b9",
+    "e2_handoff_sha256": "4dd0c9012b9a59e5235b76d6fe1f6ded4df4b404cab0082c0f3084b8c384050f",
+    "history_sha256": "f7818f9ee0ccefe7c2cf69fa99efe6e5cb882d8b886dd96d2394bcf3b53f33a9",
+    "input_manifest_sha256": "7a2e9ca27447327c21518c692d2f467e6bd5c4c4400a2e559b576d0d6680b44c",
+    "train_sha256": "d2081186b458b49f60b082be480c273135833e15ba59a76d033af28bcf8763ff"
+  },
+  "source_handoff_sha256": "c8becb4037e511ff5d28d0fd146e1a9ec73923125cb4fb9c4467ba3cab6f8e9d"
+}
