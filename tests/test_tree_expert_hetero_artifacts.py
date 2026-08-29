@@ -39,6 +39,11 @@ def test_bundles_are_deterministic_review_only_and_bound(tmp_path):
     verify_resume_bundle(resume1, _bindings())
     with pytest.raises(HeteroArtifactError, match="bindings"):
         verify_resume_bundle(resume1, replace(_bindings(), code_sha256="0" * 64))
+    verify_resume_bundle(
+        resume1,
+        replace(_bindings(), code_sha256="0" * 64),
+        compatible_code_sha256s=frozenset({_bindings().code_sha256}),
+    )
     review = create_review_bundle(root, tmp_path / "review.zip", _bindings())
     with ZipFile(review) as archive:
         assert not any(name.endswith((".json", ".txt")) and name.startswith("jobs/job/model") for name in archive.namelist())

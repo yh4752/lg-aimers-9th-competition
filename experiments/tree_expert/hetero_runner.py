@@ -129,6 +129,10 @@ _CODE_MEMBERS = (
     "experiments/independent_dl/feature_sources/seasonal.py",
 )
 
+_COMPATIBLE_RESUME_CODE_SHA256S = frozenset({
+    "1804f34d5f48b6568e17ec86f6265e12961d10c1cd1c720c5d2063061ba6bc53",
+})
+
 
 def code_sha256(root: Path | None = None) -> str:
     project = Path(__file__).resolve().parents[2] if root is None else Path(root)
@@ -225,7 +229,12 @@ def run_hetero_campaign(
         state = initial_state()
         save_state(state, root / "state/state.json")
     else:
-        restore_resume_bundle(resume_bundle, root, bindings)
+        restore_resume_bundle(
+            resume_bundle,
+            root,
+            bindings,
+            compatible_code_sha256s=_COMPATIBLE_RESUME_CODE_SHA256S,
+        )
         state = load_state(root / "state/state.json")
     train = pd.read_csv(data.train)
     baselines = {fold[1]: pd.read_csv(path) for fold, path in verified.fold_predictions.items()}

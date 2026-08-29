@@ -142,7 +142,13 @@ def create_review_bundle(root: Path, destination: Path, bindings: HeteroBindings
     return _write(root, destination, "review", bindings, include)
 
 
-def _verify(path: Path, kind: str, bindings: HeteroBindings) -> dict[str, object]:
+def _verify(
+    path: Path,
+    kind: str,
+    bindings: HeteroBindings,
+    *,
+    compatible_code_sha256s: frozenset[str] = frozenset(),
+) -> dict[str, object]:
     try:
         with ZipFile(path) as archive:
             infos = _safe_infos(archive)
@@ -151,8 +157,20 @@ def _verify(path: Path, kind: str, bindings: HeteroBindings) -> dict[str, object
             manifest = json.loads(archive.read(infos["manifest.json"]))
             if type(manifest) is not dict or manifest.get("artifact_kind") != _KINDS[kind]:
                 raise HeteroArtifactError("artifact identity differs")
-            if manifest.get("bindings") != asdict(bindings):
-                raise HeteroArtifactError("artifact bindings differ")
+            actual_bindings = manifest.get("bindings")
+            expected_bindings = asdict(bindings)
+            if actual_bindings != expected_bindings:
+                compatible = False
+                if kind == "resume" and type(actual_bindings) is dict:
+                    legacy_code = actual_bindings.get("code_sha256")
+                    rebound = dict(actual_bindings)
+                    rebound["code_sha256"] = bindings.code_sha256
+                    compatible = (
+                        legacy_code in compatible_code_sha256s
+                        and rebound == expected_bindings
+                    )
+                if not compatible:
+                    raise HeteroArtifactError("artifact bindings differ")
             members = manifest.get("members")
             if type(members) is not dict or set(members) != set(infos) - {"manifest.json"}:
                 raise HeteroArtifactError("artifact member set differs")
@@ -167,8 +185,18 @@ def _verify(path: Path, kind: str, bindings: HeteroBindings) -> dict[str, object
         raise HeteroArtifactError("artifact is not a valid ZIP") from error
 
 
-def verify_resume_bundle(path: Path, bindings: HeteroBindings) -> dict[str, object]:
-    return _verify(path, "resume", bindings)
+def verify_resume_bundle(
+    path: Path,
+    bindings: HeteroBindings,
+    *,
+    compatible_code_sha256s: frozenset[str] = frozenset(),
+) -> dict[str, object]:
+    return _verify(
+        path,
+        "resume",
+        bindings,
+        compatible_code_sha256s=compatible_code_sha256s,
+    )
 
 
 def verify_review_bundle(path: Path, bindings: HeteroBindings) -> dict[str, object]:
@@ -179,8 +207,18 @@ def verify_handoff_bundle(path: Path, bindings: HeteroBindings) -> dict[str, obj
     return _verify(path, "handoff", bindings)
 
 
-def restore_resume_bundle(path: Path, destination: Path, bindings: HeteroBindings) -> Path:
-    verify_resume_bundle(path, bindings)
+def restore_resume_bundle(
+    path: Path,
+    destination: Path,
+    bindings: HeteroBindings,
+    *,
+    compatible_code_sha256s: frozenset[str] = frozenset(),
+) -> Path:
+    verify_resume_bundle(
+        path,
+        bindings,
+        compatible_code_sha256s=compatible_code_sha256s,
+    )
     output = Path(destination)
     if output.exists() or output.is_symlink():
         raise HeteroArtifactError("resume destination already exists")

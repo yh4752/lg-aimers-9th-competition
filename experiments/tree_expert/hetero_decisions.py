@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, replace
+from dataclasses import dataclass, replace
 from types import MappingProxyType
 from typing import Mapping
 
@@ -258,7 +258,20 @@ def decide_equal_blend(
 
 
 def decision_payload(decision: FamilyDecision) -> dict[str, object]:
-    payload = asdict(decision)
-    payload["selection_folds"] = [list(fold) for fold in decision.selection_folds]
-    payload["fold_gains"] = {f"{a}->{b}": value for (a, b), value in decision.fold_gains.items()}
-    return payload
+    return {
+        "family": decision.family,
+        "status": decision.status,
+        "reason": decision.reason,
+        "weight": decision.weight,
+        "selection_folds": [list(fold) for fold in decision.selection_folds],
+        "fold_gains": {
+            f"{train_end}->{valid_year}": value
+            for (train_end, valid_year), value in decision.fold_gains.items()
+        },
+        "weighted_gain": decision.weighted_gain,
+        "bootstrap_lower": decision.bootstrap_lower,
+        "bootstrap_upper": decision.bootstrap_upper,
+        "maximum_segment_regression": decision.maximum_segment_regression,
+        "residual_correlation": decision.residual_correlation,
+        "non_worse_seed_count": decision.non_worse_seed_count,
+    }

@@ -8,6 +8,7 @@ from experiments.tree_expert.hetero_decisions import (
     FamilyEvidence,
     confirm_family,
     corrected_probability,
+    decision_payload,
     decide_equal_blend,
     select_family_structure,
 )
@@ -42,6 +43,9 @@ def test_structure_selects_weight_without_using_confirmation_fold():
     assert first.weight == second.weight == 0.15
     assert first.status == "passed"
     assert second.status == "rejected"
+    payload = decision_payload(first)
+    assert payload["fold_gains"].keys() == {"2021->2022", "2022->2023", "2023->2024"}
+    assert payload["selection_folds"] == [[2021, 2022], [2022, 2023]]
 
 
 def test_confirmation_averages_three_seeds_and_requires_two_non_worse():
