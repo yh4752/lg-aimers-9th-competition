@@ -836,7 +836,7 @@ Expected: all selected tests pass.
 
 - [ ] **Step 3: Run policy and repository contracts**
 
-Run: `artifacts/tabm_submission_python311/bin/python -m pytest tests/test_competition_policy.py tests/test_experiment_contract_gate.py tests/test_repository_contract.py -q`
+Run: `artifacts/tabm_submission_python311/bin/python -m pytest tests/test_rules_policy.py tests/test_experiment_contract_gate.py tests/test_repository_contract.py -q`
 
 Expected: all tests pass.
 

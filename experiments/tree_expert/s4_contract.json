@@ -1,0 +1,46 @@
+{
+  "schema_version": 1,
+  "campaign_id": "tree_s4_full_chain_v1",
+  "inputs": {
+    "official_train_sha256": "d2081186b458b49f60b082be480c273135833e15ba59a76d033af28bcf8763ff",
+    "official_history_sha256": "f7818f9ee0ccefe7c2cf69fa99efe6e5cb882d8b886dd96d2394bcf3b53f33a9",
+    "e2_handoff_sha256": "4dd0c9012b9a59e5235b76d6fe1f6ded4df4b404cab0082c0f3084b8c384050f"
+  },
+  "folds": [[2021, 2022], [2022, 2023], [2023, 2024]],
+  "recent_weights": [0.6, 0.75, 0.9],
+  "decays": [0.3, 0.55, 0.75],
+  "residual_families": ["catboost", "catboost_rf", "xgboost", "lightgbm", "dual_temporal"],
+  "residual_alphas": [0.25, 0.5, 0.75, 1.0],
+  "calibration_profiles": ["global_game", "pitcher", "batter", "matchup", "rf_matchup"],
+  "calibration_betas": [0.1, 0.25, 0.5, 0.75],
+  "structure_seed": 3407,
+  "confirmation_seeds": [42, 2026],
+  "minimum_full_chains": 12,
+  "maximum_anchor_coverage": 6,
+  "maximum_confirmation_candidates": 5,
+  "versions": {"catboost": "1.2.10", "xgboost": "3.0.2", "lightgbm": "4.6.0"},
+  "models": {
+    "catboost": {"iterations": 1600, "depth": 9, "learning_rate": 0.03, "l2_leaf_reg": 5.0},
+    "xgboost": {"n_estimators": 1600, "max_depth": 8, "learning_rate": 0.03, "subsample": 0.8, "colsample_bytree": 0.8},
+    "lightgbm": {"n_estimators": 1600, "num_leaves": 127, "learning_rate": 0.03, "subsample": 0.8, "colsample_bytree": 0.8, "num_threads": 8}
+  },
+  "gates": {
+    "weighted_gain": 0.00005,
+    "recent_gain": 0.0,
+    "maximum_fold_regression": 0.00003,
+    "maximum_segment_regression": 0.0003,
+    "minimum_segment_rows": 5000,
+    "bootstrap_repeats": 1000,
+    "bootstrap_seed": 3407,
+    "minimum_non_worse_seed_count": 2,
+    "probability_tolerance": 0.000001,
+    "catastrophic_structure_regression": 0.001
+  },
+  "runtime": {
+    "wall_seconds": 43200,
+    "new_job_guard_seconds": 3600,
+    "artifact_reserve_seconds": 2700,
+    "snapshot_interval_seconds": 600,
+    "rss_max_bytes": 23622320128
+  }
+}
