@@ -132,17 +132,38 @@ def create_s4_resume(root: Path, destination: Path, bindings: S4Bindings) -> Pat
         parts = PurePosixPath(name).parts
         if name.startswith("bundles/") or name.endswith(".tmp"):
             return False
+        if name == "verified_e2_input.zip" or name.startswith("verified_e2/"):
+            return False
         if parts and parts[0] == "jobs":
-            return len(parts) >= 3 and parts[1] in completed
+            return (
+                len(parts) >= 3
+                and parts[1] in completed
+                and parts[-1] == "result.json"
+            )
+        if parts and parts[0] == "anchor_basis" and state.phase != "anchors":
+            return False
         return True
 
     return _write_payloads(_root_payloads(root, include), destination, "resume", bindings)
 
 
 def create_s4_review(root: Path, destination: Path, bindings: S4Bindings) -> Path:
-    excluded = (".zip", ".tmp", ".cbm", ".pt", ".bin", ".pkl", ".joblib")
+    def include(name: str) -> bool:
+        parts = PurePosixPath(name).parts
+        if not parts or name.endswith((".zip", ".tmp", ".cbm", ".pt", ".bin", ".pkl", ".joblib")):
+            return False
+        if name in {"s4_campaign.log"}:
+            return True
+        if parts[0] in {"state", "diagnostics", "decisions", "confirmation"}:
+            return True
+        if parts[0] == "full_chains":
+            return parts[-1] == "config.json"
+        if parts[0] == "jobs":
+            return parts[-1] == "result.json"
+        return False
+
     return _write_payloads(
-        _root_payloads(root, lambda name: not name.startswith(("bundles/", "models/")) and not name.endswith(excluded)),
+        _root_payloads(root, include),
         destination,
         "review",
         bindings,

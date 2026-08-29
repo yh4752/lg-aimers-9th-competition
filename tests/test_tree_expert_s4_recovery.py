@@ -17,6 +17,8 @@ from experiments.tree_expert.s4_recovery import (
     verify_recovery_input,
 )
 from experiments.tree_expert.s4_artifacts import S4Bindings, create_s4_handoff, file_sha256
+from experiments.tree_expert.s4_decisions import FullChainArchetype
+from experiments.tree_expert.s4_production import prune_after_full_chain_selection
 from experiments.tree_expert.s4_state import S4State, save_s4_state
 
 
@@ -183,3 +185,43 @@ def test_expanded_recovery_input_materializes_identical_resume(tmp_path: Path) -
 
     assert (tmp_path / "materialized_resume.zip").read_bytes() == expected_resume
     assert verified.state_phase == "full_chains"
+
+
+def test_selection_pruning_keeps_only_later_phase_dependencies(tmp_path: Path) -> None:
+    root = tmp_path / "campaign"
+    for name in (
+        "anchor_basis/fold/predictions.csv",
+        "verified_e2/fold.csv",
+        "verified_e2_input.zip",
+        "jobs/residuals__00/model.cbm",
+        "anchors/a0/2021.csv",
+        "anchors/a1/2021.csv",
+        "residual_predictions/c00/s3407/2022.csv",
+        "residual_predictions/c01/s3407/2022.csv",
+        "full_chains/c00/config.json",
+        "full_chains/c01/config.json",
+    ):
+        path = root / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"payload")
+    archetypes = tuple(
+        FullChainArchetype(
+            candidate_id=f"c{index}", anchor_role="role",
+            anchor_id=f"s4__anchor__a{index}", residual_family="catboost",
+            residual_alpha=0.5, calibration_profile="base", calibration_beta=0.5,
+        )
+        for index in range(2)
+    )
+
+    report = prune_after_full_chain_selection(root, (1,), archetypes)
+
+    assert report.removed_files >= 5
+    assert not (root / "anchor_basis").exists()
+    assert not (root / "verified_e2").exists()
+    assert not (root / "jobs").exists()
+    assert not (root / "anchors/a0").exists()
+    assert (root / "anchors/a1/2021.csv").is_file()
+    assert not (root / "residual_predictions/c00").exists()
+    assert (root / "residual_predictions/c01/s3407/2022.csv").is_file()
+    assert not (root / "full_chains/c00").exists()
+    assert (root / "full_chains/c01/config.json").is_file()

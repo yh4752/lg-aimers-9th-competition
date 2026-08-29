@@ -43,6 +43,94 @@ class S4ProductionError(RuntimeError):
     pass
 
 
+@dataclass(frozen=True)
+class PruneReport:
+    removed_files: int
+    removed_bytes: int
+
+
+def _path_usage(path: Path) -> tuple[int, int]:
+    source = Path(path)
+    if source.is_symlink():
+        raise S4ProductionError("prune target is a symlink")
+    if source.is_file():
+        return 1, source.stat().st_size
+    if not source.exists():
+        return 0, 0
+    files = 0
+    size = 0
+    for item in source.rglob("*"):
+        if item.is_symlink():
+            raise S4ProductionError("prune source contains a symlink")
+        if item.is_file():
+            files += 1
+            size += item.stat().st_size
+    return files, size
+
+
+def _remove_campaign_path(path: Path) -> tuple[int, int]:
+    files, size = _path_usage(path)
+    if not Path(path).exists():
+        return files, size
+    if Path(path).is_file():
+        Path(path).unlink()
+    else:
+        shutil.rmtree(path)
+    return files, size
+
+
+def prune_after_full_chain_selection(
+    root: Path,
+    selected: tuple[int, ...],
+    archetypes: tuple[FullChainArchetype, ...],
+) -> PruneReport:
+    if (
+        not selected
+        or len(set(selected)) != len(selected)
+        or any(index < 0 or index >= len(archetypes) for index in selected)
+    ):
+        raise S4ProductionError("prune selection differs")
+    source = Path(root)
+    if source.is_symlink() or not source.is_dir():
+        raise S4ProductionError("prune campaign root differs")
+    selected_indices = set(selected)
+    selected_anchors = {
+        _candidate_token(archetypes[index].anchor_id) for index in selected
+    }
+    targets = [
+        source / "anchor_basis",
+        source / "verified_e2",
+        source / "verified_e2_input.zip",
+        source / "jobs",
+    ]
+    anchors = source / "anchors"
+    if anchors.is_dir():
+        targets.extend(
+            path for path in anchors.iterdir() if path.name not in selected_anchors
+        )
+    residuals = source / "residual_predictions"
+    if residuals.is_dir():
+        targets.extend(
+            path for path in residuals.iterdir()
+            if path.name[1:].isdigit() and path.name.startswith("c")
+            and int(path.name[1:]) not in selected_indices
+        )
+    chains = source / "full_chains"
+    if chains.is_dir():
+        targets.extend(
+            path for path in chains.iterdir()
+            if path.name[1:].isdigit() and path.name.startswith("c")
+            and int(path.name[1:]) not in selected_indices
+        )
+    removed_files = 0
+    removed_bytes = 0
+    for target in targets:
+        files, size = _remove_campaign_path(target)
+        removed_files += files
+        removed_bytes += size
+    return PruneReport(removed_files, removed_bytes)
+
+
 _SOURCE_FOLD = (2020, 2021)
 
 
@@ -262,7 +350,6 @@ class ProductionS4Runtime:
         output = self._diagnostic_frame(cache.valid, probability, "p_basis")
         path = self._basis_path(fold, head, None if decay is None else float(decay))
         _atomic_frame(path, output)
-        _save_model(model, "anchor", job_dir / "model.cbm")
         _atomic_json(job_dir / "result.json", {"status": "completed", "best_iteration": max(0, int(model.get_best_iteration())), "predictions": str(path.relative_to(self.root))})
         return "completed"
 
@@ -381,7 +468,6 @@ class ProductionS4Runtime:
                 decay = spec.decay
         multi_weight = season_decay_weights(seasons, cutoff_year=fold[0], decay=decay)
         family = archetype.residual_family
-        models = []
         if family == "catboost_rf":
             correction = np.zeros(len(cache.valid), dtype="float64")
             for game_type in ("R", "F"):
@@ -389,18 +475,14 @@ class ProductionS4Runtime:
                 result = self._fit_one_residual(family, cache, gpu_id, seed, multi_weight, mask)
                 valid_mask = cache.valid["game_type"].astype(str).eq(game_type).to_numpy()
                 correction[valid_mask] = result.prediction[valid_mask]
-                models.append((result.model, f"model_{game_type}.cbm"))
         elif family == "dual_temporal":
             recent_mask = pd.to_numeric(cache.prefix["season"], errors="raise").eq(fold[0]).to_numpy()
             recent = self._fit_one_residual(family, cache, gpu_id, seed, np.ones(len(cache.target)), recent_mask)
             multi = self._fit_one_residual(family, cache, gpu_id, seed + 10000, multi_weight)
             correction = 0.5 * (recent.prediction + multi.prediction)
-            models.extend(((recent.model, "model_recent.cbm"), (multi.model, "model_multi.cbm")))
         else:
             result = self._fit_one_residual(family, cache, gpu_id, seed, multi_weight)
             correction = result.prediction
-            suffix = ".json" if family == "xgboost" else ".txt" if family == "lightgbm" else ".cbm"
-            models.append((result.model, f"model{suffix}"))
         probability = np.clip(anchor["p_anchor"].to_numpy(dtype="float64") + archetype.residual_alpha * correction, 1e-5, 1 - 1e-5)
         output = anchor.rename(columns={"p_anchor": "p_anchor"}).copy(deep=True)
         output["oof_year"] = fold[1]
@@ -410,8 +492,6 @@ class ProductionS4Runtime:
         output["p_base"] = baseline["probability"].to_numpy(dtype="float64")
         path = self._residual_path(index, fold, seed)
         _atomic_frame(path, output)
-        for model, name in models:
-            _save_model(model, family, job_dir / name)
         _atomic_json(job_dir / "result.json", {"status": "completed", "candidate": archetype.candidate_id, "seed": seed, "predictions": str(path.relative_to(self.root))})
         return "completed"
 
@@ -529,6 +609,14 @@ class ProductionS4Runtime:
                 selected[-1] = external_index
         selected = sorted(set(selected))
         _atomic_json(self.root / "decisions/confirmation_selection.json", {"indices": selected, "selection_folds": ["2021->2022", "2022->2023"]})
+        report = prune_after_full_chain_selection(
+            self.root, tuple(selected), self._archetypes()
+        )
+        print(
+            f"S4_PRUNE_COMPLETE removed_files={report.removed_files} "
+            f"removed_bytes={report.removed_bytes}",
+            flush=True,
+        )
         return state
 
     def _selection(self) -> tuple[int, ...]:
