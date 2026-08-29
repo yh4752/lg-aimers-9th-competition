@@ -1,0 +1,57 @@
+{
+  "status": "rejected",
+  "campaign_id": "tree_hetero_residual_s3_v1",
+  "reason": "Both heterogeneous tree residual candidates produced gains below the predeclared minimum and residual correlations above the diversity ceiling.",
+  "decision_basis": "predeclared_temporal_oof_structure_gate",
+  "decision": "close_fixed_direct_residual_structure",
+  "completed_jobs": 6,
+  "failed_jobs": 0,
+  "gates": {
+    "minimum_weighted_gain": 0.00005,
+    "minimum_recent_fold_gain": 0.0,
+    "maximum_fold_regression": 0.00003,
+    "maximum_segment_regression": 0.0003,
+    "maximum_residual_correlation": 0.995
+  },
+  "candidates": {
+    "xgboost": {
+      "status": "rejected",
+      "selected_correction_weight": 0.05,
+      "weighted_gain": 5.866102602966113e-06,
+      "fold_gains": {
+        "2021->2022": 1.8593420335832282e-05,
+        "2022->2023": -1.1314188729391617e-05,
+        "2023->2024": 1.0081119369324735e-05
+      },
+      "bootstrap_lower": 1.6661948130815082e-06,
+      "bootstrap_upper": 1.0076408990844607e-05,
+      "maximum_segment_regression": 0.0002449809853124485,
+      "residual_correlation": 0.9985596846452733
+    },
+    "lightgbm": {
+      "status": "rejected",
+      "selected_correction_weight": 0.1,
+      "weighted_gain": 1.2501454531676292e-05,
+      "fold_gains": {
+        "2021->2022": 3.375160845120826e-05,
+        "2022->2023": -1.3629145007145432e-05,
+        "2023->2024": 1.706502619239881e-05
+      },
+      "bootstrap_lower": 4.157326023384368e-06,
+      "bootstrap_upper": 1.9910955438174175e-05,
+      "maximum_segment_regression": 0.0002480679120103191,
+      "residual_correlation": 0.9987253794881227
+    }
+  },
+  "scope": "This rejection applies only to the fixed E2-anchor direct-probability residual setup. It does not reject XGBoost or LightGBM as model families.",
+  "source_hashes": {
+    "handoff_sha256": "79b8292089f1b214239721e7707e1b4ae88ef74e3b1256b748320df18590ef95",
+    "review_sha256": "f267bb65aef265a749f080989725e51697c1da09dd34a9a3262b46b53e98d43c",
+    "resume_sha256": "0bc8bbab652abdaa8b22534a923318ca56d299fe5a3407999129e6b505210a0c",
+    "code_sha256": "872853ed1df1f12d1360cecad346b06568d991bf555ce723119af7ea8f96d1c8",
+    "contract_sha256": "5a5838f37b07ff125a7433c55397c3b5f193c09d562de6ace3e9906e54d27c92",
+    "e2_handoff_sha256": "4dd0c9012b9a59e5235b76d6fe1f6ded4df4b404cab0082c0f3084b8c384050f",
+    "train_sha256": "d2081186b458b49f60b082be480c273135833e15ba59a76d033af28bcf8763ff",
+    "history_sha256": "f7818f9ee0ccefe7c2cf69fa99efe6e5cb882d8b886dd96d2394bcf3b53f33a9"
+  }
+}

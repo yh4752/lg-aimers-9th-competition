@@ -2,18 +2,25 @@
 
 이 단계는 기존 CatBoost OOF 예측을 버리지 않고, XGBoost와 LightGBM의 서로 다른 오차를 5~15%만 보정 성분으로 쓸 가치가 있는지 확인한다. 검증용 연구 단계이므로 제출 ZIP이나 최종 학습 모델을 만들지 않는다.
 
+> 실행 결과: 여섯 작업은 모두 정상 완료됐고 두 후보는 기각됐다. XGBoost와
+> LightGBM 모두 최소 개선량과 오차 다양성 기준을 넘지 못했다. 판정 근거는
+> [S3 rejection](../reports/rejections/tree_hetero_residual_s3_rejection.json)에 있다.
+
 ## Kaggle 입력
 
 Kaggle Notebook에 다음 두 데이터셋을 연결한다.
 
 1. 공식 데이터 `lg-aimers-9th-data`
-2. `/Users/yonghyun/Documents/lg-aimers-9th-competition/artifacts/tree_expert_t3_input.zip`을 Kaggle Dataset으로 올린 입력
+2. 로컬의 `artifacts/tree_expert_t3_input.zip`을 Kaggle Dataset으로 올린 입력
 
 중단된 실행을 이어갈 때만 이전 `tree_hetero_handoff.zip`을 별도 Kaggle Dataset으로 추가한다. 안에 풀린 `tree_hetero_resume.zip`을 코드가 자동으로 찾는다. 원본 resume와 handoff를 동시에 추가하면 resume이 두 개로 잡히므로 하나만 둔다.
 
 ## 실행
 
-Kaggle 가속기는 `GPU T4 x2`를 선택한다. `/Users/yonghyun/Documents/lg-aimers-9th-competition/experiments/tree_expert/KAGGLE_HETERO_CELL.py` 전체를 Notebook의 한 셀에 붙여 넣고 `Save Version`으로 실행한다. 인터넷 연결은 패키지 버전 설치가 필요할 수 있으므로 켜 둔다.
+Kaggle 가속기는 `GPU T4 x2`를 선택한다. 저장소의
+`experiments/tree_expert/KAGGLE_HETERO_CELL.py` 전체를 Notebook의 한 셀에 붙여
+넣고 `Save Version`으로 실행한다. 인터넷 연결은 패키지 버전 설치가 필요할 수 있으므로
+켜 둔다.
 
 예상 시간은 새 실행 기준 약 4~8시간이다. 구조 후보가 모두 탈락하면 더 일찍 끝나며, 통과한 모델 계열만 두 개 추가 시드로 확인한다. 작업 하나가 끝날 때마다 재개 상태를 갱신한다. 제한 시간 직전에는 새 작업을 시작하지 않는다.
 

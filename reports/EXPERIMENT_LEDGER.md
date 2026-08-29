@@ -28,6 +28,7 @@
 | 20 | `catboost_deployment_alignment_v1` | 고정 트리 수 CatBoost·TabM 70:30 | 2022→2023·2023→2024 배포 정렬 | 트리 수 `4/32/64/128/192/296/400` 모두 실패; 4트리는 전체 gain `0.0000320407`이나 최근 fold `+0.0001464537` 악화 | deployment blocked | — | review SHA-256 `fc65693a…41e8` |
 | 21 | `tree_hierarchical_residual_v1` | E2 anchor + 계층 잔차·보정 | 2021→2022·2022→2023 구조, 2023→2024 확인 | C1 gain `0.0000629719`이나 최소 fold `-0.0000083590`·seed 일관성 실패; C2도 네 gate 실패 | completed, no candidate; C0 fallback | — | handoff SHA-256 `fb6200aa…c896` |
 | 22 | `failure_expert_label_audit_v1` | 실패 유형 라벨 CPU 감사 | 2021·2022·2023·2024 cutoff | coverage `0.9644~0.9650`, middle·reverse overlap `0.0716~0.0744`; 세 유형 모두 공통 gate 실패 | ineligible; no model training | — | review SHA-256 `0e03e2b5…ba8c` |
+| 23 | `tree_hetero_residual_s3_v1` | E2 anchor + XGBoost·LightGBM 잔차 보정 | 2021→2022·2022→2023 구조 선택, 2023→2024 확인 | XGBoost gain `0.0000058661`·상관 `0.9985597`, LightGBM gain `0.0000125015`·상관 `0.9987254`; 두 후보 모두 2022→2023 악화 | rejected; fixed direct residual structure closed | — | [rejection](rejections/tree_hetero_residual_s3_rejection.json) |
 
 ## 현재 결론
 
@@ -47,7 +48,9 @@
 - E2 이후 T3 시간 가중, 계층 잔차와 실패 유형 라벨은 각자의 사전 gate에서 탈락했다.
   CatBoost·TabM 70:30은 정렬 OOF에서 좋아졌지만 배포와 같은 트리 수로 다시 맞추지
   못해 제출을 차단했다. 이 판정은 E2를 취소하지 않으며 해당 추가 구성만 막는다.
-- 다음 독립 후보는 E2 anchor를 고정한 XGBoost·LightGBM 잔차 보정 S3다. 코드는
-  준비됐지만 사용자 실행 결과가 없으므로 완료 실험 행이나 제출 후보로 기록하지 않는다.
+- S3의 XGBoost와 LightGBM은 평균적으로 아주 조금 좋아졌지만 최소 gain `0.00005`에
+  못 미쳤고, E2 잔차와의 상관도 둘 다 `0.998`을 넘었다. 현재 피처와 직접 확률 보정
+  구조는 닫되 두 모델 계열 전체의 실패로 확대하지 않는다. 다음 후보는 E2와 다른
+  오차를 만들 수 있는 시즌·상황 정보부터 다시 설계한다.
 - 대용량 OOF, 모델과 ZIP은 Google Drive에 두고 이 장부는 작은 evidence와 실행 ID,
   SHA-256으로 원본을 식별한다.

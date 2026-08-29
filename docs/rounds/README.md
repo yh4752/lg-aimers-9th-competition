@@ -20,7 +20,7 @@
 ## 이후 캠페인
 
 TabM seed·행 단위 파생변수, CatBoost·TabM 배포 정렬, Tree Expert E2·T3, 계층
-보정과 실패 유형 라벨 감사는 여러 실행 환경과 재개 번들을 오간 장기 캠페인이다.
-번호를 억지로 이어 붙이지 않고 [실험 여정](../EXPERIMENT_JOURNEY.md)에서 의사결정
-순서로 설명한다. 완료 여부와 판정 수치는 [실험 장부](../../reports/EXPERIMENT_LEDGER.md)에
-한 번만 기록한다.
+보정, 실패 유형 라벨 감사와 이종 트리 S3는 여러 실행 환경과 재개 번들을 오간 장기
+캠페인이다. 번호를 억지로 이어 붙이지 않고
+[실험 여정](../EXPERIMENT_JOURNEY.md)에서 의사결정 순서로 설명한다. 완료 여부와 판정
+수치는 [실험 장부](../../reports/EXPERIMENT_LEDGER.md)에 한 번만 기록한다.
