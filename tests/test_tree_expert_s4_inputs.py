@@ -2,7 +2,7 @@ from hashlib import sha256
 import io
 import json
 from pathlib import Path
-from zipfile import ZIP_DEFLATED, ZipFile, ZipInfo
+from zipfile import BadZipFile, ZIP_DEFLATED, ZipFile, ZipInfo
 
 import pytest
 
@@ -67,6 +67,28 @@ def _e2_handoff(path: Path) -> Path:
     return path
 
 
+def _expand_nested_zips(root: Path) -> None:
+    while True:
+        expanded = False
+        for archive_path in sorted(root.rglob("*.zip")):
+            try:
+                with ZipFile(archive_path) as archive:
+                    members = {name: archive.read(name) for name in archive.namelist()}
+            except BadZipFile:
+                continue
+            destination = archive_path.with_suffix("")
+            destination.mkdir(parents=True)
+            for name, payload in members.items():
+                target = destination / name
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(payload)
+            archive_path.unlink()
+            expanded = True
+            break
+        if not expanded:
+            return
+
+
 def test_prepare_and_verify_s4_input_round_trip(tmp_path: Path) -> None:
     handoff = _e2_handoff(tmp_path / "e2.zip")
     expected = sha256(handoff.read_bytes()).hexdigest()
@@ -75,6 +97,22 @@ def test_prepare_and_verify_s4_input_round_trip(tmp_path: Path) -> None:
     assert verified.artifact_kind == "tree_s4_input_v1"
     assert verified.e2_handoff_sha256 == expected
     assert verified.e2_handoff.is_file()
+
+
+def test_recursively_expanded_kaggle_input_is_reconstructed(tmp_path: Path) -> None:
+    handoff = _e2_handoff(tmp_path / "e2.zip")
+    expected = sha256(handoff.read_bytes()).hexdigest()
+    archive = prepare_s4_input(handoff, tmp_path / "s4.zip", expected_e2_sha256=expected)
+    expanded = tmp_path / "kaggle_dataset"
+    with ZipFile(archive) as source:
+        source.extractall(expanded)
+    _expand_nested_zips(expanded)
+
+    verified = verify_and_extract_s4_input(
+        expanded, tmp_path / "verified_expanded", expected_e2_sha256=expected
+    )
+
+    assert verified.e2_handoff_sha256 == expected
 
 
 def test_zip_and_expanded_copy_are_deduplicated(tmp_path: Path) -> None:

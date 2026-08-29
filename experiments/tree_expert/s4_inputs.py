@@ -159,6 +159,82 @@ def _payloads(source: Path) -> dict[str, bytes]:
         raise S4InputError("S4 input is not a valid archive") from error
 
 
+def _expanded_zip_payload(source: Path, label: str) -> bytes:
+    root = Path(source)
+    if root.is_symlink() or not root.is_dir():
+        raise S4InputError(f"unsafe expanded {label}")
+    for item in root.rglob("*"):
+        if item.is_symlink():
+            raise S4InputError(f"unsafe expanded {label} member")
+    manifest_names = [
+        name for name in ("manifest.json", "handoff_manifest.json")
+        if (root / name).is_file()
+    ]
+    if len(manifest_names) != 1:
+        raise S4InputError(f"expanded {label} manifest differs")
+    manifest_name = manifest_names[0]
+    manifest_bytes = (root / manifest_name).read_bytes()
+    try:
+        manifest = json.loads(manifest_bytes)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise S4InputError(f"expanded {label} manifest is invalid") from error
+    declared = manifest.get("members") if type(manifest) is dict else None
+    if type(declared) is not dict:
+        raise S4InputError(f"expanded {label} member manifest differs")
+    payloads: dict[str, bytes] = {manifest_name: manifest_bytes}
+    total = len(manifest_bytes)
+    for name, evidence in sorted(declared.items()):
+        pure = PurePosixPath(name)
+        if pure.is_absolute() or not pure.parts or any(part in {"", ".", ".."} for part in pure.parts) or "\\" in name:
+            raise S4InputError(f"unsafe expanded {label} member: {name}")
+        target = root.joinpath(*pure.parts)
+        if target.is_file() and not target.is_symlink():
+            payload = target.read_bytes()
+        elif name.endswith(".zip") and target.with_suffix("").is_dir():
+            payload = _expanded_zip_payload(target.with_suffix(""), f"{label} member {name}")
+        else:
+            raise S4InputError(f"expanded {label} member is absent: {name}")
+        total += len(payload)
+        if len(payload) > _MAX_MEMBER_BYTES or total > _MAX_BYTES:
+            raise S4InputError(f"expanded {label} size exceeds limit")
+        if (
+            type(evidence) is not dict or set(evidence) != {"size", "sha256"}
+            or evidence["size"] != len(payload)
+            or evidence["sha256"] != sha256(payload).hexdigest()
+        ):
+            raise S4InputError(f"expanded {label} member differs: {name}")
+        payloads[name] = payload
+    output = tempfile.SpooledTemporaryFile(max_size=64 * 1024 * 1024)
+    try:
+        with ZipFile(output, "w", compression=ZIP_DEFLATED, compresslevel=6) as archive:
+            for name, payload in sorted(payloads.items()):
+                archive.writestr(_info(name), payload)
+        output.seek(0)
+        return output.read()
+    finally:
+        output.close()
+
+
+def _s4_input_payloads(source: Path) -> dict[str, bytes]:
+    root = Path(source)
+    if not root.is_dir():
+        return _payloads(root)
+    if root.is_symlink():
+        raise S4InputError("unsafe S4 input source")
+    manifest = root / "manifest.json"
+    handoff = root / "e2/handoff.zip"
+    expanded_handoff = root / "e2/handoff"
+    if manifest.is_symlink() or not manifest.is_file():
+        raise S4InputError("S4 input manifest is absent")
+    if handoff.is_file() and not handoff.is_symlink():
+        handoff_payload = handoff.read_bytes()
+    elif expanded_handoff.is_dir() and not expanded_handoff.is_symlink():
+        handoff_payload = _expanded_zip_payload(expanded_handoff, "E2 handoff")
+    else:
+        raise S4InputError("S4 input E2 handoff is absent")
+    return {"manifest.json": manifest.read_bytes(), "e2/handoff.zip": handoff_payload}
+
+
 def _manifest(payload: bytes, e2_sha256: str) -> bytes:
     return _canonical({
         "schema_version": 1,
@@ -205,7 +281,7 @@ def verify_and_extract_s4_input(
     *,
     expected_e2_sha256: str | None = None,
 ) -> VerifiedS4Input:
-    payloads = _payloads(Path(source))
+    payloads = _s4_input_payloads(Path(source))
     if set(payloads) != _MEMBERS:
         raise S4InputError("S4 input member set differs")
     try:
