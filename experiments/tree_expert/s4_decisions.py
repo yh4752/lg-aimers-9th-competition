@@ -114,13 +114,23 @@ def select_anchor_coverage(evidence: tuple[AnchorEvidence, ...]) -> tuple[Select
             mandatory[item.mandatory_role] = item
     if set(mandatory) != {"e2_control", "external_template"}:
         raise S4DecisionError("mandatory anchor coverage differs")
-    weighted = max(evidence, key=lambda item: (item.weighted_gain, item.candidate_id))
-    worst = max(evidence, key=lambda item: (min(item.fold_gains.values()), item.candidate_id))
+    used = {mandatory["e2_control"].candidate_id, mandatory["external_template"].candidate_id}
+    remaining = [item for item in evidence if item.candidate_id not in used]
+    if len(remaining) < 4:
+        raise S4DecisionError("anchor coverage needs six distinct candidates")
+    weighted = max(remaining, key=lambda item: (item.weighted_gain, item.candidate_id))
+    used.add(weighted.candidate_id)
+    remaining = [item for item in remaining if item.candidate_id not in used]
+    worst = max(remaining, key=lambda item: (min(item.fold_gains.values()), item.candidate_id))
+    used.add(worst.candidate_id)
+    remaining = [item for item in remaining if item.candidate_id not in used]
     diverse = min(
-        evidence,
+        remaining,
         key=lambda item: (_correlation(weighted.residual_signature, item.residual_signature), item.candidate_id),
     )
-    rf = max(evidence, key=lambda item: (item.rf_gain, item.candidate_id))
+    used.add(diverse.candidate_id)
+    remaining = [item for item in remaining if item.candidate_id not in used]
+    rf = max(remaining, key=lambda item: (item.rf_gain, item.candidate_id))
     chosen = {
         "e2_control": mandatory["e2_control"],
         "external_template": mandatory["external_template"],

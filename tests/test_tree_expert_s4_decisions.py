@@ -38,6 +38,7 @@ def test_anchor_coverage_keeps_all_six_roles():
         "e2_control", "external_template", "best_weighted",
         "best_worst_fold", "most_diverse", "best_rf",
     }
+    assert len({item.candidate_id for item in selected}) == 6
 
 
 def test_full_chain_grid_contains_at_least_twelve_archetypes():

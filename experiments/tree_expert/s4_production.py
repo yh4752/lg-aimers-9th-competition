@@ -404,6 +404,7 @@ class ProductionS4Runtime:
         probability = np.clip(anchor["p_anchor"].to_numpy(dtype="float64") + archetype.residual_alpha * correction, 1e-5, 1 - 1e-5)
         output = anchor.rename(columns={"p_anchor": "p_anchor"}).copy(deep=True)
         output["oof_year"] = fold[1]
+        output["raw_correction"] = correction
         output["p_chain"] = probability
         baseline = self.baselines[fold]
         output["p_base"] = baseline["probability"].to_numpy(dtype="float64")
@@ -417,26 +418,89 @@ class ProductionS4Runtime:
     def _chain_frames(self, index: int, seed: int) -> dict[tuple[int, int], pd.DataFrame]:
         return {fold: pd.read_csv(self._residual_path(index, fold, seed)) for fold in self.contract.folds}
 
-    def _calibrate(self, index: int, frames: Mapping[tuple[int, int], pd.DataFrame]) -> dict[tuple[int, int], pd.DataFrame]:
+    def _calibrate(
+        self,
+        index: int,
+        frames: Mapping[tuple[int, int], pd.DataFrame],
+        *,
+        alpha: float,
+        beta: float,
+        target_folds: tuple[tuple[int, int], ...] | None = None,
+    ) -> dict[tuple[int, int], pd.DataFrame]:
         archetype = self._archetypes()[index]
         source = pd.read_csv(self._candidate_path(archetype.anchor_id, 2021))
-        chain = pd.concat([frames[fold] for fold in self.contract.folds], ignore_index=True)
+        adjusted = {}
+        for fold, frame in frames.items():
+            if "raw_correction" not in frame:
+                raise S4ProductionError("raw residual correction is absent")
+            current = frame.copy(deep=True)
+            current["p_chain"] = np.clip(
+                current["p_anchor"].to_numpy(dtype="float64")
+                + float(alpha) * current["raw_correction"].to_numpy(dtype="float64"),
+                1e-5,
+                1 - 1e-5,
+            )
+            adjusted[fold] = current
+        selected_folds = self.contract.folds if target_folds is None else target_folds
         output = {}
-        for fold in self.contract.folds:
-            state = fit_s4_calibrator(fold[1], source, chain, profile_name=archetype.calibration_profile)
-            calibrated = apply_s4_calibrator(frames[fold], state, beta=archetype.calibration_beta)
+        for fold in selected_folds:
+            if fold[1] == 2022:
+                calibration_rows = adjusted[fold]
+            else:
+                calibration_rows = pd.concat(
+                    [adjusted[item] for item in self.contract.folds if item[1] < fold[1]],
+                    ignore_index=True,
+                )
+            state = fit_s4_calibrator(
+                fold[1], source, calibration_rows,
+                profile_name=archetype.calibration_profile,
+            )
+            calibrated = apply_s4_calibrator(adjusted[fold], state, beta=beta)
             calibrated["p_candidate"] = calibrated["p_final"]
             output[fold] = calibrated
         return output
 
+    @staticmethod
+    def _structure_gain(frames: Mapping[tuple[int, int], pd.DataFrame]) -> tuple[float, float]:
+        gains = []
+        for fold in ((2021, 2022), (2022, 2023)):
+            frame = frames[fold]
+            target = frame["target"].to_numpy(dtype="float64")
+            gains.append(float(np.mean(
+                np.square(frame["p_base"].to_numpy(dtype="float64") - target)
+                - np.square(frame["p_candidate"].to_numpy(dtype="float64") - target)
+            )))
+        return float(np.average(gains, weights=(0.60, 0.75))), min(gains)
+
     def _run_full_chain(self, job: S4Job, job_dir: Path) -> str:
         index = int(job.payload["index"])
-        frames = self._calibrate(index, self._chain_frames(index, self.contract.structure_seed))
+        raw = self._chain_frames(index, self.contract.structure_seed)
+        trials = []
+        for alpha in self.contract.residual_alphas:
+            for beta in self.contract.calibration_betas:
+                structure = self._calibrate(
+                    index,
+                    {fold: raw[fold] for fold in self.contract.folds[:2]},
+                    alpha=alpha,
+                    beta=beta,
+                    target_folds=self.contract.folds[:2],
+                )
+                weighted, worst = self._structure_gain(structure)
+                trials.append((weighted, worst, -alpha, -beta, alpha, beta))
+        _, _, _, _, alpha, beta = max(trials)
+        config = {
+            "candidate_id": self._archetypes()[index].candidate_id,
+            "residual_alpha": alpha,
+            "calibration_beta": beta,
+            "selection_folds": ["2021->2022", "2022->2023"],
+        }
+        _atomic_json(self.root / "full_chains" / f"c{index:02d}" / "config.json", config)
+        frames = self._calibrate(index, raw, alpha=alpha, beta=beta)
         for fold, frame in frames.items():
             _atomic_frame(self.root / "full_chains" / f"c{index:02d}" / f"{fold[1]}.csv", frame)
         evidence = evaluate_full_chain(self._archetypes()[index].candidate_id, frames, confirmed=False, non_worse_seed_count=0)
         decision = decide_submission_eligibility(evidence)
-        _atomic_json(job_dir / "result.json", {"status": "completed", "decision": decision_payload(decision)})
+        _atomic_json(job_dir / "result.json", {"status": "completed", "config": config, "decision": decision_payload(decision)})
         _atomic_json(self.root / "decisions" / f"structure_c{index:02d}.json", decision_payload(decision))
         return "completed"
 
@@ -473,6 +537,9 @@ class ProductionS4Runtime:
 
     def _finish_confirmation(self, state: S4State) -> S4State:
         for index in self._selection():
+            config = json.loads((self.root / "full_chains" / f"c{index:02d}" / "config.json").read_text())
+            alpha = float(config["residual_alpha"])
+            beta = float(config["calibration_beta"])
             seeds = (self.contract.structure_seed, *self.contract.confirmation_seeds)
             seed_frames = {seed: self._chain_frames(index, seed) for seed in seeds}
             averaged = {}
@@ -482,7 +549,13 @@ class ProductionS4Runtime:
                 for fold in self.contract.folds:
                     frame = frames[fold]
                     target = frame["target"].to_numpy(dtype="float64")
-                    gains.append(float(np.mean(np.square(frame["p_base"] - target) - np.square(frame["p_chain"] - target))))
+                    probability = np.clip(
+                        frame["p_anchor"].to_numpy(dtype="float64")
+                        + alpha * frame["raw_correction"].to_numpy(dtype="float64"),
+                        1e-5,
+                        1 - 1e-5,
+                    )
+                    gains.append(float(np.mean(np.square(frame["p_base"] - target) - np.square(probability - target))))
                 if min(gains) >= -self.contract.gates.maximum_fold_regression:
                     non_worse += 1
             for fold in self.contract.folds:
@@ -490,9 +563,12 @@ class ProductionS4Runtime:
                 for seed in seeds[1:]:
                     if reference["row_id"].astype(str).tolist() != seed_frames[seed][fold]["row_id"].astype(str).tolist():
                         raise S4ProductionError("confirmation seed row alignment differs")
-                reference["p_chain"] = np.mean([seed_frames[seed][fold]["p_chain"].to_numpy(dtype="float64") for seed in seeds], axis=0)
+                reference["raw_correction"] = np.mean(
+                    [seed_frames[seed][fold]["raw_correction"].to_numpy(dtype="float64") for seed in seeds],
+                    axis=0,
+                )
                 averaged[fold] = reference
-            calibrated = self._calibrate(index, averaged)
+            calibrated = self._calibrate(index, averaged, alpha=alpha, beta=beta)
             evidence = evaluate_full_chain(self._archetypes()[index].candidate_id, calibrated, confirmed=True, non_worse_seed_count=non_worse)
             decision = decide_submission_eligibility(evidence)
             _atomic_json(self.root / "decisions" / f"acceptance_c{index:02d}.json", decision_payload(decision))
