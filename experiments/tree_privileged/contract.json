@@ -1,0 +1,57 @@
+{
+  "schema_version": 1,
+  "campaign_id": "tree_privileged_profile_v1",
+  "review_only": true,
+  "submission_package": false,
+  "inputs": {
+    "official_train_sha256": "d2081186b458b49f60b082be480c273135833e15ba59a76d033af28bcf8763ff",
+    "official_history_sha256": "f7818f9ee0ccefe7c2cf69fa99efe6e5cb882d8b886dd96d2394bcf3b53f33a9",
+    "e2_handoff_sha256": "4dd0c9012b9a59e5235b76d6fe1f6ded4df4b404cab0082c0f3084b8c384050f"
+  },
+  "folds": [[2021, 2022], [2022, 2023], [2023, 2024]],
+  "candidates": ["P", "D15", "D35", "PD15", "PD35"],
+  "screen_seed": 3407,
+  "confirm_seeds": [42, 2026],
+  "teacher": {
+    "folds": 5,
+    "lambdas": ["0.15", "0.35"],
+    "minimum_total_coverage": "0.30",
+    "minimum_latest_coverage": "0.20"
+  },
+  "profiles": {
+    "identity_strengths": [25, 75, 200],
+    "interaction_strengths": [50, 150, 400],
+    "matchup_strengths": [100, 300, 800],
+    "minimum_rows": {"identity": 20, "interaction": 50, "matchup": 100}
+  },
+  "rf_alphas": ["0.35", "0.60", "0.80", "1.00"],
+  "catboost": {
+    "iterations": 1200,
+    "depth": 8,
+    "learning_rate": "0.04",
+    "l2_leaf_reg": "5.0",
+    "random_strength": "0.5",
+    "bagging_temperature": "0.5",
+    "border_count": 128,
+    "max_ctr_complexity": 2,
+    "od_wait": 60
+  },
+  "gates": {
+    "weighted_gain": "0.00005",
+    "latest_min_gain": "-0.00002",
+    "maximum_segment_regression": "0.00050",
+    "minimum_improved_folds": 2,
+    "minimum_non_worse_seeds": 2,
+    "maximum_screen_correlation": "0.998",
+    "ensemble_incremental_gain": "0.00002",
+    "probability_tolerance": "0.000001"
+  },
+  "runtime": {
+    "wall_seconds": 37800,
+    "new_job_guard_seconds": 7200,
+    "artifact_reserve_seconds": 4500,
+    "snapshot_interval_seconds": 600,
+    "maximum_confirmed_candidates": 2,
+    "gpu_count": 2
+  }
+}
