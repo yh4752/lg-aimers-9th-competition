@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import pandas as pd
+from types import SimpleNamespace
 
 from experiments.temporal_portfolio.lupi_matching import EntityMaps
+import experiments.tree_privileged.matching as matching_module
 from experiments.tree_privileged.matching import MATCH_COLUMNS, match_training_pitches
 
 
@@ -32,6 +34,28 @@ def _history(duplicate_regular: bool = False) -> pd.DataFrame:
 
 def _maps() -> EntityMaps:
     return EntityMaps.from_mappings(pitchers={11: 111}, batters={21: 211})
+
+
+def test_entity_maps_use_the_mapping_contract_that_retains_trackman_ids(monkeypatch) -> None:
+    pitcher_mapping = pd.DataFrame({
+        "pitcher_id": [11, 12], "pitcher_trackman_id": [111, 112],
+        "tm_match_accepted": [1, 0],
+    })
+    batter_mapping = pd.DataFrame({
+        "batter_id": [21, 22], "batter_trackman_id": [211, 212],
+        "tm_batter_match_accepted": [1, 0],
+    })
+    monkeypatch.setattr(
+        matching_module, "build_pitcher_mapping",
+        lambda *_args, **_kwargs: (pitcher_mapping, pd.DataFrame()), raising=False,
+    )
+    monkeypatch.setattr(
+        matching_module, "fit_batter_trackman",
+        lambda *_args, **_kwargs: SimpleNamespace(mapping=batter_mapping),
+    )
+    maps = matching_module._fit_maps(pd.DataFrame(), pd.DataFrame(), 2021)
+    assert dict(maps.pitchers) == {11: 111}
+    assert dict(maps.batters) == {21: 211}
 
 
 def test_same_franchise_regular_and_futures_games_do_not_share_team_code() -> None:

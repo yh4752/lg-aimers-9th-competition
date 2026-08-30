@@ -8,9 +8,9 @@ from typing import Iterator, Mapping
 import numpy as np
 import pandas as pd
 
+from experiments.independent_dl.feature_sources.trackman import build_pitcher_mapping
 from experiments.temporal_portfolio.lupi_matching import EntityMaps
 from experiments.temporal_portfolio.trackman_batter import fit_batter_trackman
-from experiments.temporal_portfolio.trackman_pitcher import fit_pitcher_trackman
 
 
 class PrivilegedMatchingError(ValueError):
@@ -122,7 +122,7 @@ def _canonical_history(frame: pd.DataFrame, cutoff_year: int) -> pd.DataFrame:
 
 
 def _fit_maps(main: pd.DataFrame, history: pd.DataFrame, cutoff_year: int) -> EntityMaps:
-    pitcher = fit_pitcher_trackman(main, history, cutoff_year=cutoff_year).lookup
+    pitcher, _ = build_pitcher_mapping(main, history, cutoff_year)
     batter = fit_batter_trackman(main, history, cutoff_year=cutoff_year).mapping
     pitcher = pitcher.loc[pitcher["tm_match_accepted"].eq(1), ["pitcher_id", "pitcher_trackman_id"]]
     batter = batter.loc[batter["tm_batter_match_accepted"].eq(1), ["batter_id", "batter_trackman_id"]]
