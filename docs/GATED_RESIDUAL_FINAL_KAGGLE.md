@@ -29,7 +29,7 @@ Stage A, Stage B, E2 파일을 따로 추가하지 않는다. 세 파일은 최�
 ## 실행 설정
 
 - Accelerator: `GPU T4 x2`
-- Internet: `Off` 권장
+- Internet: `On` (`catboost==1.2.10` 설치용이며 외부 데이터는 받지 않음)
 - 셀: `experiments/gated_residual_final/KAGGLE_CELL.py` 전체를 한 셀에 복사
 - 실행: `Save Version` 한 번
 
