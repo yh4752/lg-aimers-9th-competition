@@ -6,6 +6,7 @@ import time
 
 import pandas as pd
 
+import experiments.tree_privileged.runner as runner_module
 from experiments.tree_expert.inputs import PREDICTION_COLUMNS, VerifiedOfficialData
 from experiments.tree_privileged.profiles import ProfileStrengths
 from experiments.tree_privileged.runner import _run_jobs
@@ -66,3 +67,30 @@ def test_scheduler_starts_nothing_inside_two_hour_guard(tmp_path: Path) -> None:
         log=tmp_path / "log", clock=lambda: now, launcher=_launcher,
     )
     assert paused is True and results == {}
+
+
+def test_p_only_grid_does_not_require_teacher_evidence() -> None:
+    assert runner_module._requires_teacher(("P",)) is False
+    assert runner_module._requires_teacher(("P", "D15")) is True
+
+
+def test_scheduler_uses_spawn_context(monkeypatch, tmp_path: Path) -> None:
+    captured: dict[str, str | None] = {}
+    real_executor = runner_module.ProcessPoolExecutor
+
+    def recording_executor(*args, **kwargs):
+        context = kwargs.get("mp_context")
+        captured["start_method"] = None if context is None else context.get_start_method()
+        return real_executor(*args, **kwargs)
+
+    monkeypatch.setattr(runner_module, "ProcessPoolExecutor", recording_executor)
+    data, baseline = _inputs(tmp_path)
+    results, paused = _run_jobs(
+        [PrivilegedJob("p", "P", 2021, 2022, 3407)], data=data,
+        baseline_root=baseline, teacher_root=tmp_path / "teacher",
+        strengths=ProfileStrengths(25, 50, 100), jobs_root=tmp_path / "jobs",
+        deadline=time.time() + 10_000, gpu_ids=(0, 1), log=tmp_path / "log",
+        launcher=_launcher,
+    )
+    assert paused is False and results["p"].status == "completed"
+    assert captured["start_method"] == "spawn"

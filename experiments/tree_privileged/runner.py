@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from hashlib import sha256
 import io
 import json
+import multiprocessing as mp
 import os
 from pathlib import Path, PurePosixPath
 import shutil
@@ -111,11 +112,15 @@ def _worker(
     deadline: float,
     gpu_id: int,
 ) -> CandidateJobResult:
-    evidence = load_teacher_evidence(teacher_cache)
+    evidence = load_teacher_evidence(teacher_cache) if _requires_teacher((job.candidate_id,)) else None
     baseline = pd.read_csv(baseline_path)
     return run_candidate_job(job=job, data=data, baseline=baseline, output_dir=output_dir,
                              absolute_deadline=deadline, gpu_id=gpu_id, teacher_evidence=evidence,
                              strengths=strengths)
+
+
+def _requires_teacher(candidates: Sequence[str]) -> bool:
+    return any(candidate != "P" for candidate in candidates)
 
 
 def _reuse(job: PrivilegedJob, output: Path) -> CandidateJobResult | None:
@@ -147,7 +152,9 @@ def _run_jobs(
             results[job.job_id] = reused; _log(log, "TREE_PRIV_JOB_REUSED", job=job.job_id, status=reused.status)
         else: pending.append(job)
     paused = False
-    with ProcessPoolExecutor(max_workers=len(gpu_ids)) as pool:
+    with ProcessPoolExecutor(
+        max_workers=len(gpu_ids), mp_context=mp.get_context("spawn"),
+    ) as pool:
         active = {}; cursor = 0
         while pending or active:
             while pending and len(active) < len(gpu_ids):
@@ -277,15 +284,17 @@ def run_campaign(
         selection = select_strengths(all_rows, load_contract().folds); strengths = selection.selected
         _atomic_json(strength_path, {"selected": {"identity": strengths.identity, "interaction": strengths.interaction,
                                                    "matchup": strengths.matchup}, "scores": dict(selection.scores)})
-    teacher_root = root / "cache/teacher"; teacher_root.mkdir(exist_ok=True)
-    for fold in load_contract().folds:
-        if clock() >= deadline - load_contract().runtime.new_job_guard_seconds: break
-        _teacher_cache(all_rows, history, fold, teacher_root, log)
-    if any(not (teacher_root / str(fold[1]) / "metadata.json").is_file() for fold in load_contract().folds):
-        _atomic_json(root / "campaign_state.json", {"status": "paused", "phase": "teacher", "bindings": bindings,
-                                                     "completed_jobs": []})
-        bundles = _bundle(root, "paused", bindings, log)
-        return CampaignRunResult("paused", "teacher", (), bundles, ())
+    teacher_root = root / "cache/teacher"
+    if _requires_teacher(load_contract().candidates):
+        teacher_root.mkdir(exist_ok=True)
+        for fold in load_contract().folds:
+            if clock() >= deadline - load_contract().runtime.new_job_guard_seconds: break
+            _teacher_cache(all_rows, history, fold, teacher_root, log)
+        if any(not (teacher_root / str(fold[1]) / "metadata.json").is_file() for fold in load_contract().folds):
+            _atomic_json(root / "campaign_state.json", {"status": "paused", "phase": "teacher", "bindings": bindings,
+                                                         "completed_jobs": []})
+            bundles = _bundle(root, "paused", bindings, log)
+            return CampaignRunResult("paused", "teacher", (), bundles, ())
     baseline_root = verified.experiment.e2_oof_root
     screen_jobs = [_job(candidate, fold, load_contract().screen_seed) for candidate in load_contract().candidates for fold in load_contract().folds]
     screen_results, paused = _run_jobs(screen_jobs, data=verified.official, baseline_root=baseline_root,
