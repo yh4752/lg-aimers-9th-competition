@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import Counter
 from hashlib import sha256
 import json
 import math
@@ -209,3 +210,211 @@ def file_sha256(path: Path) -> str:
         while chunk := source.read(1024 * 1024):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _sorted_counts(values: list[str]) -> dict[str, int]:
+    return dict(sorted(Counter(values).items()))
+
+
+def audit_registry(payload: Mapping[str, object]) -> dict[str, object]:
+    validate_registry(payload)
+    experiments = payload["experiments"]
+    gaps = payload["evidence_gaps"]
+    assert isinstance(experiments, list)
+    assert isinstance(gaps, list)
+
+    groups: dict[str, list[dict[str, object]]] = {}
+    for raw in experiments:
+        assert isinstance(raw, dict)
+        group = str(raw["comparison_group"])
+        groups.setdefault(group, []).append({
+            "experiment_id": raw["experiment_id"],
+            "completed_at": raw["completed_at"],
+            "status": raw["status"],
+            "baseline_id": raw["baseline_id"],
+            "baseline_brier": raw["baseline_brier"],
+            "candidate_brier": raw["candidate_brier"],
+            "weighted_gain": raw["weighted_gain"],
+            "worst_fold_gain": raw["worst_fold_gain"],
+            "latest_fold_gain": raw["latest_fold_gain"],
+            "residual_correlation": raw["residual_correlation"],
+            "evidence_grade": raw["evidence_grade"],
+        })
+    ordered_groups = {
+        name: sorted(rows, key=lambda item: (str(item["completed_at"]), str(item["experiment_id"])))
+        for name, rows in sorted(groups.items())
+    }
+
+    public_scores = sorted(
+        (
+            {
+                "experiment_id": raw["experiment_id"],
+                "completed_at": raw["completed_at"],
+                "public_score": raw["public_score"],
+                "evidence_grade": raw["evidence_grade"],
+                "rule_audit_status": raw["rule_audit_status"],
+            }
+            for raw in experiments
+            if raw["public_score"] is not None
+        ),
+        key=lambda item: (str(item["completed_at"]), str(item["experiment_id"])),
+    )
+    failure_values = [
+        str(raw["failure_class"])
+        for raw in experiments
+        if raw["failure_class"] != "none"
+    ]
+    return {
+        "experiment_count": len(experiments),
+        "status_counts": _sorted_counts([str(raw["status"]) for raw in experiments]),
+        "evidence_grade_counts": _sorted_counts([
+            str(raw["evidence_grade"]) for raw in experiments
+        ]),
+        "failure_classes": _sorted_counts(failure_values),
+        "comparison_groups": ordered_groups,
+        "public_scores": public_scores,
+        "evidence_gap_count": len(gaps),
+        "evidence_gaps": sorted(gaps, key=lambda item: str(item["experiment_id"])),
+        "closed_families": sorted({
+            str(raw["family"]) for raw in experiments if raw["repeat_policy"] == "closed"
+        }),
+        "redefine_families": sorted({
+            str(raw["family"]) for raw in experiments if raw["repeat_policy"] == "redefine"
+        }),
+        "retained_experiments": sorted({
+            str(raw["experiment_id"]) for raw in experiments if raw["repeat_policy"] == "retain"
+        }),
+    }
+
+
+def _metric(value: object) -> str:
+    if value is None:
+        return "—"
+    if type(value) is float:
+        return f"{value:.12g}"
+    return str(value)
+
+
+def render_audit_markdown(audit: Mapping[str, object]) -> str:
+    public_scores = audit["public_scores"]
+    comparison_groups = audit["comparison_groups"]
+    failure_classes = audit["failure_classes"]
+    evidence_gaps = audit["evidence_gaps"]
+    assert isinstance(public_scores, list)
+    assert isinstance(comparison_groups, dict)
+    assert isinstance(failure_classes, dict)
+    assert isinstance(evidence_gaps, list)
+
+    lines = [
+        "# 실험 증거 재감사",
+        "",
+        "## 결론",
+        "",
+        f"확인된 실험은 **{audit['experiment_count']}건**, 원본 결과가 없어 보류한 실행은 "
+        f"**{audit['evidence_gap_count']}건**이다. 서로 다른 `comparison_group`의 Brier를 "
+        "한 순위로 합치지 않았으며, 실행 실패와 성능 기각도 분리했다.",
+        "",
+        "현재 최고 규칙 준수 Public 결과는 Tree Expert E2다. E2 이후 후보는 일부 양의 "
+        "OOF 신호를 보였지만 최소 개선량, 시즌 안정성, 배포 정렬 또는 오차 다양성 중 "
+        "하나 이상을 통과하지 못했다.",
+        "",
+        "## 실제 Public 제출",
+        "",
+        "| 실험 | Public | 증거 | 규칙 상태 |",
+        "|---|---:|---|---|",
+    ]
+    if public_scores:
+        for item in public_scores:
+            lines.append(
+                f"| `{item['experiment_id']}` | `{_metric(item['public_score'])}` | "
+                f"{item['evidence_grade']} | {item['rule_audit_status']} |"
+            )
+    else:
+        lines.append("| 확인된 제출 없음 | — | — | — |")
+
+    lines.extend([
+        "",
+        "Public 점수는 OOF Brier와 다른 척도이며, 이 다섯 점으로 점수 환산식이나 "
+        "사후 가중치를 맞추지 않는다.",
+        "",
+        "## 비교 가능한 OOF 그룹",
+        "",
+        "아래 표는 그룹 내부 결과만 비교하기 위한 것이다. 그룹 사이의 Brier 크기는 "
+        "학습 행과 fold가 다를 수 있어 직접 순위를 의미하지 않는다.",
+        "",
+    ])
+    for group, rows in comparison_groups.items():
+        lines.extend([
+            f"### `comparison_group={group}`",
+            "",
+            "| 실험 | 상태 | Brier | weighted gain | worst fold | latest fold | residual corr | 증거 |",
+            "|---|---|---:|---:|---:|---:|---:|---|",
+        ])
+        for item in rows:
+            lines.append(
+                f"| `{item['experiment_id']}` | {item['status']} | "
+                f"{_metric(item['candidate_brier'])} | {_metric(item['weighted_gain'])} | "
+                f"{_metric(item['worst_fold_gain'])} | {_metric(item['latest_fold_gain'])} | "
+                f"{_metric(item['residual_correlation'])} | {item['evidence_grade']} |"
+            )
+        lines.append("")
+
+    lines.extend([
+        "## 반복 기각 원인",
+        "",
+        "| 원인 | 건수 |",
+        "|---|---:|",
+    ])
+    if failure_classes:
+        for name, count in failure_classes.items():
+            lines.append(f"| `{name}` | {count} |")
+    else:
+        lines.append("| 확인된 실패 원인 없음 | 0 |")
+
+    lines.extend([
+        "",
+        "## 증거가 부족한 실행",
+        "",
+        "이 항목은 결과를 추정하지 않는다. 원본 review 또는 handoff를 다시 확보한 뒤 "
+        "검증 장부에 추가한다.",
+        "",
+        "| 실험 | 부족한 증거 | 사유 |",
+        "|---|---|---|",
+    ])
+    if evidence_gaps:
+        for item in evidence_gaps:
+            lines.append(
+                f"| `{item['experiment_id']}` | {item['required_evidence']} | {item['reason']} |"
+            )
+    else:
+        lines.append("| 없음 | — | — |")
+
+    closed = ", ".join(f"`{item}`" for item in audit["closed_families"]) or "없음"
+    redefine = ", ".join(f"`{item}`" for item in audit["redefine_families"]) or "없음"
+    retained = ", ".join(f"`{item}`" for item in audit["retained_experiments"]) or "없음"
+    lines.extend([
+        "",
+        "## 닫을 계열과 다시 정의할 계열",
+        "",
+        f"- 현재 정의를 반복하지 않을 계열: {closed}",
+        f"- 입력이나 구조를 바꿔 다시 정의할 계열: {redefine}",
+        f"- 다음 비교의 기준으로 유지할 실험: {retained}",
+        "",
+        "## 다음 단일 캠페인",
+        "",
+        "다음은 작은 확률 보정이나 단일 feature 추가가 아니라 **구조적으로 깊은 캠페인**으로 "
+        "설계한다. 여기서 깊다는 말은 트리 depth만 크게 만든다는 뜻이 아니다.",
+        "",
+        "1. 학습 데이터에서 cutoff를 지켜 만든 시즌별 선수·상황 snapshot과 시간 감쇠 anchor",
+        "2. 정규 시즌 `R`과 `F`를 나누는 전문가",
+        "3. 공식 학습 데이터로 안정적으로 정의되는 상황 전문가",
+        "4. 충분한 용량의 CatBoost 다중 seed",
+        "5. E2와 실제 오차 다양성이 확인될 때만 추가하는 XGBoost·LightGBM residual",
+        "6. 구조 fold에서 강도를 고정한 residual correction과 마지막 계층 calibration",
+        "",
+        "이 구성은 탐색 깊이를 높이기 위한 것이며 점수를 보장하지 않는다. 먼저 저비용 "
+        "적격성 검사로 입력 신호와 2023 fold 병목을 확인하고, 통과한 구조에만 Kaggle "
+        "T4 x2 장시간 예산을 배정한다.",
+        "",
+    ])
+    return "\n".join(lines)

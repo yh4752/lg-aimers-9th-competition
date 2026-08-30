@@ -4,7 +4,13 @@ from pathlib import Path
 
 import pytest
 
-from experiments.experiment_registry import RegistryError, load_registry, validate_registry
+from experiments.experiment_registry import (
+    RegistryError,
+    audit_registry,
+    load_registry,
+    render_audit_markdown,
+    validate_registry,
+)
 
 
 def record(**changes: object) -> dict[str, object]:
@@ -111,3 +117,35 @@ def test_repository_registry_is_valid_and_contains_known_public_scores() -> None
         0.00002026775135556824
     )
     assert experiments["tree_privileged_profile_p_only_v1"]["status"] == "rejected"
+
+
+def test_audit_never_ranks_different_comparison_groups_together() -> None:
+    payload = registry(
+        record(experiment_id="a", comparison_group="group_a", candidate_brier=0.20),
+        record(experiment_id="b", comparison_group="group_b", candidate_brier=0.10),
+    )
+    audit = audit_registry(payload)
+    assert set(audit["comparison_groups"]) == {"group_a", "group_b"}
+    assert "global_brier_ranking" not in audit
+
+
+def test_audit_counts_rejection_classes_and_evidence_gaps() -> None:
+    payload = registry(
+        record(experiment_id="a", failure_class="performance"),
+        record(experiment_id="b", failure_class="diversity"),
+    )
+    payload["evidence_gaps"] = [{
+        "experiment_id": "missing",
+        "reason": "not available",
+        "required_evidence": "review bundle",
+    }]
+    audit = audit_registry(payload)
+    assert audit["failure_classes"] == {"diversity": 1, "performance": 1}
+    assert audit["evidence_gap_count"] == 1
+
+
+def test_rendered_audit_explains_deep_campaign_without_promising_score() -> None:
+    markdown = render_audit_markdown(audit_registry(registry(record())))
+    assert "구조적으로 깊은 캠페인" in markdown
+    assert "점수를 보장" in markdown
+    assert "comparison_group" in markdown
