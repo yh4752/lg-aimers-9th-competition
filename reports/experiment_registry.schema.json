@@ -1,0 +1,87 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://local.invalid/lg-aimers/experiment-registry.schema.json",
+  "title": "LG Aimers experiment evidence registry",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "experiments", "evidence_gaps"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "experiments": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/experiment"}
+    },
+    "evidence_gaps": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/evidence_gap"}
+    }
+  },
+  "$defs": {
+    "nullable_number": {"type": ["number", "null"]},
+    "nullable_string": {"type": ["string", "null"]},
+    "string_array": {"type": "array", "items": {"type": "string", "minLength": 1}},
+    "experiment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "experiment_id", "family", "variant", "completed_at", "status",
+        "status_reason", "evidence_grade", "comparison_group", "folds",
+        "validation_rows", "baseline_id", "baseline_brier", "candidate_brier",
+        "weighted_gain", "worst_fold_gain", "latest_fold_gain",
+        "max_segment_regression", "residual_correlation", "seed_stability",
+        "public_score", "submission_sha256", "artifact_paths", "artifact_sha256",
+        "evidence_paths", "rule_audit_status", "row_independence_status",
+        "failure_class", "lesson", "repeat_policy"
+      ],
+      "properties": {
+        "experiment_id": {"type": "string", "minLength": 1},
+        "family": {"type": "string", "minLength": 1},
+        "variant": {"type": "string", "minLength": 1},
+        "completed_at": {"type": "string", "minLength": 1},
+        "status": {"enum": ["failed", "rejected", "accepted", "public_scored", "diagnostic"]},
+        "status_reason": {"type": "string", "minLength": 1},
+        "evidence_grade": {"enum": ["A", "B", "C"]},
+        "comparison_group": {"type": "string", "minLength": 1},
+        "folds": {"$ref": "#/$defs/string_array"},
+        "validation_rows": {"type": ["integer", "null"], "minimum": 0},
+        "baseline_id": {"$ref": "#/$defs/nullable_string"},
+        "baseline_brier": {"type": ["number", "null"], "minimum": 0, "maximum": 1},
+        "candidate_brier": {"type": ["number", "null"], "minimum": 0, "maximum": 1},
+        "weighted_gain": {"$ref": "#/$defs/nullable_number"},
+        "worst_fold_gain": {"$ref": "#/$defs/nullable_number"},
+        "latest_fold_gain": {"$ref": "#/$defs/nullable_number"},
+        "max_segment_regression": {"$ref": "#/$defs/nullable_number"},
+        "residual_correlation": {"type": ["number", "null"], "minimum": -1, "maximum": 1},
+        "seed_stability": {"type": "string", "minLength": 1},
+        "public_score": {"$ref": "#/$defs/nullable_number"},
+        "submission_sha256": {
+          "type": ["string", "null"],
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "artifact_paths": {"$ref": "#/$defs/string_array"},
+        "artifact_sha256": {
+          "type": "array",
+          "items": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+        },
+        "evidence_paths": {"$ref": "#/$defs/string_array"},
+        "rule_audit_status": {"enum": ["passed", "failed", "not_run", "quarantined", "unknown"]},
+        "row_independence_status": {"enum": ["passed", "failed", "not_run", "quarantined", "unknown"]},
+        "failure_class": {
+          "enum": ["none", "performance", "instability", "diversity", "deployment_alignment", "data_eligibility", "runtime", "rule_quarantine", "evidence_missing"]
+        },
+        "lesson": {"type": "string", "minLength": 1},
+        "repeat_policy": {"enum": ["closed", "redefine", "retain", "blocked", "reference_only"]}
+      }
+    },
+    "evidence_gap": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["experiment_id", "reason", "required_evidence"],
+      "properties": {
+        "experiment_id": {"type": "string", "minLength": 1},
+        "reason": {"type": "string", "minLength": 1},
+        "required_evidence": {"type": "string", "minLength": 1}
+      }
+    }
+  }
+}
