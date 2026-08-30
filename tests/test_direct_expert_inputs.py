@@ -64,6 +64,22 @@ def test_expanded_kaggle_directory_ignores_unreferenced_dataset_metadata(tmp_pat
     assert verified.e2_oof_years == (2021, 2022, 2023, 2024)
 
 
+def test_expanded_kaggle_directory_rebuilds_nested_submission_zip(tmp_path: Path) -> None:
+    prepared, _, e2_digest = _prepared(tmp_path)
+    expanded = tmp_path / "expanded"
+    with ZipFile(prepared) as archive:
+        archive.extractall(expanded)
+    nested_zip = expanded / "e2_submission/catboost_3seed_v1.zip"
+    nested_directory = nested_zip.with_suffix("")
+    with ZipFile(nested_zip) as archive:
+        archive.extractall(nested_directory)
+    nested_zip.unlink()
+
+    verified = verify_and_extract_input(expanded, tmp_path / "verified")
+
+    assert verified.e2_submission_sha256 == e2_digest
+
+
 def test_tampered_e2_oof_is_rejected(tmp_path: Path) -> None:
     prepared, _, _ = _prepared(tmp_path)
     changed = rewrite_member(

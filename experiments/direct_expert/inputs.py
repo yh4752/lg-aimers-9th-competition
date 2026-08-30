@@ -47,6 +47,7 @@ _E2_MEMBERS = {
     "model/models/catboost_seed_2026.cbm",
     "model/models/catboost_seed_3407.cbm",
 }
+_E2_SUBMISSION_MEMBER = "e2_submission/catboost_3seed_v1.zip"
 _OOF_COLUMNS = (
     "row_id",
     "game_type",
@@ -401,13 +402,53 @@ def prepare_direct_expert_input(
     return destination
 
 
-def _directory_payloads(source: Path) -> dict[str, Path]:
+def _submission_zip_info(name: str) -> ZipInfo:
+    info = ZipInfo(name, (1980, 1, 1, 0, 0, 0))
+    info.compress_type = ZIP_DEFLATED
+    info.external_attr = (stat.S_IFREG | 0o644) << 16
+    return info
+
+
+def _rebuild_expanded_e2_submission(source: Path, destination: Path) -> Path:
+    candidates = (source.with_suffix(""), source.parent)
+    roots = []
+    for candidate in candidates:
+        if candidate.is_symlink() or not candidate.is_dir():
+            continue
+        root = candidate.resolve()
+        if all(
+            not (candidate / name).is_symlink()
+            and (candidate / name).is_file()
+            and (candidate / name).resolve().is_relative_to(root)
+            for name in _E2_MEMBERS
+        ):
+            roots.append(candidate)
+    if len(roots) != 1:
+        raise DirectExpertInputError("expanded E2 submission directory differs")
+    root = roots[0]
+    ordered = (
+        "script.py",
+        "requirements.txt",
+        *sorted(_E2_MEMBERS - {"script.py", "requirements.txt"}),
+    )
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    with ZipFile(destination, "x") as archive:
+        for name in ordered:
+            archive.writestr(_submission_zip_info(name), (root / name).read_bytes())
+    return destination
+
+
+def _directory_payloads(source: Path, materialized_root: Path) -> dict[str, Path]:
     if source.is_symlink() or not source.is_dir():
         raise DirectExpertInputError("input directory differs")
     root = source.resolve()
     output: dict[str, Path] = {}
     for name in sorted(INPUT_MEMBERS):
         path = source / name
+        if name == _E2_SUBMISSION_MEMBER and not path.is_file():
+            path = _rebuild_expanded_e2_submission(path, materialized_root / name)
+            output[name] = path
+            continue
         resolved = path.resolve()
         if path.is_symlink() or not path.is_file() or not resolved.is_relative_to(root):
             raise DirectExpertInputError(f"input member is absent: {name}")
@@ -441,9 +482,11 @@ def verify_and_extract_input(source: Path, destination: Path) -> VerifiedDirectE
     output.mkdir(parents=True)
     try:
         if source.is_dir():
-            originals = _directory_payloads(source)
+            originals = _directory_payloads(source, output)
             for name, path in originals.items():
                 target = output / name
+                if path == target:
+                    continue
                 target.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copyfile(path, target)
             payloads = {name: output / name for name in INPUT_MEMBERS}

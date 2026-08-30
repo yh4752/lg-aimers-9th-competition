@@ -25,17 +25,22 @@ def _json(value: object) -> bytes:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()
 
 
-def _info(name: str) -> ZipInfo:
-    info = ZipInfo(name, _TIME)
+def _info(name: str, timestamp: tuple[int, int, int, int, int, int] = _TIME) -> ZipInfo:
+    info = ZipInfo(name, timestamp)
     info.compress_type = ZIP_DEFLATED
     info.external_attr = 0o100644 << 16
     return info
 
 
-def _archive(path: Path, members: dict[str, bytes]) -> Path:
+def _archive(
+    path: Path,
+    members: dict[str, bytes],
+    *,
+    timestamp: tuple[int, int, int, int, int, int] = _TIME,
+) -> Path:
     with ZipFile(path, "w") as archive:
         for name, payload in sorted(members.items()):
-            archive.writestr(_info(name), payload)
+            archive.writestr(_info(name, timestamp), payload)
     return path
 
 
@@ -104,7 +109,15 @@ def make_e2_submission(root: Path) -> tuple[Path, Path]:
         "model/models/catboost_seed_2026.cbm": b"seed2026",
         "model/models/catboost_seed_3407.cbm": b"seed3407",
     }
-    archive = _archive(root / "e2.zip", members)
+    archive = root / "e2.zip"
+    ordered = (
+        "script.py",
+        "requirements.txt",
+        *sorted(set(members) - {"script.py", "requirements.txt"}),
+    )
+    with ZipFile(archive, "w") as output:
+        for name in ordered:
+            output.writestr(_info(name, (1980, 1, 1, 0, 0, 0)), members[name])
     digest = sha256(archive.read_bytes()).hexdigest()
     receipt = root / "submission_receipt.json"
     receipt.write_bytes(
