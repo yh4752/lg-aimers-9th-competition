@@ -404,14 +404,14 @@ def prepare_direct_expert_input(
 def _directory_payloads(source: Path) -> dict[str, Path]:
     if source.is_symlink() or not source.is_dir():
         raise DirectExpertInputError("input directory differs")
+    root = source.resolve()
     output: dict[str, Path] = {}
-    for path in sorted(source.rglob("*")):
-        if path.is_symlink():
-            raise DirectExpertInputError("input directory contains a symlink")
-        if path.is_file():
-            output[path.relative_to(source).as_posix()] = path
-    if set(output) != INPUT_MEMBERS:
-        raise DirectExpertInputError("input member set differs")
+    for name in sorted(INPUT_MEMBERS):
+        path = source / name
+        resolved = path.resolve()
+        if path.is_symlink() or not path.is_file() or not resolved.is_relative_to(root):
+            raise DirectExpertInputError(f"input member is absent: {name}")
+        output[name] = path
     return output
 
 

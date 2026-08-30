@@ -52,6 +52,18 @@ def test_expanded_kaggle_directory_matches_zip(tmp_path: Path) -> None:
     assert left.manifest_sha256 == right.manifest_sha256
 
 
+def test_expanded_kaggle_directory_ignores_unreferenced_dataset_metadata(tmp_path: Path) -> None:
+    prepared, _, _ = _prepared(tmp_path)
+    expanded = tmp_path / "expanded"
+    with ZipFile(prepared) as archive:
+        archive.extractall(expanded)
+    (expanded / "dataset-metadata.json").write_text("{}")
+
+    verified = verify_and_extract_input(expanded, tmp_path / "verified")
+
+    assert verified.e2_oof_years == (2021, 2022, 2023, 2024)
+
+
 def test_tampered_e2_oof_is_rejected(tmp_path: Path) -> None:
     prepared, _, _ = _prepared(tmp_path)
     changed = rewrite_member(
