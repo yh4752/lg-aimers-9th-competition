@@ -6,6 +6,7 @@ import pytest
 
 from experiments.direct_expert.features import (
     DirectFeatureError,
+    feature_profile,
     fit_direct_features,
     transform_direct_features,
 )
@@ -69,6 +70,10 @@ def test_high_ctr_profile_adds_registered_interactions(
     assert required.issubset(batch.frame.columns)
     assert required.issubset(state.high_ctr_columns)
     assert required.issubset(state.categorical_columns)
+    standard, _ = feature_profile(batch.frame, state.categorical_columns, "standard")
+    high_ctr, _ = feature_profile(batch.frame, state.categorical_columns, "high_ctr")
+    assert required.isdisjoint(standard)
+    assert required.issubset(high_ctr)
 
 
 def test_unavailable_batter_trackman_is_explicit(

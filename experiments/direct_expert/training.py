@@ -11,7 +11,7 @@ import numpy as np
 import pandas as pd
 
 from .contracts import DirectExpertContract, ExpertJob, ExpertSpec, expert_spec
-from .features import DirectFeatureBatch
+from .features import DirectFeatureBatch, feature_profile
 from .inputs import canonical_json
 
 
@@ -145,13 +145,19 @@ def _validate_fold(data: FoldData, job: ExpertJob) -> None:
 
 
 def _identity(job: ExpertJob, data: FoldData, parameters: Mapping[str, object]) -> dict[str, object]:
+    spec = expert_spec(job.expert_id)
+    feature_columns, categorical_columns = feature_profile(
+        data.train.frame,
+        data.categorical_columns,
+        spec.interaction_profile,
+    )
     payload = {
         "schema_version": 1,
         "job": asdict(job),
         "bindings": dict(sorted(data.bindings.items())),
         "parameters": dict(sorted(parameters.items())),
-        "categorical_columns": list(data.categorical_columns),
-        "feature_columns": list(data.train.frame.columns),
+        "categorical_columns": list(categorical_columns),
+        "feature_columns": list(feature_columns),
     }
     payload["identity_sha256"] = sha256(canonical_json(payload)).hexdigest()
     return payload
@@ -218,21 +224,26 @@ def run_fold_job(
     mask = training_mask(spec, data.train) & (weights > 0)
     if not mask.any() or len(np.unique(data.train.target[mask])) < 2:
         raise DirectExpertTrainingError("expert training subset is not binary")
-    categories = [data.train.frame.columns.get_loc(name) for name in data.categorical_columns]
+    feature_columns, categorical_columns = feature_profile(
+        data.train.frame,
+        data.categorical_columns,
+        spec.interaction_profile,
+    )
+    categories = [feature_columns.index(name) for name in categorical_columns]
     factory = model_factory or _default_model_factory
     model = factory(spec.objective, parameters)
     model.fit(
-        data.train.frame.loc[mask],
+        data.train.frame.loc[mask, feature_columns],
         data.train.target[mask],
         sample_weight=weights[mask],
         cat_features=categories,
-        eval_set=(data.valid.frame, data.valid_target),
+        eval_set=(data.valid.frame.loc[:, feature_columns], data.valid_target),
         use_best_model=True,
     )
     if spec.objective == "Logloss":
-        raw = np.asarray(model.predict_proba(data.valid.frame), dtype="float64")[:, 1]
+        raw = np.asarray(model.predict_proba(data.valid.frame.loc[:, feature_columns]), dtype="float64")[:, 1]
     else:
-        raw = np.asarray(model.predict(data.valid.frame), dtype="float64")
+        raw = np.asarray(model.predict(data.valid.frame.loc[:, feature_columns]), dtype="float64")
     probability = np.clip(raw, 1e-6, 1 - 1e-6)
     if probability.shape != data.valid_target.shape or not np.isfinite(probability).all():
         raise DirectExpertTrainingError("validation probability differs")

@@ -65,6 +65,23 @@ class DirectFeatureBatch:
     game_type: np.ndarray
 
 
+def feature_profile(
+    frame: pd.DataFrame,
+    categorical_columns: tuple[str, ...],
+    profile: str,
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    if type(frame) is not pd.DataFrame or profile not in {"standard", "high_ctr"}:
+        raise DirectFeatureError("feature profile differs")
+    if profile == "standard":
+        columns = tuple(name for name in frame.columns if name not in _HIGH_CTR_COLUMNS)
+    else:
+        columns = tuple(frame.columns)
+    categorical = tuple(name for name in categorical_columns if name in columns)
+    if not columns or any(name not in frame for name in categorical):
+        raise DirectFeatureError("feature profile schema differs")
+    return columns, categorical
+
+
 def smoothed_rate(
     count: pd.Series,
     total: pd.Series,

@@ -1,4 +1,5 @@
 from pathlib import Path
+from zipfile import ZipFile
 
 import pytest
 
@@ -30,10 +31,19 @@ def test_discovery_accepts_expanded_input_and_rejects_two_logical_inputs(tmp_pat
     other = tmp_path / "other"
     other.mkdir()
     (other / "manifest.json").write_text(
-        '{"artifact_kind":"direct_expert_input_v1"}', encoding="utf-8"
+        '{"artifact_kind":"direct_expert_input_v1","identity":"other"}', encoding="utf-8"
     )
     with pytest.raises(DirectExpertKaggleError, match="campaign input count must be one"):
         discover_inputs(tmp_path, stage="A")
+
+
+def test_discovery_deduplicates_zip_and_expanded_copy(tmp_path: Path) -> None:
+    root = _root(tmp_path)
+    manifest = (root / "campaign-0/manifest.json").read_bytes()
+    with ZipFile(root / "same.zip", "w") as archive:
+        archive.writestr("manifest.json", manifest)
+    found = discover_inputs(root, stage="A")
+    assert found.campaign_input.exists()
 
 
 class FakeCuda:

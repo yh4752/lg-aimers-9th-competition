@@ -25,6 +25,7 @@ def _batch(game_type: tuple[str, ...], *, target: bool) -> DirectFeatureBatch:
             {
                 "numeric": np.arange(size, dtype="float32"),
                 "category": pd.Series(["a", "b", "a", "b"][:size], dtype=object),
+                "pitcher_batter": pd.Series(["1|2", "3|4", "1|2", "3|4"][:size], dtype=object),
             }
         ),
         row_id=np.asarray([f"r{i}" for i in range(size)]),
@@ -63,6 +64,7 @@ class FakeModel:
 
     def fit(self, x, y, **kwargs) -> None:
         self.fit_rows = len(x)
+        self.fit_columns = tuple(x.columns)
         self.kwargs = kwargs
 
     def predict_proba(self, x) -> np.ndarray:
@@ -101,7 +103,7 @@ def _fold_data() -> FoldData:
                 "pitcher_id": [10, 11],
             }
         ),
-        categorical_columns=("category",),
+        categorical_columns=("category", "pitcher_batter"),
         bindings={name: str(index) * 64 for index, name in enumerate(("contract", "code", "train", "history", "input"), 1)},
     )
 
@@ -142,3 +144,11 @@ def test_parameter_factory_uses_sealed_capacity() -> None:
     assert parameters["max_ctr_complexity"] == 3
     assert parameters["task_type"] == "GPU"
     assert parameters["devices"] == "1"
+
+
+def test_high_ctr_expert_is_not_a_duplicate_of_standard_profile(tmp_path: Path) -> None:
+    factory = FakeFactory()
+    run_fold_job(_job("D0"), _fold_data(), tmp_path / "d0", model_factory=factory)
+    run_fold_job(_job("D7"), _fold_data(), tmp_path / "d7", model_factory=factory)
+    assert "pitcher_batter" not in factory.models[0].fit_columns
+    assert "pitcher_batter" in factory.models[1].fit_columns

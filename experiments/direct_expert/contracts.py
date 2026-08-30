@@ -91,6 +91,7 @@ _RUNTIME_KEYS = {
     "stage_a_wall_seconds",
     "stage_b_wall_seconds",
     "new_job_guard_seconds",
+    "full_fit_guard_seconds",
     "artifact_reserve_seconds",
     "snapshot_interval_seconds",
     "minimum_free_bytes",

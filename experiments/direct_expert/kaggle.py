@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import argparse
 import base64
+from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from hashlib import sha256
+import gzip
 import io
 import json
 from pathlib import Path
@@ -23,11 +25,13 @@ from .contracts import ExpertJob, load_contract
 from .features import fit_direct_features, transform_direct_features
 from .inputs import (
     EXPECTED_E2_SUBMISSION_SHA256,
+    canonical_json,
     file_sha256,
     verify_and_extract_input,
 )
 from .runtime_inventory import code_identity_sha256, runtime_members
 from .stage_a import run_stage_a
+from .stage_b import run_stage_b
 from .training import FoldData, run_fold_job
 
 
@@ -43,43 +47,56 @@ class DiscoveredInputs:
     previous_stage_b_handoff: Path | None = None
 
 
-def _kind(path: Path) -> str | None:
+def _artifact_descriptor(path: Path) -> tuple[str, str] | None:
     try:
         if path.is_dir():
-            payload = json.loads((path / "manifest.json").read_text(encoding="utf-8"))
+            manifest = (path / "manifest.json").read_bytes()
         else:
             with ZipFile(path) as archive:
-                payload = json.loads(archive.read("manifest.json"))
+                manifest = archive.read("manifest.json")
+        payload = json.loads(manifest)
     except (OSError, KeyError, BadZipFile, json.JSONDecodeError):
         return None
-    return payload.get("artifact_kind") if type(payload) is dict else None
+    if type(payload) is not dict or type(payload.get("artifact_kind")) is not str:
+        return None
+    return payload["artifact_kind"], sha256(canonical_json(payload)).hexdigest()
 
 
 def discover_inputs(root: Path, *, stage: str) -> DiscoveredInputs:
     source = Path(root)
     official = []
-    campaigns = []
-    stage_a = []
-    stage_b = []
+    campaigns: dict[str, Path] = {}
+    stage_a: dict[str, Path] = {}
+    stage_b: dict[str, Path] = {}
     for path in sorted(source.rglob("*")):
         if path.is_symlink():
             continue
         if path.is_dir() and (path / "train.csv").is_file() and (path / "trackman_history.csv").is_file():
             official.append(path)
         if (path.is_file() and path.suffix.lower() == ".zip") or (path.is_dir() and (path / "manifest.json").is_file()):
-            kind = _kind(path)
-            if kind == "direct_expert_input_v1": campaigns.append(path)
-            elif kind == "direct_expert_stage_a_handoff_v1": stage_a.append(path)
-            elif kind == "direct_expert_handoff_v1": stage_b.append(path)
+            descriptor = _artifact_descriptor(path)
+            if descriptor is None:
+                continue
+            kind, identity = descriptor
+            if kind == "direct_expert_input_v1": campaigns.setdefault(identity, path)
+            elif kind == "direct_expert_stage_a_handoff_v1": stage_a.setdefault(identity, path)
+            elif kind == "direct_expert_handoff_v1": stage_b.setdefault(identity, path)
     if len(official) != 1:
         raise DirectExpertKaggleError(f"official data count must be one; found={len(official)}")
     if len(campaigns) != 1:
         raise DirectExpertKaggleError(f"campaign input count must be one; found={len(campaigns)}")
     if stage == "A":
-        return DiscoveredInputs(official[0], campaigns[0])
+        if len(stage_a) > 1:
+            raise DirectExpertKaggleError(f"Stage A handoff count must be zero or one; found={len(stage_a)}")
+        return DiscoveredInputs(official[0], next(iter(campaigns.values())), next(iter(stage_a.values())) if stage_a else None)
     if stage != "B" or len(stage_a) != 1 or len(stage_b) > 1:
         raise DirectExpertKaggleError("Stage B handoff counts differ")
-    return DiscoveredInputs(official[0], campaigns[0], stage_a[0], stage_b[0] if stage_b else None)
+    return DiscoveredInputs(
+        official[0],
+        next(iter(campaigns.values())),
+        next(iter(stage_a.values())),
+        next(iter(stage_b.values())) if stage_b else None,
+    )
 
 
 def verify_t4x2(torch_module) -> tuple[str, str]:
@@ -114,7 +131,7 @@ class ProductionStageARuntime:
             history_sha,
             EXPECTED_E2_SUBMISSION_SHA256,
         )
-        self._folds: dict[int, FoldData] = {}
+        self._folds: OrderedDict[int, FoldData] = OrderedDict()
         self._fold_lock = threading.Lock()
 
     def now(self) -> float:
@@ -143,7 +160,15 @@ class ProductionStageARuntime:
                         "input": self.bindings.input_manifest_sha256,
                     }),
                 )
-        return self._folds[valid_year]
+                while len(self._folds) > 2:
+                    self._folds.popitem(last=False)
+            result = self._folds[valid_year]
+            self._folds.move_to_end(valid_year)
+            return result
+
+    def clear_fold_cache(self) -> None:
+        with self._fold_lock:
+            self._folds.clear()
 
     def run_job(self, job: ExpertJob, gpu: int, output: Path):
         print(f"DIRECT_EXPERT_JOB_START candidate={job.job_id} fold={job.fold[0]}_{job.fold[1]} seed={job.seed} gpu={gpu}", flush=True)
@@ -175,16 +200,62 @@ def run_kaggle_stage_a(input_root: Path, work_root: Path) -> Path:
     print("DIRECT_EXPERT_SMOKE_SUCCESS", flush=True)
     runtime = ProductionStageARuntime(found.official_data, found.campaign_input, Path(work_root) / "runtime")
     deadline = time.time() + int(load_contract().runtime["stage_a_wall_seconds"])
-    result = run_stage_a(runtime, Path(work_root) / "campaign", absolute_deadline=deadline)
+    result = run_stage_a(
+        runtime,
+        Path(work_root) / "campaign",
+        absolute_deadline=deadline,
+        previous_handoff=found.stage_a_handoff,
+    )
+    print(f"DIRECT_EXPERT_CAMPAIGN_STATUS stage=A status={result.status}", flush=True)
     print(f"DIRECT_EXPERT_HANDOFF_READY path={result.handoff.resolve()}", flush=True)
     return result.handoff
 
 
+def run_kaggle_stage_b(input_root: Path, work_root: Path):
+    import torch
+    from .stage_b_runtime import ProductionStageBRuntime
+
+    found = discover_inputs(input_root, stage="B")
+    print("DIRECT_EXPERT_INPUTS_VERIFIED", flush=True)
+    names = verify_t4x2(torch)
+    print(f"DIRECT_EXPERT_GPU_READY count=2 names={' | '.join(names)}", flush=True)
+    _smoke_gpu(torch)
+    print("DIRECT_EXPERT_SMOKE_SUCCESS", flush=True)
+    runtime = ProductionStageBRuntime(
+        found.official_data,
+        found.campaign_input,
+        found.stage_a_handoff,
+        Path(work_root) / "runtime",
+    )
+    deadline = time.time() + int(load_contract().runtime["stage_b_wall_seconds"])
+    result = run_stage_b(
+        runtime,
+        found.stage_a_handoff,
+        Path(work_root) / "campaign",
+        absolute_deadline=deadline,
+        previous_handoff=found.previous_stage_b_handoff,
+    )
+    print(f"DIRECT_EXPERT_CAMPAIGN_STATUS stage=B status={result.status}", flush=True)
+    print(f"DIRECT_EXPERT_REVIEW_READY path={result.review.resolve()}", flush=True)
+    print(f"DIRECT_EXPERT_HANDOFF_READY path={result.handoff.resolve()}", flush=True)
+    if result.delivery is not None:
+        print(f"DIRECT_EXPERT_DELIVERY_READY path={result.delivery.resolve()}", flush=True)
+    return result
+
+
 def _runtime_archive(root: Path) -> bytes:
     buffer = io.BytesIO()
-    with tarfile.open(fileobj=buffer, mode="w:gz", compresslevel=9) as archive:
-        for name in runtime_members(root):
-            archive.add(root / name, arcname=name, recursive=False)
+    with gzip.GzipFile(fileobj=buffer, mode="wb", compresslevel=9, mtime=0) as compressed:
+        with tarfile.open(fileobj=compressed, mode="w") as archive:
+            for name in runtime_members(root):
+                payload = (root / name).read_bytes()
+                info = tarfile.TarInfo(name)
+                info.size = len(payload)
+                info.mtime = 0
+                info.mode = 0o644
+                info.uid = info.gid = 0
+                info.uname = info.gname = ""
+                archive.addfile(info, io.BytesIO(payload))
     return buffer.getvalue()
 
 
@@ -197,7 +268,12 @@ def build_kaggle_cell(stage: str, output: Path, *, root: Path | None = None) -> 
     if stage == "A":
         run_line = "run_kaggle_stage_a(Path('/kaggle/input'), Path('/kaggle/working/direct_expert'))"
     else:
-        run_line = "raise RuntimeError('Stage B runtime is not implemented')"
+        run_line = "run_kaggle_stage_b(Path('/kaggle/input'), Path('/kaggle/working/direct_expert'))"
+    terminal_markers = (
+        "# terminal markers: DIRECT_EXPERT_HANDOFF_READY\n"
+        if stage == "A"
+        else "# terminal markers: DIRECT_EXPERT_REVIEW_READY DIRECT_EXPERT_HANDOFF_READY DIRECT_EXPERT_DELIVERY_READY\n"
+    )
     source = f'''from __future__ import annotations
 import base64, importlib.metadata, io, subprocess, sys, tarfile
 from hashlib import sha256
@@ -220,7 +296,8 @@ with tarfile.open(fileobj=io.BytesIO(PAYLOAD), mode="r:gz") as archive:
             raise RuntimeError("unsafe embedded runtime member")
     archive.extractall(runtime_root)
 sys.path.insert(0, str(runtime_root))
-from experiments.direct_expert.kaggle import run_kaggle_stage_a
+from experiments.direct_expert.kaggle import run_kaggle_stage_a, run_kaggle_stage_b
+{terminal_markers}
 {run_line}
 '''.encode()
     destination = Path(output)

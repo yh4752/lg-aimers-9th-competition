@@ -26,6 +26,7 @@ def test_contract_seals_deep_direct_campaign() -> None:
     assert contract.final_parameters["iterations"] == 2400
     assert contract.final_parameters["depth"] == 10
     assert contract.maximum_deployed_models == 9
+    assert contract.runtime["full_fit_guard_seconds"] == 7200
 
 
 def test_exact_eight_experts_and_sixteen_stage_a_jobs() -> None:

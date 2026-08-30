@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 import threading
+import time
 
 import pandas as pd
 
@@ -24,6 +25,8 @@ class FakeRuntime:
         self.gpus: list[int] = []
         self.failures: set[str] = set()
         self.lock = threading.Lock()
+        self.active_by_gpu = {0: 0, 1: 0}
+        self.maximum_by_gpu = {0: 0, 1: 0}
         self.bindings = DirectExpertBindings(*[str(i) * 64 for i in range(1, 7)])
 
     def now(self) -> float:
@@ -36,23 +39,30 @@ class FakeRuntime:
         with self.lock:
             self.started.append(job.job_id)
             self.gpus.append(gpu)
-        if job.job_id in self.failures:
-            raise RuntimeError("synthetic failure")
-        output.mkdir(parents=True)
-        year = job.fold[1]
-        frame = pd.DataFrame(
-            {
-                "row_id": [f"{year}-0", f"{year}-1"],
-                "target": [0, 1],
-                "probability": [0.4, 0.6],
-                "game_type": ["R", "F"],
-                "pitcher_id": [1, 2],
-                "oof_year": [year, year],
-            }
-        )
-        path = output / "predictions.csv"
-        frame.to_csv(path, index=False)
-        return FakeResult("completed", job.job_id, frame, output)
+            self.active_by_gpu[gpu] += 1
+            self.maximum_by_gpu[gpu] = max(self.maximum_by_gpu[gpu], self.active_by_gpu[gpu])
+        try:
+            time.sleep(0.002)
+            if job.job_id in self.failures:
+                raise RuntimeError("synthetic failure")
+            output.mkdir(parents=True)
+            year = job.fold[1]
+            frame = pd.DataFrame(
+                {
+                    "row_id": [f"{year}-0", f"{year}-1"],
+                    "target": [0, 1],
+                    "probability": [0.4, 0.6],
+                    "game_type": ["R", "F"],
+                    "pitcher_id": [1, 2],
+                    "oof_year": [year, year],
+                }
+            )
+            path = output / "predictions.csv"
+            frame.to_csv(path, index=False)
+            return FakeResult("completed", job.job_id, frame, output)
+        finally:
+            with self.lock:
+                self.active_by_gpu[gpu] -= 1
 
     def e2_oof(self, year: int) -> pd.DataFrame:
         return pd.DataFrame(
@@ -71,6 +81,7 @@ def test_stage_a_runs_sixteen_unique_jobs_on_two_workers(tmp_path: Path) -> None
     assert len(runtime.started) == 16
     assert len(set(runtime.started)) == 16
     assert set(runtime.gpus) == {0, 1}
+    assert runtime.maximum_by_gpu == {0: 1, 1: 1}
     assert result.handoff.is_file()
 
 
@@ -88,3 +99,16 @@ def test_deadline_stops_new_jobs_and_publishes_handoff(tmp_path: Path) -> None:
     assert result.status == "incomplete"
     assert not runtime.started
     assert result.handoff.is_file()
+
+
+def test_stage_a_resume_reuses_all_completed_jobs(tmp_path: Path) -> None:
+    first = run_stage_a(FakeRuntime(), tmp_path / "first", absolute_deadline=10_000)
+    resumed_runtime = FakeRuntime()
+    second = run_stage_a(
+        resumed_runtime,
+        tmp_path / "second",
+        absolute_deadline=1,
+        previous_handoff=first.handoff,
+    )
+    assert second.status == "completed"
+    assert resumed_runtime.started == []

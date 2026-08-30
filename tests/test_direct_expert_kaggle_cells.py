@@ -15,3 +15,17 @@ def test_checked_in_stage_a_cell_matches_renderer(tmp_path: Path) -> None:
     rendered = build_kaggle_cell("A", tmp_path / "cell.py")
     checked = Path("experiments/direct_expert/KAGGLE_STAGE_A_CELL.py")
     assert checked.read_bytes() == rendered.read_bytes()
+
+
+def test_stage_b_cell_prints_all_terminal_artifacts(tmp_path: Path) -> None:
+    cell = build_kaggle_cell("B", tmp_path / "cell.py").read_text()
+    assert "DIRECT_EXPERT_REVIEW_READY" in cell
+    assert "DIRECT_EXPERT_HANDOFF_READY" in cell
+    assert "DIRECT_EXPERT_DELIVERY_READY" in cell
+    assert "submission.zip" not in cell
+
+
+def test_checked_in_stage_b_cell_matches_renderer(tmp_path: Path) -> None:
+    rendered = build_kaggle_cell("B", tmp_path / "cell.py")
+    checked = Path("experiments/direct_expert/KAGGLE_STAGE_B_CELL.py")
+    assert checked.read_bytes() == rendered.read_bytes()

@@ -45,6 +45,7 @@
     "stage_b_wall_seconds": 32400,
     "new_job_guard_seconds": 1800,
     "artifact_reserve_seconds": 1200,
+    "full_fit_guard_seconds": 7200,
     "snapshot_interval_seconds": 600,
     "minimum_free_bytes": 8589934592
   },

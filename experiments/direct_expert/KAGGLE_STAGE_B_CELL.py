@@ -21,6 +21,6 @@ with tarfile.open(fileobj=io.BytesIO(PAYLOAD), mode="r:gz") as archive:
     archive.extractall(runtime_root)
 sys.path.insert(0, str(runtime_root))
 from experiments.direct_expert.kaggle import run_kaggle_stage_a, run_kaggle_stage_b
-# terminal markers: DIRECT_EXPERT_HANDOFF_READY
+# terminal markers: DIRECT_EXPERT_REVIEW_READY DIRECT_EXPERT_HANDOFF_READY DIRECT_EXPERT_DELIVERY_READY
 
-run_kaggle_stage_a(Path('/kaggle/input'), Path('/kaggle/working/direct_expert'))
+run_kaggle_stage_b(Path('/kaggle/input'), Path('/kaggle/working/direct_expert'))
