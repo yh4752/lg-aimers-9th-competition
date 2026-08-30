@@ -6,6 +6,7 @@ from pathlib import Path
 
 _SHARED = (
     "experiments/tree_expert/__init__.py",
+    "experiments/tree_expert/contracts.py",
     "experiments/tree_expert/features.py",
     "experiments/temporal_portfolio/__init__.py",
     "experiments/temporal_portfolio/seasonal_features.py",

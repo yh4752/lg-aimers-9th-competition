@@ -1,6 +1,32 @@
+import io
+import subprocess
+import sys
+import tarfile
 from pathlib import Path
 
-from experiments.direct_expert.kaggle import build_kaggle_cell
+from experiments.direct_expert.kaggle import _runtime_archive, build_kaggle_cell
+
+
+def test_embedded_runtime_imports_in_an_isolated_python(tmp_path: Path) -> None:
+    runtime_root = tmp_path / "runtime"
+    runtime_root.mkdir()
+    with tarfile.open(fileobj=io.BytesIO(_runtime_archive(Path.cwd())), mode="r:gz") as archive:
+        archive.extractall(runtime_root)
+
+    script = (
+        "import sys; "
+        f"sys.path.insert(0, {str(runtime_root)!r}); "
+        "import experiments.direct_expert.kaggle; "
+        "import experiments.direct_expert.stage_b_runtime"
+    )
+    completed = subprocess.run(
+        [sys.executable, "-I", "-c", script],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
 
 
 def test_stage_a_cell_is_deterministic_small_and_has_no_submission(tmp_path: Path) -> None:
