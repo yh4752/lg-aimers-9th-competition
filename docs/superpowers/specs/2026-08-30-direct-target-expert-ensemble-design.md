@@ -91,6 +91,16 @@ S4는 15개 full-chain 구조와 5개 다중 시드 확인 후보를 평가했�
   `f7818f9ee0ccefe7c2cf69fa99efe6e5cb882d8b886dd96d2394bcf3b53f33a9`
 - E2 handoff SHA-256:
   `4dd0c9012b9a59e5235b76d6fe1f6ded4df4b404cab0082c0f3084b8c384050f`
+- S4 handoff SHA-256:
+  `5a410548de99d5d9c56f9b0d1940d5080e9167eafd97a2c94c45e31deacb4911`
+- Public 977점 E2 제출 archive SHA-256:
+  `8bc33042b9258049f905df0c733b1153d1cedfac39cb0732b2a7e154629d779a`
+
+E2 handoff 원본은 현재 로컬에 없으므로 재학습하거나 출처를 추정하지 않는다. S4
+handoff가 위 E2 handoff SHA를 binding으로 보유하고 있고 내부 resume에 검증된
+`anchors/e2/{2021,2022,2023,2024}.csv`가 있으므로 이를 E2 OOF 기준선으로 추출한다.
+E2 안전 blend의 최종 추론 모델은 실제 Public 제출에 사용된 위 E2 archive를 그대로
+봉인한다. 준비 입력은 두 원본의 manifest, binding과 member SHA를 모두 보관한다.
 
 Kaggle Dataset이 ZIP으로 보이거나 이미 풀린 디렉터리로 보이는 두 경우를 모두
 지원한다. 최상위 폴더 이름은 식별 근거로 사용하지 않는다. 같은 artifact kind가 두 개
@@ -208,6 +218,9 @@ CatBoost 설치, CUDA 접근, 범주형 열과 기본 메모리 경로를 확인
 4. direct RMSE 또는 R/F/high-CTR 중 아직 포함되지 않은 구조적 wildcard
 
 선택 레시피를 파일과 해시로 고정한 뒤에만 2024 확인 결과를 계산한다.
+D5 또는 D6가 네 구조에 들어가면 fallback에 필요한 D0도 네 자리 안에 포함시켜 선택
+집합을 의존성 폐쇄 상태로 만든다. 즉, fallback 때문에 확인 job이나 full-fit job이
+사후에 몰래 추가되지 않는다.
 
 ### 독립 확인 fold
 
@@ -224,13 +237,18 @@ job이며 OOF 결과와 별도로 기록한다.
 
 구조 fold의 OOF 예측만 사용해 다음 후보를 만든다.
 
-1. 최대 네 전문가의 확률 공간 비음수 convex blend
-2. 최대 네 전문가의 logit 공간 비음수 blend
+1. 선택된 네 후보 중 최대 세 전문가의 확률 공간 비음수 convex blend
+2. 선택된 네 후보 중 최대 세 전문가의 logit 공간 비음수 blend
 3. direct champion과 E2의 안전 blend
 
 가중치 합은 1이며 각 활성 가중치는 최소 `0.05`다. 구조 fold에서 deterministic
 grid와 coordinate refinement로 고정한다. 2024 결과를 확인한 뒤 가중치를 다시
 적합하지 않는다.
+
+배포 recipe가 요구하는 direct 모델 구조는 의존성을 포함해 최대 세 개다. D5 또는
+D6를 사용하면 반대 경기 유형 fallback인 D0도 의존 구조로 계산한다. E2 안전 blend는
+E2 세 seed를 포함하므로 direct 구조를 최대 두 개로 제한한다. 따라서 어떤 delivery도
+총 9개 모델을 넘지 않는다.
 
 전문가가 E2와 사실상 같은 오차를 만들면 다음 중 하나를 충족해야만 앙상블에 남긴다.
 
@@ -267,7 +285,7 @@ recent-heavy gain 조건을 통과하지 못한다.
 
 - 환경: Kaggle T4 x2
 - 예상 시간: 10~11시간
-- 입력: 공식 데이터, E2 handoff, 봉인된 캠페인 코드
+- 입력: 공식 데이터, S4의 E2 OOF와 Public E2 모델을 봉인한 캠페인 입력, 봉인된 코드
 - 작업: 입력 검증, GPU smoke test, 8구조 × 2 structure folds × seed 3407
 - 출력: `direct_expert_stage_A_handoff.zip`
 
@@ -312,11 +330,11 @@ DIRECT_EXPERT_INPUTS_VERIFIED
 DIRECT_EXPERT_GPU_READY count=2
 DIRECT_EXPERT_SMOKE_SUCCESS
 DIRECT_EXPERT_PHASE_START phase=<screening|confirmation|stacking|full_fit>
-DIRECT_EXPERT_JOB_START candidate=... fold=... seed=... gpu=...
-DIRECT_EXPERT_TRAINING_PROGRESS candidate=... iteration=... best_brier=...
-DIRECT_EXPERT_JOB_END candidate=... status=<completed|failed>
-DIRECT_EXPERT_DECISION candidate=... status=<accepted|rejected|research_only>
-DIRECT_EXPERT_HANDOFF_READY path=...
+DIRECT_EXPERT_JOB_START candidate=<candidate_id> fold=<train_valid> seed=<seed> gpu=<gpu_id>
+DIRECT_EXPERT_TRAINING_PROGRESS candidate=<candidate_id> iteration=<iteration> best_brier=<value>
+DIRECT_EXPERT_JOB_END candidate=<candidate_id> status=<completed|failed>
+DIRECT_EXPERT_DECISION candidate=<candidate_id> status=<accepted|rejected|research_only>
+DIRECT_EXPERT_HANDOFF_READY path=<absolute_handoff_path>
 ```
 
 ## 16. 테스트와 제출 전 검사
