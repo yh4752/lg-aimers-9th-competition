@@ -167,6 +167,18 @@ def prepare_input(
 
 def _source_payloads(path: Path) -> dict[str, bytes]:
     source = Path(path)
+    if source.is_dir() and not source.is_symlink():
+        output: dict[str, bytes] = {}
+        for candidate in sorted(source.rglob("*")):
+            if candidate.is_symlink():
+                raise PrivilegedInputError("privileged input contains a symlink")
+            if candidate.is_file():
+                name = candidate.relative_to(source).as_posix()
+                pure = PurePosixPath(name)
+                if pure.is_absolute() or any(part in {"", ".", ".."} for part in pure.parts):
+                    raise PrivilegedInputError("unsafe privileged input member")
+                output[name] = candidate.read_bytes()
+        return output
     try:
         with ZipFile(source) as archive:
             infos = _safe_infos(archive, "privileged input")
@@ -214,4 +226,3 @@ def verify_and_extract_input(
         e2_delivery=root / "e2/model_delivery.zip",
         e2_oof_root=root / "e2/oof",
     )
-

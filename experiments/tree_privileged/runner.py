@@ -89,12 +89,14 @@ def _atomic_json(path: Path, value: object) -> None:
 def _teacher_cache(all_rows: pd.DataFrame, history: pd.DataFrame, fold: tuple[int, int], root: Path, log: Path) -> Path:
     train_end, valid_year = fold; cache = root / str(valid_year)
     if (cache / "metadata.json").is_file():
-        load_teacher_evidence(cache); _log(log, "TREE_PRIV_TEACHER_REUSED", valid_year=valid_year); return cache
-    _log(log, "TREE_PRIV_TEACHER_START", train_end=train_end, valid_year=valid_year)
+        load_teacher_evidence(cache); _log(log, "TREE_PRIV_TEACHER_JOB_END", valid_year=valid_year, status="reused"); return cache
+    _log(log, "TREE_PRIV_TEACHER_JOB_START", train_end=train_end, valid_year=valid_year)
     evidence = build_teacher_oof(all_rows.loc[all_rows["season"].le(train_end)].copy(), history,
                                  cutoff_year=train_end)
     save_teacher_evidence(evidence, cache)
-    _log(log, "TREE_PRIV_TEACHER_END", valid_year=valid_year, status=evidence.status,
+    _log(log, "TREE_PRIV_MATCH_AUDIT", valid_year=valid_year, total_coverage=f"{evidence.coverage:.6f}",
+         latest_coverage=f"{evidence.latest_coverage:.6f}", segments=json.dumps(dict(evidence.coverage_by_segment), sort_keys=True))
+    _log(log, "TREE_PRIV_TEACHER_JOB_END", valid_year=valid_year, status=evidence.status,
          coverage=f"{evidence.coverage:.6f}", latest_coverage=f"{evidence.latest_coverage:.6f}")
     return cache
 
@@ -154,7 +156,7 @@ def _run_jobs(
                 job = pending.pop(0); gpu = gpu_ids[cursor % len(gpu_ids)]; cursor += 1
                 baseline = baseline_root / f"{job.valid_year}.csv"
                 cache = teacher_root / str(job.valid_year)
-                _log(log, "TREE_PRIV_JOB_START", job=job.job_id, gpu=gpu)
+                _log(log, "TREE_PRIV_CANDIDATE_JOB_START", job=job.job_id, gpu=gpu)
                 future = pool.submit(launcher, job, data, baseline, cache, strengths,
                                      jobs_root / job.job_id, deadline - contract.runtime.artifact_reserve_seconds, gpu)
                 active[future] = job
@@ -167,7 +169,7 @@ def _run_jobs(
                     result = CandidateJobResult(job.job_id, job.candidate_id, "failed", None, None, None,
                                                 f"{type(error).__name__}: {error}", None)
                 results[job.job_id] = result
-                _log(log, "TREE_PRIV_JOB_END", job=job.job_id, status=result.status,
+                _log(log, "TREE_PRIV_CANDIDATE_JOB_END", job=job.job_id, status=result.status,
                      brier=result.brier, failure=result.failure)
     return results, paused
 
@@ -307,6 +309,7 @@ def run_campaign(
         "rf": {candidate: {"alpha_r": value.alpha_r, "alpha_f": value.alpha_f}
                for candidate, value in rf_decisions.items()},
     })
+    _log(log, "TREE_PRIV_DECISION", phase="screen", selected=",".join(selected) or "none")
     confirm_jobs = [_job(candidate, fold, seed) for candidate in selected for fold in load_contract().folds for seed in load_contract().confirm_seeds]
     confirm_results, paused = _run_jobs(confirm_jobs, data=verified.official, baseline_root=baseline_root,
                                         teacher_root=teacher_root, strengths=strengths, jobs_root=root / "jobs",
@@ -331,6 +334,7 @@ def run_campaign(
                                                     "alpha_r": decision.rf_blend.alpha_r, "alpha_f": decision.rf_blend.alpha_f}}
                         for decision in decisions}
     _atomic_json(root / "review/acceptance_decisions.json", decision_payload)
+    _log(log, "TREE_PRIV_DECISION", phase="acceptance", accepted=",".join(accepted) or "none")
     if not accepted:
         _atomic_json(root / "campaign_state.json", {"status": "rejected", "phase": "complete", "bindings": bindings,
                                                      "completed_jobs": sorted(completed)})

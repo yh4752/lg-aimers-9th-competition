@@ -156,9 +156,10 @@ def write_campaign_bundles(state: CampaignArtifactState, output_dir: Path) -> Ca
         verify_delivery(delivery, state.bindings)
     elif state.delivery_root is not None:
         raise PrivilegedArtifactError("non-accepted campaign cannot contain delivery")
-    handoff_sources = {"review.zip": review, "resume.zip": resume, "campaign.log": state.log_path}
-    if delivery is not None: handoff_sources["delivery.zip"] = delivery
+    # Kaggle expands nested .zip files when a dataset is created.  The neutral
+    # extension preserves the exact, hash-bound nested bytes for resume.
+    handoff_sources = {"review.bundle": review, "resume.bundle": resume, "campaign.log": state.log_path}
+    if delivery is not None: handoff_sources["delivery.bundle"] = delivery
     handoff = _write(output / "tree_privileged_handoff.zip", "tree_privileged_handoff_v1", state.status,
                      state.bindings, handoff_sources)
     return CampaignBundles(review, resume, handoff, delivery)
-
