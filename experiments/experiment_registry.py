@@ -264,6 +264,9 @@ def audit_registry(payload: Mapping[str, object]) -> dict[str, object]:
         for raw in experiments
         if raw["failure_class"] != "none"
     ]
+    policies_by_family: dict[str, set[str]] = {}
+    for raw in experiments:
+        policies_by_family.setdefault(str(raw["family"]), set()).add(str(raw["repeat_policy"]))
     return {
         "experiment_count": len(experiments),
         "status_counts": _sorted_counts([str(raw["status"]) for raw in experiments]),
@@ -275,12 +278,13 @@ def audit_registry(payload: Mapping[str, object]) -> dict[str, object]:
         "public_scores": public_scores,
         "evidence_gap_count": len(gaps),
         "evidence_gaps": sorted(gaps, key=lambda item: str(item["experiment_id"])),
-        "closed_families": sorted({
-            str(raw["family"]) for raw in experiments if raw["repeat_policy"] == "closed"
-        }),
-        "redefine_families": sorted({
-            str(raw["family"]) for raw in experiments if raw["repeat_policy"] == "redefine"
-        }),
+        "closed_families": sorted(
+            family for family, policies in policies_by_family.items() if policies == {"closed"}
+        ),
+        "redefine_families": sorted(
+            family for family, policies in policies_by_family.items()
+            if "redefine" in policies and "retain" not in policies
+        ),
         "retained_experiments": sorted({
             str(raw["experiment_id"]) for raw in experiments if raw["repeat_policy"] == "retain"
         }),
@@ -291,7 +295,7 @@ def _metric(value: object) -> str:
     if value is None:
         return "—"
     if type(value) is float:
-        return f"{value:.12g}"
+        return f"{value:.15g}"
     return str(value)
 
 
@@ -334,8 +338,8 @@ def render_audit_markdown(audit: Mapping[str, object]) -> str:
 
     lines.extend([
         "",
-        "Public 점수는 OOF Brier와 다른 척도이며, 이 다섯 점으로 점수 환산식이나 "
-        "사후 가중치를 맞추지 않는다.",
+        f"Public 점수는 OOF Brier와 다른 척도이며, 이 {len(public_scores)}건으로 점수 "
+        "환산식이나 사후 가중치를 맞추지 않는다.",
         "",
         "## 비교 가능한 OOF 그룹",
         "",
@@ -396,9 +400,11 @@ def render_audit_markdown(audit: Mapping[str, object]) -> str:
         "",
         "## 닫을 계열과 다시 정의할 계열",
         "",
-        f"- 현재 정의를 반복하지 않을 계열: {closed}",
-        f"- 입력이나 구조를 바꿔 다시 정의할 계열: {redefine}",
+        f"- 모든 검토 변형을 닫은 계열: {closed}",
+        f"- 유지 기준선 없이 구조를 다시 정의할 계열: {redefine}",
         f"- 다음 비교의 기준으로 유지할 실험: {retained}",
+        "- 같은 모델 계열 안에서도 변형별 판정이 다르면 계열 전체를 닫지 않고 registry의 "
+        "`repeat_policy`를 따른다.",
         "",
         "## 다음 단일 캠페인",
         "",

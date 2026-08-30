@@ -144,8 +144,34 @@ def test_audit_counts_rejection_classes_and_evidence_gaps() -> None:
     assert audit["evidence_gap_count"] == 1
 
 
+def test_mixed_family_policy_does_not_close_the_whole_family() -> None:
+    payload = registry(
+        record(experiment_id="kept", family="catboost", repeat_policy="retain"),
+        record(experiment_id="closed", family="catboost", repeat_policy="closed"),
+        record(experiment_id="fwfm", family="fwfm", repeat_policy="closed"),
+    )
+    audit = audit_registry(payload)
+    assert "catboost" not in audit["closed_families"]
+    assert audit["closed_families"] == ["fwfm"]
+
+
 def test_rendered_audit_explains_deep_campaign_without_promising_score() -> None:
     markdown = render_audit_markdown(audit_registry(registry(record())))
     assert "구조적으로 깊은 캠페인" in markdown
     assert "점수를 보장" in markdown
     assert "comparison_group" in markdown
+
+
+def test_generated_audit_and_readme_match_registry_public_scores() -> None:
+    payload = load_registry(Path("reports/experiment_registry.json"))
+    scores = [
+        str(row["public_score"])
+        for row in payload["experiments"]
+        if row["public_score"] is not None
+    ]
+    audit = Path("reports/EXPERIMENT_RESET_AUDIT.md").read_text(encoding="utf-8")
+    readme = Path("README.md").read_text(encoding="utf-8")
+    for score in scores:
+        assert score in audit
+    assert "977.3809532715" in readme
+    assert "tree_privileged_profile_p_only_v1" in audit

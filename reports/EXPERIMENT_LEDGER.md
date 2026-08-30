@@ -29,6 +29,22 @@
 | 21 | `tree_hierarchical_residual_v1` | E2 anchor + 계층 잔차·보정 | 2021→2022·2022→2023 구조, 2023→2024 확인 | C1 gain `0.0000629719`이나 최소 fold `-0.0000083590`·seed 일관성 실패; C2도 네 gate 실패 | completed, no candidate; C0 fallback | — | handoff SHA-256 `fb6200aa…c896` |
 | 22 | `failure_expert_label_audit_v1` | 실패 유형 라벨 CPU 감사 | 2021·2022·2023·2024 cutoff | coverage `0.9644~0.9650`, middle·reverse overlap `0.0716~0.0744`; 세 유형 모두 공통 gate 실패 | ineligible; no model training | — | review SHA-256 `0e03e2b5…ba8c` |
 | 23 | `tree_hetero_residual_s3_v1` | E2 anchor + XGBoost·LightGBM 잔차 보정 | 2021→2022·2022→2023 구조 선택, 2023→2024 확인 | XGBoost gain `0.0000058661`·상관 `0.9985597`, LightGBM gain `0.0000125015`·상관 `0.9987254`; 두 후보 모두 2022→2023 악화 | rejected; fixed direct residual structure closed | — | [rejection](rejections/tree_hetero_residual_s3_rejection.json) |
+| 24 | `tree_privileged_trackman_teacher_v1` | TrackMan exact-pitch teacher 적격성 감사 | 전체·최신 시즌 exact match coverage | 전체 약 `0.39%`, 최신 약 `0.29%`; 요구 기준 `30%/20%`에 크게 미달 | diagnostic; exact-match distillation closed | — | handoff SHA-256 `5754124…ddd2` |
+| 25 | `tree_privileged_profile_p_only_v1` | E2 anchor + rolling target profile CatBoost | 2021→2022·2022→2023·2023→2024 | 공식 weighted gain `0.0000202678`, latest `0.0000224496`, 3 folds 개선; 최소 gain `0.00005` 미달 | rejected; profile definition must change | — | handoff SHA-256 `b89c7757…bd8fc` |
+
+## 원본 증거 재확보가 필요한 실행
+
+아래 실행은 대화상 완료 기록이 있으나 현재 로컬에서 최종 review 또는 handoff 원본을
+검증하지 못했다. 결과를 추정해 장부에 넣지 않고 원본을 다시 확보할 때까지 보류한다.
+
+| 실험 | 필요한 증거 |
+|---|---|
+| `temporal_portfolio_t1` | review 또는 handoff bundle |
+| `temporal_portfolio_t2a` | review 또는 handoff bundle |
+| `temporal_portfolio_t2b` | review 또는 handoff bundle |
+| `temporal_portfolio_t2c` | review 또는 handoff bundle |
+| `tree_expert_rf` | review 또는 handoff bundle |
+| `anchor_residual_hierarchical_s4` | review 또는 handoff bundle |
 
 ## 현재 결론
 
@@ -52,5 +68,14 @@
   못 미쳤고, E2 잔차와의 상관도 둘 다 `0.998`을 넘었다. 현재 피처와 직접 확률 보정
   구조는 닫되 두 모델 계열 전체의 실패로 확대하지 않는다. 다음 후보는 E2와 다른
   오차를 만들 수 있는 시즌·상황 정보부터 다시 설계한다.
+- TrackMan exact-pitch teacher는 매칭 coverage가 전체 약 `0.39%`에 불과해 모델
+  학습 전에 계열을 닫았다. rolling target profile P-only 후보는 세 fold 모두 양의
+  방향이었지만 공식 weighted gain이 기준의 약 40.5%에 그쳤다. 별도 3-seed 평균
+  진단도 `0.0000418138`로 기준에 못 미쳤고 2023 fold gain은 `0.0000045861`이었다.
+  같은 profile 정의와 exact-match 구성을 반복하지 않는다.
 - 대용량 OOF, 모델과 ZIP은 Google Drive에 두고 이 장부는 작은 evidence와 실행 ID,
   SHA-256으로 원본을 식별한다.
+
+기계 판독 가능한 전체 기록은 [experiment registry](experiment_registry.json), 비교
+그룹별 감사와 다음 방향은 [실험 증거 재감사](EXPERIMENT_RESET_AUDIT.md)를 기준으로
+한다.
