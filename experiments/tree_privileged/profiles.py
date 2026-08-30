@@ -1,7 +1,7 @@
 """Cutoff-safe hierarchical target profiles for the privileged tree campaign."""
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from itertools import product
 from types import MappingProxyType
 from typing import Mapping
@@ -118,8 +118,8 @@ def fit_profiles(
     for level in LEVELS:
         grouped = rows.groupby(list(level.keys), sort=True, dropna=False)["control_success"].agg(["count", "sum"]).reset_index()
         table_rows = tuple(
-            tuple(row[key] for key in level.keys) + (int(row["count"]), float(row["sum"]))
-            for _, row in grouped.iterrows()
+            tuple(values[:-2]) + (int(values[-2]), float(values[-1]))
+            for values in grouped.itertuples(index=False, name=None)
         )
         tables[level.name] = ProfileTable(level.keys, table_rows)
     return ProfileState(
@@ -128,8 +128,19 @@ def fit_profiles(
     )
 
 
-def _table_mapping(table: ProfileTable) -> dict[tuple[object, ...], tuple[int, float]]:
-    return {tuple(row[:len(table.keys)]): (int(row[-2]), float(row[-1])) for row in table.rows}
+def _table_values(source: pd.DataFrame, table: ProfileTable) -> tuple[np.ndarray, np.ndarray]:
+    columns = [*table.keys, "_count", "_sum"]
+    lookup = pd.DataFrame(table.rows, columns=columns)
+    if len(table.keys) == 1:
+        indexed = lookup.set_index(table.keys[0])
+        count = source[table.keys[0]].map(indexed["_count"])
+        successes = source[table.keys[0]].map(indexed["_sum"])
+    else:
+        indexed = lookup.set_index(list(table.keys))
+        keys = pd.MultiIndex.from_frame(source.loc[:, table.keys])
+        count = pd.Series(indexed["_count"].reindex(keys).to_numpy(), index=source.index)
+        successes = pd.Series(indexed["_sum"].reindex(keys).to_numpy(), index=source.index)
+    return count.fillna(0).to_numpy(dtype="float64"), successes.fillna(0).to_numpy(dtype="float64")
 
 
 def _clipped_logit(values: np.ndarray) -> np.ndarray:
@@ -146,11 +157,7 @@ def transform_profiles(rows: pd.DataFrame, state: ProfileState) -> pd.DataFrame:
     minimum_rows = load_contract().profiles.minimum_rows
     for level in LEVELS:
         table = state.tables[level.name]
-        lookup = _table_mapping(table)
-        keys = [tuple(row[key] for key in level.keys) for _, row in source.iterrows()]
-        observed = [lookup.get(key, (0, 0.0)) for key in keys]
-        count = np.asarray([item[0] for item in observed], dtype="float64")
-        successes = np.asarray([item[1] for item in observed], dtype="float64")
+        count, successes = _table_values(source, table)
         parent = np.full(len(source), state.global_rate, dtype="float64") if level.parent == "global" else rate_by_level[level.parent]
         raw = np.divide(successes, count, out=parent.copy(), where=count > 0)
         minimum = int(minimum_rows[level.family])
@@ -215,14 +222,20 @@ def select_strengths(train: pd.DataFrame, folds: tuple[tuple[int, int], ...]) ->
         contract.profiles.interaction_strengths,
         contract.profiles.matchup_strengths,
     )]
+    prepared_folds = []
+    for train_end, valid_year in folds[:2]:
+        fit_rows = source.loc[source["season"].le(train_end)]
+        valid_rows = source.loc[source["season"].eq(valid_year)]
+        if fit_rows.empty or valid_rows.empty:
+            raise ProfileError("strength selection fold is empty")
+        prepared_folds.append((
+            fit_profiles(fit_rows, cutoff_year=train_end, strengths=candidates[0]),
+            valid_rows,
+        ))
     for candidate in candidates:
         fold_scores = []
-        for train_end, valid_year in folds[:2]:
-            fit_rows = source.loc[source["season"].le(train_end)]
-            valid_rows = source.loc[source["season"].eq(valid_year)]
-            if fit_rows.empty or valid_rows.empty:
-                raise ProfileError("strength selection fold is empty")
-            state = fit_profiles(fit_rows, cutoff_year=train_end, strengths=candidate)
+        for base_state, valid_rows in prepared_folds:
+            state = replace(base_state, strengths=candidate)
             transformed = transform_profiles(valid_rows.drop(columns="control_success"), state)
             prediction = _profile_prediction(transformed)
             target = valid_rows["control_success"].to_numpy(dtype="float64")
@@ -237,4 +250,3 @@ def select_strengths(train: pd.DataFrame, folds: tuple[tuple[int, int], ...]) ->
         selected=ProfileStrengths(*(int(value) for value in selected_key.split(":"))),
         scores=MappingProxyType(scores),
     )
-

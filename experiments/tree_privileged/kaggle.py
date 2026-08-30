@@ -198,7 +198,7 @@ def _runtime_archive(root: Path) -> bytes:
 
 def _cell_source(encoded: str, archive_sha: str, code_sha: str) -> str:
     return f'''from __future__ import annotations
-import base64, hashlib, importlib.metadata, io, json, subprocess, sys, tarfile, time
+import base64, hashlib, importlib.metadata, io, json, shutil, subprocess, sys, tarfile, time
 from pathlib import Path
 
 RUNTIME_B64 = "{encoded}"
@@ -243,7 +243,10 @@ try:
     found = discover_inputs(Path("/kaggle/input"))
     names = verify_gpu(torch)
     official = verify_official_data(found.official_data)
-    verified_input = verify_and_extract_input(found.campaign_input, Path("/kaggle/working/tree_privileged_verified_input"))
+    verified_root = Path("/kaggle/working/tree_privileged_verified_input")
+    if verified_root.exists():
+        shutil.rmtree(verified_root)
+    verified_input = verify_and_extract_input(found.campaign_input, verified_root)
     verified = VerifiedCampaignInputs(official, verified_input)
     if found.previous_handoff is not None:
         restore_previous_handoff(found.previous_handoff, CAMPAIGN_ROOT, _bindings(verified))

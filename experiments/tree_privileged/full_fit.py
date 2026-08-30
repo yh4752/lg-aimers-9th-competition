@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from concurrent.futures import ThreadPoolExecutor
 from hashlib import sha256
 import json
 import os
@@ -140,9 +141,10 @@ def fit_accepted_candidate(
     if type(batch) is not CandidateFeatureBatch or batch.soft_target is None:
         raise PrivilegedFullFitError("full-fit soft target differs")
     models: dict[int, Path] = {}
-    model_objects: list[object] = []
+    model_objects_by_seed: dict[int, object] = {}
     contract = load_contract().catboost
-    for index, seed in enumerate(token.seeds):
+    def train_seed(index_seed: tuple[int, int]) -> tuple[int, Path, object]:
+        index, seed = index_seed
         parameters = {
             "iterations": token.iterations[seed], "depth": contract.depth,
             "learning_rate": float(contract.learning_rate), "l2_leaf_reg": float(contract.l2_leaf_reg),
@@ -158,8 +160,12 @@ def fit_accepted_candidate(
         model.save_model(str(temporary))
         if not temporary.is_file() or temporary.stat().st_size == 0:
             raise PrivilegedFullFitError("full-fit model output is empty")
-        os.replace(temporary, path); models[seed] = path
-        model_objects.append(model)
+        os.replace(temporary, path)
+        return seed, path, model
+    with ThreadPoolExecutor(max_workers=len(gpu_ids)) as pool:
+        for seed, path, model in pool.map(train_seed, enumerate(token.seeds)):
+            models[seed] = path
+            model_objects_by_seed[seed] = model
     frozen = root / "frozen_state"; frozen.mkdir()
     tree_root = frozen / "tree_state"
     export_frozen_tree_state(state.tree_state, tree_root, candidate_id="c1_anchor_residual")
@@ -180,4 +186,4 @@ def fit_accepted_candidate(
         "profile_state_sha256": sha256((frozen / "profile_state.json").read_bytes()).hexdigest(),
     }, sort_keys=True), encoding="utf-8")
     return FullFitResult(token.decision.candidate_id, root, MappingProxyType(models), frozen, nested,
-                         manifest, state, tuple(model_objects))
+                         manifest, state, tuple(model_objects_by_seed[seed] for seed in token.seeds))

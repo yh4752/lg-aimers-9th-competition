@@ -262,7 +262,7 @@ def run_campaign(
         raise PrivilegedRunnerError("campaign inputs or T4x2 assignment differ")
     root = Path(output_dir); root.mkdir(parents=True, exist_ok=True)
     for name in ("jobs", "cache", "review", "delivery"): (root / name).mkdir(exist_ok=True)
-    log = root / "tree_privileged.log"; bindings = _bindings(verified)
+    log = root / "tree_privileged.log"; log.touch(exist_ok=True); bindings = _bindings(verified)
     expected = load_contract().inputs
     if (verified.official.train_sha256 != expected["official_train_sha256"]
             or verified.official.history_sha256 != expected["official_history_sha256"]

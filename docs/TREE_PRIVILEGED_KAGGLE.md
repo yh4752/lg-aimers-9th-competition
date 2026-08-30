@@ -91,8 +91,8 @@ tree_privileged_handoff.zip
 
 ## 검증 기록
 
-- 생성 셀 SHA-256: 생성 후 기록 예정
-- 계약 SHA-256: 생성 후 기록 예정
-- 새 캠페인 테스트: 최종 검증 후 기록 예정
-- 재사용 회귀 테스트: 최종 검증 후 기록 예정
-
+- 생성 셀 SHA-256: `9db0fa5c1d09c89fa9eef263cd3bc001a5b7dd5903155ed19dabaa812de083e2`
+- 계약 SHA-256: `5a1bbf9b9672750242de28fd390ce9281d75a01c6ebae72addc2feae81b824c4`
+- 새 캠페인 테스트: `31 passed`
+- 재사용 LUPI/E2/S4 회귀 테스트: `214 passed`
+- 전체 저장소: `2677 passed`, 작업 전부터 존재한 동일한 5개 실패 유지

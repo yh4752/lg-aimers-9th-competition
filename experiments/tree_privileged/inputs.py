@@ -24,7 +24,7 @@ class PrivilegedInputError(ValueError):
 INPUT_KIND = "tree_privileged_input_v1"
 _ZIP_TIMESTAMP = (2026, 1, 1, 0, 0, 0)
 _PAYLOAD_NAMES = {
-    "e2/model_delivery.zip",
+    "e2/model_delivery.bundle",
     "e2/oof/2022.csv",
     "e2/oof/2023.csv",
     "e2/oof/2024.csv",
@@ -132,7 +132,9 @@ def _read_e2_payloads(source: Path) -> dict[str, bytes]:
                         for output, source_name in _REVIEW_NAMES.items()}
     except (BadZipFile, KeyError) as error:
         raise PrivilegedInputError("accepted E2 handoff nested members differ") from error
-    payloads["e2/model_delivery.zip"] = delivery
+    # Neutral extension prevents Kaggle Dataset creation from recursively
+    # expanding and changing the hash-bound nested delivery.
+    payloads["e2/model_delivery.bundle"] = delivery
     return payloads
 
 
@@ -223,6 +225,6 @@ def verify_and_extract_input(
         root=root,
         manifest_sha256=sha256(payloads["manifest.json"]).hexdigest(),
         e2_handoff_sha256=expected_sha,
-        e2_delivery=root / "e2/model_delivery.zip",
+        e2_delivery=root / "e2/model_delivery.bundle",
         e2_oof_root=root / "e2/oof",
     )
