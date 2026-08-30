@@ -6,7 +6,7 @@ from zipfile import ZIP_DEFLATED, ZipFile
 
 import pytest
 
-from experiments.gated_residual_final.kaggle import FinalKaggleError, discover_inputs
+from experiments.gated_residual_final.kaggle import FinalKaggleError, discover_inputs, verify_t4x2
 
 
 def _official(root: Path) -> Path:
@@ -58,3 +58,23 @@ def test_more_than_one_distinct_handoff_fails_closed(tmp_path: Path) -> None:
 
     with pytest.raises(FinalKaggleError, match="handoff count"):
         discover_inputs(tmp_path)
+
+
+def test_gpu_preflight_requires_exactly_two_t4s() -> None:
+    class Cuda:
+        @staticmethod
+        def device_count():
+            return 2
+
+        @staticmethod
+        def get_device_name(index):
+            return ("Tesla T4", "Tesla T4")[index]
+
+    class Torch:
+        cuda = Cuda()
+
+    assert verify_t4x2(Torch) == ("Tesla T4", "Tesla T4")
+
+    Cuda.device_count = staticmethod(lambda: 1)
+    with pytest.raises(FinalKaggleError, match="two Tesla T4"):
+        verify_t4x2(Torch)
