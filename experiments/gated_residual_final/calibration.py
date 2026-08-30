@@ -26,6 +26,16 @@ class TemporalCalibrator:
     pitcher_effects: Mapping[EffectKey, float]
     batter_effects: Mapping[EffectKey, float]
 
+    def __reduce__(self):
+        return (
+            _restore_calibrator,
+            (
+                self.hierarchy, self.ridge, self.source_years, self.global_effect,
+                dict(self.game_effects), dict(self.hand_effects),
+                dict(self.pitcher_effects), dict(self.batter_effects),
+            ),
+        )
+
     def effect_for(
         self, *, game_type: object, hand_matchup: object, pitcher_id: object, batter_id: object,
     ) -> float:
@@ -38,6 +48,23 @@ class TemporalCalibrator:
         effect = float(self.pitcher_effects.get((game, pitcher), effect))
         effect = float(self.batter_effects.get((game, batter), effect))
         return effect
+
+
+def _restore_calibrator(
+    hierarchy: str,
+    ridge: float,
+    source_years: tuple[int, ...],
+    global_effect: float,
+    game_effects: Mapping[str, float],
+    hand_effects: Mapping[EffectKey, float],
+    pitcher_effects: Mapping[EffectKey, float],
+    batter_effects: Mapping[EffectKey, float],
+) -> TemporalCalibrator:
+    return TemporalCalibrator(
+        hierarchy, ridge, source_years, global_effect,
+        MappingProxyType(dict(game_effects)), MappingProxyType(dict(hand_effects)),
+        MappingProxyType(dict(pitcher_effects)), MappingProxyType(dict(batter_effects)),
+    )
 
 
 _REQUIRED = {

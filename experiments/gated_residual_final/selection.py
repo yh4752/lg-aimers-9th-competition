@@ -160,12 +160,13 @@ def _bootstrap_lower(frame: pd.DataFrame, gain: np.ndarray, repetitions: int) ->
     group_positions = [group.index.to_numpy(dtype="int64") for _, group in frame.groupby("pitcher_id", sort=True)]
     if not group_positions:
         raise SelectionError("pitcher clusters are absent")
+    cluster_sums = np.asarray([gain[positions].sum() for positions in group_positions], dtype="float64")
+    cluster_counts = np.asarray([len(positions) for positions in group_positions], dtype="float64")
     rng = np.random.default_rng(3407)
     sampled = np.empty(int(repetitions), dtype="float64")
     for index in range(len(sampled)):
         choices = rng.integers(0, len(group_positions), size=len(group_positions))
-        positions = np.concatenate([group_positions[item] for item in choices])
-        sampled[index] = float(gain[positions].mean())
+        sampled[index] = float(cluster_sums[choices].sum() / cluster_counts[choices].sum())
     return float(np.quantile(sampled, 0.025))
 
 

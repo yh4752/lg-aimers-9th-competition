@@ -5,12 +5,6 @@ from pathlib import Path
 
 
 _SHARED = (
-    "experiments/direct_expert/__init__.py",
-    "experiments/direct_expert/contracts.py",
-    "experiments/direct_expert/features.py",
-    "experiments/direct_expert/full_fit.py",
-    "experiments/direct_expert/inference.py",
-    "experiments/direct_expert/training.py",
     "experiments/tree_expert/__init__.py",
     "experiments/tree_expert/contracts.py",
     "experiments/tree_expert/features.py",
@@ -27,12 +21,17 @@ _SHARED = (
 
 def runtime_members(root: Path) -> tuple[str, ...]:
     source = Path(root)
+    direct = tuple(
+        path.relative_to(source).as_posix()
+        for path in sorted((source / "experiments/direct_expert").iterdir())
+        if path.is_file() and path.suffix in {".py", ".json"} and not path.name.startswith("KAGGLE_")
+    )
     local = tuple(
         path.relative_to(source).as_posix()
         for path in sorted((source / "experiments/gated_residual_final").iterdir())
         if path.is_file() and path.suffix in {".py", ".json"} and not path.name.startswith("KAGGLE_")
     )
-    members = tuple(sorted({*_SHARED, *local}))
+    members = tuple(sorted({*_SHARED, *direct, *local}))
     for name in members:
         if not (source / name).is_file():
             raise FileNotFoundError(f"runtime member is absent: {name}")

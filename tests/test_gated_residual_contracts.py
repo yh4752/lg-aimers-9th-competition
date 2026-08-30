@@ -37,5 +37,10 @@ def test_runtime_inventory_contains_final_and_shared_dependencies() -> None:
 
     assert "experiments/gated_residual_final/contracts.py" in members
     assert "experiments/direct_expert/features.py" in members
+    assert "experiments/direct_expert/kaggle.py" in members
+    assert "experiments/direct_expert/stage_a.py" in members
+    assert "experiments/direct_expert/stage_b.py" in members
+    assert "experiments/direct_expert/artifacts.py" in members
     assert "experiments/temporal_portfolio/trackman_pitcher.py" in members
+    assert not any("KAGGLE_" in name for name in members)
     assert len(members) == len(set(members))

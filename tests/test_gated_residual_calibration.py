@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
+import pickle
 
 from experiments.gated_residual_final.calibration import (
     apply_calibration,
@@ -63,3 +64,12 @@ def test_global_game_hierarchy_does_not_create_player_tables() -> None:
     assert fitted.hand_effects == {}
     assert fitted.pitcher_effects == {}
     assert fitted.batter_effects == {}
+
+
+def test_frozen_calibrator_round_trips_through_delivery_pickle() -> None:
+    fitted = fit_temporal_calibrator(_oof(), validation_year=2024, hierarchy="full", ridge=100)
+
+    restored = pickle.loads(pickle.dumps(fitted, protocol=5))
+
+    assert restored.source_years == fitted.source_years
+    assert dict(restored.pitcher_effects) == dict(fitted.pitcher_effects)
