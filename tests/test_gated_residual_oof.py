@@ -48,3 +48,16 @@ def test_invalid_probability_is_rejected() -> None:
     bad = _frame("int64", "int8", probability=(0.2, 1.1))
     with pytest.raises(OOFError, match="probability values differ"):
         align_predictions({"bad": bad})
+
+
+def test_official_string_row_ids_are_preserved() -> None:
+    frame = pd.DataFrame({
+        "row_id": ["TRAIN_0002", "TRAIN_0001"],
+        "target": [1, 0],
+        "probability": [0.7, 0.2],
+        "oof_year": [2024, 2024],
+    })
+
+    aligned = align_predictions({"e2": frame})["e2"]
+
+    assert aligned["row_id"].tolist() == ["TRAIN_0001", "TRAIN_0002"]

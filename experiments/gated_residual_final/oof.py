@@ -18,11 +18,18 @@ def normalize_frame(frame: pd.DataFrame) -> pd.DataFrame:
     if type(frame) is not pd.DataFrame or frame.empty or not _REQUIRED.issubset(frame.columns):
         raise OOFError("prediction columns differ")
     output = frame.copy(deep=True)
-    row_id = pd.to_numeric(output["row_id"], errors="coerce")
+    raw_row_id = output["row_id"]
+    numeric_row_id = pd.to_numeric(raw_row_id, errors="coerce")
+    if numeric_row_id.notna().all():
+        if not np.equal(numeric_row_id, np.floor(numeric_row_id)).all():
+            raise OOFError("row identity differs")
+        row_id = numeric_row_id.astype("int64")
+    else:
+        row_id = raw_row_id.astype("string")
     target = pd.to_numeric(output["target"], errors="coerce")
     probability = pd.to_numeric(output["probability"], errors="coerce")
     year = pd.to_numeric(output["oof_year"], errors="coerce")
-    if row_id.isna().any() or not row_id.is_unique:
+    if row_id.isna().any() or row_id.astype(str).str.strip().eq("").any() or not row_id.is_unique:
         raise OOFError("row identity differs")
     if not target.isin((0, 1)).all():
         raise OOFError("target values differ")
@@ -30,7 +37,7 @@ def normalize_frame(frame: pd.DataFrame) -> pd.DataFrame:
         raise OOFError("probability values differ")
     if year.isna().any() or not np.equal(year, np.floor(year)).all():
         raise OOFError("OOF year values differ")
-    output["row_id"] = row_id.astype("int64")
+    output["row_id"] = row_id
     output["target"] = target.astype("int8")
     output["probability"] = probability.astype("float64")
     output["oof_year"] = year.astype("int16")
