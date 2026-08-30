@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from numbers import Integral, Real
-from typing import Mapping
+from typing import Iterator, Mapping
 
 import numpy as np
 import pandas as pd
@@ -90,22 +90,33 @@ def _canonical_main(frame: pd.DataFrame, cutoff_year: int) -> pd.DataFrame:
 def _canonical_history(frame: pd.DataFrame, cutoff_year: int) -> pd.DataFrame:
     result = _require(frame, _HISTORY_REQUIRED, "history").reset_index(drop=True)
     result = result.loc[pd.to_numeric(result["season"], errors="coerce").le(cutoff_year)].copy()
+    ranges = (
+        ("season", 1000, cutoff_year), ("game_month", 1, 12), ("game_dayofweek", 0, 6),
+        ("pitch_no", 1, None), ("inning", 1, None), ("balls_before", 0, 3),
+        ("strikes_before", 0, 2), ("outs_before", 0, 2),
+    )
+    valid = pd.Series(True, index=result.index)
+    numeric: dict[str, pd.Series] = {}
+    for column, low, high in ranges:
+        values = pd.to_numeric(result[column], errors="coerce")
+        keep = values.notna() & np.isfinite(values) & values.eq(np.floor(values)) & values.ge(low)
+        if high is not None:
+            keep &= values.le(high)
+        valid &= keep
+        numeric[column] = values
+    result = result.loc[valid].copy()
+    for column, _, _ in ranges:
+        result[column] = numeric[column].loc[valid].astype("int64").to_numpy()
     if result["trackman_id"].isna().any() or not result["trackman_id"].is_unique:
         raise PrivilegedMatchingError("history trackman_id must be unique")
     mapping = {"Top": "T", "Bottom": "B", "T": "T", "B": "B"}
     result["top_bottom"] = result["top_bottom"].map(mapping)
     if result["top_bottom"].isna().any():
         raise PrivilegedMatchingError("history top_bottom differs")
-    for column, low, high in (
-        ("season", 1000, cutoff_year), ("game_month", 1, 12), ("game_dayofweek", 0, 6),
-        ("pitch_no", 1, None), ("inning", 1, None), ("balls_before", 0, 3),
-        ("strikes_before", 0, 2), ("outs_before", 0, 2),
-    ):
-        result[column] = [_integer(value, column, low, high) for value in result[column]]
     result["matched_game_type"] = np.where(
-        result[["pitcher_team", "batter_team"]].astype(str).apply(
-            lambda row: any(value.startswith("MIN_") for value in row), axis=1,
-        ), "F", "R",
+        result["pitcher_team"].astype(str).str.startswith("MIN_")
+        | result["batter_team"].astype(str).str.startswith("MIN_"),
+        "F", "R",
     )
     return result.reset_index(drop=True)
 
@@ -121,30 +132,27 @@ def _fit_maps(main: pd.DataFrame, history: pd.DataFrame, cutoff_year: int) -> En
     )
 
 
-def _split_games(frame: pd.DataFrame) -> list[tuple[int, pd.DataFrame]]:
-    starts = [True]
-    for index in range(1, len(frame)):
-        previous, current = frame.iloc[index - 1], frame.iloc[index]
-        changed = any(previous[name] != current[name] for name in _BOUNDARY)
-        starts.append(changed or current["inning"] < previous["inning"])
-    groups = np.cumsum(np.asarray(starts, dtype="int64")) - 1
-    output = []
-    for group in range(int(groups[-1]) + 1):
-        part = frame.loc[groups == group].copy(deep=True)
+def _split_games(frame: pd.DataFrame) -> Iterator[tuple[int, pd.DataFrame]]:
+    starts = frame.loc[:, _BOUNDARY].ne(frame.loc[:, _BOUNDARY].shift()).any(axis=1)
+    starts |= frame["inning"].lt(frame["inning"].shift())
+    starts.iloc[0] = True
+    groups = starts.astype("int64").cumsum().to_numpy() - 1
+    grouped = frame.assign(_pseudo_game=groups).groupby("_pseudo_game", sort=False, observed=True)
+    for group, part in grouped:
+        part = part.drop(columns="_pseudo_game").copy(deep=True)
         if part["top_bottom"].nunique(dropna=False) != 1:
             raise PrivilegedMatchingError("main pseudo-game has mixed top_bottom")
-        output.append((group, part))
-    return output
+        yield int(group), part
 
 
 def _history_games(frame: pd.DataFrame) -> list[pd.DataFrame]:
     output = []
-    for game_id in dict.fromkeys(frame["trackman_game_id"].tolist()):
-        part = frame.loc[frame["trackman_game_id"].eq(game_id)].sort_values("pitch_no", kind="stable")
+    for _, part in frame.groupby("trackman_game_id", sort=False, observed=True):
+        part = part.sort_values("pitch_no", kind="stable")
         if not part["pitch_no"].is_unique or any(part[name].nunique(dropna=False) != 1 for name in (
             "season", "game_month", "game_dayofweek", "matched_game_type",
         )):
-            raise PrivilegedMatchingError("TrackMan game metadata is ambiguous")
+            continue
         output.append(part.reset_index(drop=True))
     return output
 
@@ -226,10 +234,18 @@ def match_training_pitches(
     mapped["pitcher_trackman_id"] = mapped["pitcher_id"].map(dict(maps.pitchers))
     mapped["batter_trackman_id"] = mapped["batter_id"].map(dict(maps.batters))
     history_games = _history_games(canonical_history)
+    history_index: dict[tuple[object, ...], list[pd.DataFrame]] = {}
+    for game in history_games:
+        head = game.iloc[0]
+        key = tuple(head[name] for name in ("season", "game_month", "game_dayofweek", "matched_game_type"))
+        history_index.setdefault(key, []).append(game)
     rows: list[dict[str, object]] = []
     for pseudo_id, game in _split_games(mapped):
+        first = game.iloc[0]
+        key = tuple(first[name] for name in ("season", "game_month", "game_dayofweek", "game_type"))
         scored = sorted(
-            ((_alignment(game, candidate), candidate) for candidate in _candidate_games(game, history_games)),
+            ((_alignment(game, candidate), candidate)
+             for candidate in _candidate_games(game, history_index.get(key, []))),
             key=lambda item: item[0].mean_cost,
         )
         best = scored[0] if scored else None
@@ -273,4 +289,3 @@ def match_training_pitches(
     if accepted_ids.isna().any() or not accepted_ids.is_unique:
         raise PrivilegedMatchingError("accepted TrackMan IDs are not one-to-one")
     return result.reset_index(drop=True)
-

@@ -50,3 +50,35 @@ def test_ambiguous_candidate_games_are_rejected_not_first_selected() -> None:
     result = match_training_pitches(main, _history(duplicate_regular=True), cutoff_year=2024, entity_maps=_maps())
     assert result["lupi_match_accepted"].eq(0).all()
     assert result["trackman_id"].isna().all()
+
+
+def test_impossible_trackman_states_are_ignored_without_losing_valid_matches() -> None:
+    history = _history()
+    invalid = pd.DataFrame([
+        [201, "bad-inning", 1, 2024, 5, 2, "KIW_HER", "DOO_BEA", 0, "Top", 0, 0, 0, 111, 211],
+        [202, "bad-balls", 1, 2024, 5, 2, "KIW_HER", "DOO_BEA", 1, "Top", 4, 0, 0, 111, 211],
+        [203, "bad-strikes", 1, 2024, 5, 2, "KIW_HER", "DOO_BEA", 1, "Top", 0, 3, 0, 111, 211],
+        [204, "bad-outs", 1, 2024, 5, 2, "KIW_HER", "DOO_BEA", 1, "Top", 0, 0, 3, 111, 211],
+    ], columns=history.columns)
+    result = match_training_pitches(
+        _main(), pd.concat([history, invalid], ignore_index=True),
+        cutoff_year=2024, entity_maps=_maps(),
+    )
+    assert result["lupi_match_accepted"].eq(1).all()
+    assert result["trackman_id"].tolist() == [101, 102]
+
+
+def test_ambiguous_trackman_games_are_ignored_without_losing_valid_matches() -> None:
+    history = _history()
+    invalid_games = pd.DataFrame([
+        [301, "duplicate-pitch", 1, 2024, 5, 2, "KIW_HER", "DOO_BEA", 1, "Top", 0, 0, 0, 111, 211],
+        [302, "duplicate-pitch", 1, 2024, 5, 2, "KIW_HER", "DOO_BEA", 1, "Top", 0, 0, 0, 111, 211],
+        [303, "mixed-metadata", 1, 2024, 5, 2, "KIW_HER", "DOO_BEA", 1, "Top", 0, 0, 0, 111, 211],
+        [304, "mixed-metadata", 2, 2024, 5, 3, "KIW_HER", "DOO_BEA", 1, "Top", 0, 1, 0, 111, 211],
+    ], columns=history.columns)
+    result = match_training_pitches(
+        _main(), pd.concat([history, invalid_games], ignore_index=True),
+        cutoff_year=2024, entity_maps=_maps(),
+    )
+    assert result["lupi_match_accepted"].eq(1).all()
+    assert result["trackman_id"].tolist() == [101, 102]
