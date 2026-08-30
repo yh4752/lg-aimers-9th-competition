@@ -18,6 +18,7 @@
     "minimum_segment_rows": 5000
   },
   "expected_hashes": {
+    "direct_expert_input": "aedab42738ba0cd0c3b993bb275947900877f973b2e0f06bb98e9c325016f6f5",
     "e2_submission": "8bc33042b9258049f905df0c733b1153d1cedfac39cb0732b2a7e154629d779a",
     "stage_a_handoff": "2894e29ff83291f95f72e7708d915161ea8a7a13fee10090be8e61872c65adae",
     "stage_b_handoff": "e435f431e4d21036bc0524d14d73d0701e2cdca0ad4c1cb78c28f9017b066929",

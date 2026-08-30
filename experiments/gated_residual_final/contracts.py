@@ -36,7 +36,10 @@ _GATE_KEYS = {
     "minimum_non_worse_seeds", "minimum_latest_non_worse_seeds",
     "maximum_segment_regression", "minimum_segment_rows",
 }
-_HASH_KEYS = {"e2_submission", "stage_a_handoff", "stage_b_handoff", "train_csv", "trackman_history"}
+_HASH_KEYS = {
+    "direct_expert_input", "e2_submission", "stage_a_handoff",
+    "stage_b_handoff", "train_csv", "trackman_history",
+}
 _RUNTIME_KEYS = {
     "maximum_seconds", "full_fit_guard_seconds", "full_fit_seeds",
     "maximum_deployed_models", "depth", "maximum_iterations",
