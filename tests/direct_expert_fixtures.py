@@ -5,8 +5,20 @@ import json
 from pathlib import Path
 from zipfile import ZIP_DEFLATED, ZipFile, ZipInfo
 
+import pandas as pd
+
+from tests.test_tree_expert_features import _history, _rows
+
 
 _TIME = (2026, 1, 1, 0, 0, 0)
+
+
+def make_train_rows() -> pd.DataFrame:
+    return _rows().copy(deep=True)
+
+
+def make_history_rows() -> pd.DataFrame:
+    return _history().copy(deep=True)
 
 
 def _json(value: object) -> bytes:
