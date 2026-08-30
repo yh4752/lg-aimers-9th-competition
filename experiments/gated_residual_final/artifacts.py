@@ -162,3 +162,25 @@ def verify_bundle(
         if isinstance(error, FinalArtifactError):
             raise
         raise FinalArtifactError("artifact is unreadable") from error
+
+
+def extract_bundle(
+    path: Path,
+    destination: Path,
+    *,
+    kind: str,
+    expected_bindings: ArtifactBindings,
+) -> Path:
+    manifest = verify_bundle(path, kind=kind, expected_bindings=expected_bindings)
+    target = Path(destination)
+    if target.exists() or target.is_symlink():
+        raise FinalArtifactError("artifact destination already exists")
+    target.mkdir(parents=True)
+    with ZipFile(path) as archive:
+        for name in sorted(manifest["members"]):
+            output = target.joinpath(*PurePosixPath(name).parts)
+            output.parent.mkdir(parents=True, exist_ok=True)
+            with archive.open(name) as source, output.open("wb") as sink:
+                for block in iter(lambda: source.read(_BLOCK), b""):
+                    sink.write(block)
+    return target

@@ -9,6 +9,7 @@ from experiments.gated_residual_final.artifacts import (
     FinalArtifactError,
     create_delivery,
     create_handoff,
+    extract_bundle,
     verify_bundle,
 )
 
@@ -57,3 +58,18 @@ def test_accepted_delivery_round_trip_verifies_every_member(tmp_path: Path) -> N
 
     assert verified["acceptance_evidence"]["status"] == "accepted"
     assert "model/model.bin" in verified["members"]
+
+
+def test_verified_handoff_extracts_only_declared_members(tmp_path: Path) -> None:
+    state = tmp_path / "state.json"
+    state.write_text("{}")
+    archive = create_handoff(
+        tmp_path / "handoff.zip", bindings=_bindings(), payloads={"campaign_state.json": state}
+    )
+
+    root = extract_bundle(
+        archive, tmp_path / "restored", kind="handoff", expected_bindings=_bindings()
+    )
+
+    assert (root / "campaign_state.json").read_text() == "{}"
+    assert not (root / "manifest.json").exists()
