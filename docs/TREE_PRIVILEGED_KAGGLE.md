@@ -44,15 +44,15 @@ TREE_PRIV_INPUT_READY path=<절대 경로> sha256=<64자리 해시> size_bytes=<
 
 완료된 job은 `predictions.csv`, 지표, best iteration으로 재사용합니다. 재개용 resume에는 불필요한 OOF 모델 바이트를 넣지 않아 handoff 크기를 줄였습니다. 세션이 정상적으로 시간 예산 경계에 도달하면 `paused` handoff를 만들며, 다음 실행에서 그 handoff를 추가하면 완료된 job을 다시 학습하지 않습니다.
 
-Kaggle 프로세스 자체가 강제 종료되어 마지막 handoff 로그까지 나오지 않은 경우에는 `/kaggle/working/tree_privileged/bundles/`의 최신 handoff가 Output에 남았는지 먼저 확인합니다. 파일이 없다면 마지막으로 완료 처리된 job 이후부터 다시 실행될 수 있습니다.
+Kaggle 프로세스 자체가 강제 종료되어 마지막 handoff 로그까지 나오지 않은 경우에는 `/kaggle/working/tree_privileged/<코드 해시>/bundles/`의 최신 handoff가 Output에 남았는지 먼저 확인합니다. 파일이 없다면 마지막으로 완료 처리된 job 이후부터 다시 실행될 수 있습니다. 코드 해시별로 작업 폴더가 분리되므로 같은 커널에서 새 셀을 실행해도 이전 코드의 중간 산출물을 잘못 재사용하지 않습니다.
 
 ## 4. 확인할 로그와 전달할 파일
 
 정상 시작 시 다음 로그가 순서대로 보입니다.
 
 ```text
-TREE_PRIV_CODE_READY ...
 TREE_PRIV_DEPENDENCIES_READY ...
+TREE_PRIV_CODE_READY ...
 TREE_PRIV_INPUTS_VERIFIED ...
 TREE_PRIV_GPU_READY count=2 names=Tesla T4 | Tesla T4
 ```
@@ -91,8 +91,8 @@ tree_privileged_handoff.zip
 
 ## 검증 기록
 
-- 생성 셀 SHA-256: `9db0fa5c1d09c89fa9eef263cd3bc001a5b7dd5903155ed19dabaa812de083e2`
+- 생성 셀 SHA-256: `9bd22757e7d50a630f90e9af40b3b1cba8f4ad97c6d7c9777c9bd55438614729`
 - 계약 SHA-256: `5a1bbf9b9672750242de28fd390ce9281d75a01c6ebae72addc2feae81b824c4`
-- 새 캠페인 테스트: `31 passed`
+- 새 캠페인 테스트: `33 passed`
 - 재사용 LUPI/E2/S4 회귀 테스트: `214 passed`
 - 전체 저장소: `2677 passed`, 작업 전부터 존재한 동일한 5개 실패 유지

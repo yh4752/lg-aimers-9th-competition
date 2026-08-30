@@ -17,6 +17,20 @@ def test_generated_cell_is_deterministic_under_one_megabyte_and_has_one_download
     assert "TREE_PRIV_CAMPAIGN_SUCCESS" in source
 
 
+def test_generated_cell_installs_dependencies_before_importing_runtime_modules(tmp_path: Path) -> None:
+    root = Path(__file__).resolve().parents[1]
+    source = build_kaggle_cell(tmp_path / "cell.py", root=root).read_text()
+    dependency_ready = source.index("TREE_PRIV_DEPENDENCIES_READY")
+    assert "from experiments." not in source[:dependency_ready]
+
+
+def test_generated_cell_replaces_partial_runtime_and_isolates_campaign_by_code(tmp_path: Path) -> None:
+    root = Path(__file__).resolve().parents[1]
+    source = build_kaggle_cell(tmp_path / "cell.py", root=root).read_text()
+    assert "if CODE_ROOT.exists():\n        shutil.rmtree(CODE_ROOT)" in source
+    assert 'CAMPAIGN_ROOT = Path("/kaggle/working/tree_privileged") / CODE_SHA256[:12]' in source
+
+
 def test_runtime_inventory_contains_required_boundaries() -> None:
     root = Path(__file__).resolve().parents[1]
     members = set(runtime_member_names(root))

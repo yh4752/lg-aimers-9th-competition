@@ -205,27 +205,22 @@ RUNTIME_B64 = "{encoded}"
 RUNTIME_SHA256 = "{archive_sha}"
 CODE_SHA256 = "{code_sha}"
 CODE_ROOT = Path("/kaggle/working/tree_privileged_runtime_{code_sha[:12]}")
-CAMPAIGN_ROOT = Path("/kaggle/working/tree_privileged")
+CAMPAIGN_ROOT = Path("/kaggle/working/tree_privileged") / CODE_SHA256[:12]
 STAGE = "setup"
 
 try:
     payload = base64.b64decode(RUNTIME_B64, validate=True)
     if hashlib.sha256(payload).hexdigest() != RUNTIME_SHA256:
         raise RuntimeError("runtime_archive_sha256_differs")
-    if not CODE_ROOT.exists():
-        CODE_ROOT.mkdir(parents=True)
-        with tarfile.open(fileobj=io.BytesIO(payload), mode="r:gz") as archive:
-            for member in archive.getmembers():
-                target = (CODE_ROOT / member.name).resolve()
-                if not member.isfile() or not target.is_relative_to(CODE_ROOT.resolve()):
-                    raise RuntimeError("unsafe_runtime_member")
-            archive.extractall(CODE_ROOT, filter="data")
-    sys.path.insert(0, str(CODE_ROOT))
-    from experiments.tree_privileged.kaggle import runtime_identity_sha256
-    if runtime_identity_sha256(CODE_ROOT) != CODE_SHA256:
-        raise RuntimeError("runtime_code_sha256_differs")
-    print(f"TREE_PRIV_CODE_READY sha256={{CODE_SHA256}} size_bytes={{len(payload)}}", flush=True)
-
+    if CODE_ROOT.exists():
+        shutil.rmtree(CODE_ROOT)
+    CODE_ROOT.mkdir(parents=True)
+    with tarfile.open(fileobj=io.BytesIO(payload), mode="r:gz") as archive:
+        for member in archive.getmembers():
+            target = (CODE_ROOT / member.name).resolve()
+            if not member.isfile() or not target.is_relative_to(CODE_ROOT.resolve()):
+                raise RuntimeError("unsafe_runtime_member")
+        archive.extractall(CODE_ROOT, filter="data")
     STAGE = "dependencies"
     for package, version in {{"catboost": "1.2.10", "scipy": "1.16.3"}}.items():
         try: current = importlib.metadata.version(package)
@@ -233,6 +228,12 @@ try:
         if current != version:
             subprocess.run([sys.executable, "-m", "pip", "install", "-q", f"{{package}}=={{version}}"], check=True)
     print("TREE_PRIV_DEPENDENCIES_READY catboost=1.2.10 scipy=1.16.3", flush=True)
+
+    sys.path.insert(0, str(CODE_ROOT))
+    from experiments.tree_privileged.kaggle import runtime_identity_sha256
+    if runtime_identity_sha256(CODE_ROOT) != CODE_SHA256:
+        raise RuntimeError("runtime_code_sha256_differs")
+    print(f"TREE_PRIV_CODE_READY sha256={{CODE_SHA256}} size_bytes={{len(payload)}}", flush=True)
 
     STAGE = "inputs"
     import torch
