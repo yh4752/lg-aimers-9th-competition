@@ -10,7 +10,7 @@ def test_contract_seals_budget_candidates_and_submission_boundary() -> None:
     assert contract.folds == ((2021, 2022), (2022, 2023), (2023, 2024))
     assert contract.screen_seed == 3407
     assert contract.confirm_seeds == (42, 2026)
-    assert contract.candidates == ("P", "D15", "D35", "PD15", "PD35")
+    assert contract.candidates == ("P",)
     assert contract.teacher_lambdas == (0.15, 0.35)
     assert contract.wall_seconds == 37_800
     assert contract.submission_package is False

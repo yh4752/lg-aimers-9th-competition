@@ -15,7 +15,7 @@ class PrivilegedContractError(ValueError):
 
 DEFAULT_CONTRACT = Path(__file__).with_name("contract.json")
 _FOLDS = ((2021, 2022), (2022, 2023), (2023, 2024))
-_CANDIDATES = ("P", "D15", "D35", "PD15", "PD35")
+_CANDIDATES = ("P",)
 
 
 @dataclass(frozen=True)
@@ -246,4 +246,3 @@ def load_contract(path: Path = DEFAULT_CONTRACT) -> PrivilegedContract:
 
 def contract_sha256(path: Path = DEFAULT_CONTRACT) -> str:
     return sha256(Path(path).read_bytes()).hexdigest()
-

@@ -9,7 +9,7 @@
     "e2_handoff_sha256": "4dd0c9012b9a59e5235b76d6fe1f6ded4df4b404cab0082c0f3084b8c384050f"
   },
   "folds": [[2021, 2022], [2022, 2023], [2023, 2024]],
-  "candidates": ["P", "D15", "D35", "PD15", "PD35"],
+  "candidates": ["P"],
   "screen_seed": 3407,
   "confirm_seeds": [42, 2026],
   "teacher": {
