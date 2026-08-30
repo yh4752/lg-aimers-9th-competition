@@ -1,0 +1,56 @@
+{
+  "schema_version": 1,
+  "campaign_id": "direct_target_expert_v1",
+  "folds": [[2021, 2022], [2022, 2023], [2023, 2024]],
+  "screening_seed": 3407,
+  "confirmation_seeds": [42, 2026],
+  "experts": ["D0", "D1", "D2", "D3", "D4", "D5", "D6", "D7"],
+  "screening_parameters": {
+    "iterations": 1800,
+    "depth": 9,
+    "learning_rate": 0.03,
+    "max_ctr_complexity": 3,
+    "border_count": 128,
+    "od_wait": 150
+  },
+  "final_parameters": {
+    "iterations": 2400,
+    "depth": 10,
+    "learning_rate": 0.03,
+    "max_ctr_complexity": 3,
+    "border_count": 128,
+    "od_wait": 150
+  },
+  "maximum_selected_experts": 4,
+  "maximum_deployed_models": 9,
+  "probability_tolerance": 0.000001,
+  "stable_gate": {
+    "weighted_gain": 0.00005,
+    "latest_gain": 0.0,
+    "minimum_fold_gain": -0.00003,
+    "maximum_segment_regression": 0.0003,
+    "bootstrap_lower": 0.0,
+    "minimum_non_worse_seeds": 2
+  },
+  "aggressive_gate": {
+    "latest_gain": 0.00015,
+    "recent_heavy_gain": 0.00008,
+    "minimum_fold_gain": -0.00025,
+    "maximum_segment_regression": 0.001,
+    "latest_bootstrap_lower": -0.00005,
+    "minimum_improving_latest_seeds": 2
+  },
+  "runtime": {
+    "stage_a_wall_seconds": 39600,
+    "stage_b_wall_seconds": 32400,
+    "new_job_guard_seconds": 1800,
+    "artifact_reserve_seconds": 1200,
+    "snapshot_interval_seconds": 600,
+    "minimum_free_bytes": 8589934592
+  },
+  "versions": {
+    "catboost": "1.2.10",
+    "pandas": "2.0.3",
+    "numpy": "1.26.4"
+  }
+}
