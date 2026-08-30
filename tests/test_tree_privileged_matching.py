@@ -38,11 +38,11 @@ def _maps() -> EntityMaps:
 
 def test_entity_maps_use_the_mapping_contract_that_retains_trackman_ids(monkeypatch) -> None:
     pitcher_mapping = pd.DataFrame({
-        "pitcher_id": [11, 12], "pitcher_trackman_id": [111, 112],
+        "pitcher_id": [11, 12], "pitcher_trackman_id": [111.0, float("nan")],
         "tm_match_accepted": [1, 0],
     })
     batter_mapping = pd.DataFrame({
-        "batter_id": [21, 22], "batter_trackman_id": [211, 212],
+        "batter_id": [21, 22], "batter_trackman_id": [211.0, float("nan")],
         "tm_batter_match_accepted": [1, 0],
     })
     monkeypatch.setattr(

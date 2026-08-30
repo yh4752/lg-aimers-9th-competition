@@ -127,8 +127,14 @@ def _fit_maps(main: pd.DataFrame, history: pd.DataFrame, cutoff_year: int) -> En
     pitcher = pitcher.loc[pitcher["tm_match_accepted"].eq(1), ["pitcher_id", "pitcher_trackman_id"]]
     batter = batter.loc[batter["tm_batter_match_accepted"].eq(1), ["batter_id", "batter_trackman_id"]]
     return EntityMaps.from_mappings(
-        pitchers=dict(pitcher.itertuples(index=False, name=None)),
-        batters=dict(batter.itertuples(index=False, name=None)),
+        pitchers={
+            _integer(main_id, "pitcher_id", 0): _integer(trackman_id, "pitcher_trackman_id", 0)
+            for main_id, trackman_id in pitcher.itertuples(index=False, name=None)
+        },
+        batters={
+            _integer(main_id, "batter_id", 0): _integer(trackman_id, "batter_trackman_id", 0)
+            for main_id, trackman_id in batter.itertuples(index=False, name=None)
+        },
     )
 
 
