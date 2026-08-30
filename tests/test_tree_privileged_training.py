@@ -45,7 +45,7 @@ def _baseline() -> pd.DataFrame:
     }).loc[:, PREDICTION_COLUMNS]
 
 
-def _feature_builder(train, history, *, valid_year, candidate_id):
+def _feature_builder(train, history, *, valid_year, candidate_id, teacher_evidence, strengths):
     state = SimpleNamespace(
         categorical_columns=("cat",), candidate_id=candidate_id, feature_columns=("cat",),
         profile_columns=(), teacher_evidence_hashes=MappingProxyType({}), selected_strengths=None,

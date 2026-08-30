@@ -77,6 +77,7 @@ def fit_candidate_features(
     strengths: ProfileStrengths | tuple[int, int, int] = (75, 150, 300),
     base_builder: Callable[..., tuple[TreeFeatureState, TreeFeatureBatch]] = fit_tree_features,
     teacher_builder: Callable[..., TeacherEvidence] = build_teacher_oof,
+    teacher_evidence: TeacherEvidence | None = None,
 ) -> tuple[CandidateFeatureState, CandidateFeatureBatch]:
     if candidate_id not in _CANDIDATES:
         raise CandidateFeatureError("candidate ID differs")
@@ -99,7 +100,7 @@ def fit_candidate_features(
     hard_target = np.asarray(base.target, dtype="float64")
     soft_target = hard_target.copy()
     if teacher_lambda:
-        evidence = teacher_builder(train, history, cutoff_year=valid_year - 1)
+        evidence = teacher_evidence or teacher_builder(train, history, cutoff_year=valid_year - 1)
         hashes = {
             "match_sha256": evidence.match_sha256,
             "mapping_sha256": evidence.mapping_sha256,
@@ -141,4 +142,3 @@ def transform_candidate_features(rows: pd.DataFrame, state: CandidateFeatureStat
     if tuple(frame.columns) != state.feature_columns:
         raise CandidateFeatureError("candidate inference feature schema differs")
     return CandidateFeatureBatch(frame, base.anchor, base.row_id, None, None, None)
-

@@ -50,6 +50,8 @@ class FullFitResult:
     frozen_state: Path
     nested_e2_delivery: Path
     manifest: Path
+    state: CandidateFeatureState
+    model_objects: tuple[object, ...]
 
 
 def _expected_bindings() -> dict[str, str]:
@@ -138,6 +140,7 @@ def fit_accepted_candidate(
     if type(batch) is not CandidateFeatureBatch or batch.soft_target is None:
         raise PrivilegedFullFitError("full-fit soft target differs")
     models: dict[int, Path] = {}
+    model_objects: list[object] = []
     contract = load_contract().catboost
     for index, seed in enumerate(token.seeds):
         parameters = {
@@ -156,6 +159,7 @@ def fit_accepted_candidate(
         if not temporary.is_file() or temporary.stat().st_size == 0:
             raise PrivilegedFullFitError("full-fit model output is empty")
         os.replace(temporary, path); models[seed] = path
+        model_objects.append(model)
     frozen = root / "frozen_state"; frozen.mkdir()
     tree_root = frozen / "tree_state"
     export_frozen_tree_state(state.tree_state, tree_root, candidate_id="c1_anchor_residual")
@@ -175,5 +179,5 @@ def fit_accepted_candidate(
         "e2_delivery_sha256": file_sha256(nested),
         "profile_state_sha256": sha256((frozen / "profile_state.json").read_bytes()).hexdigest(),
     }, sort_keys=True), encoding="utf-8")
-    return FullFitResult(token.decision.candidate_id, root, MappingProxyType(models), frozen, nested, manifest)
-
+    return FullFitResult(token.decision.candidate_id, root, MappingProxyType(models), frozen, nested,
+                         manifest, state, tuple(model_objects))

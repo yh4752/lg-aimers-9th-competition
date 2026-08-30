@@ -3,6 +3,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from hashlib import sha256
+import json
+from pathlib import Path
 from types import MappingProxyType
 from typing import Mapping
 
@@ -39,6 +41,49 @@ class TeacherEvidence:
     match_sha256: str
     mapping_sha256: str
     teacher_oof_sha256: str | None
+
+
+def save_teacher_evidence(evidence: TeacherEvidence, directory: Path) -> Path:
+    if type(evidence) is not TeacherEvidence:
+        raise PrivilegedTeacherError("teacher evidence type differs")
+    root = Path(directory)
+    if root.exists() and any(root.iterdir()):
+        raise PrivilegedTeacherError("teacher cache is not empty")
+    root.mkdir(parents=True, exist_ok=True)
+    np.save(root / "probability.npy", np.asarray(evidence.probability, dtype="float32"), allow_pickle=False)
+    np.save(root / "accepted_mask.npy", np.asarray(evidence.accepted_mask, dtype="bool"), allow_pickle=False)
+    metadata = {
+        "coverage": evidence.coverage, "latest_coverage": evidence.latest_coverage,
+        "coverage_by_segment": dict(evidence.coverage_by_segment), "status": evidence.status,
+        "distillation_allowed": evidence.distillation_allowed, "match_sha256": evidence.match_sha256,
+        "mapping_sha256": evidence.mapping_sha256, "teacher_oof_sha256": evidence.teacher_oof_sha256,
+        "probability_sha256": sha256((root / "probability.npy").read_bytes()).hexdigest(),
+        "accepted_mask_sha256": sha256((root / "accepted_mask.npy").read_bytes()).hexdigest(),
+    }
+    (root / "metadata.json").write_text(json.dumps(metadata, sort_keys=True), encoding="utf-8")
+    return root
+
+
+def load_teacher_evidence(directory: Path) -> TeacherEvidence:
+    root = Path(directory)
+    try:
+        metadata = json.loads((root / "metadata.json").read_text(encoding="utf-8"))
+        probability_path, mask_path = root / "probability.npy", root / "accepted_mask.npy"
+        if (sha256(probability_path.read_bytes()).hexdigest() != metadata["probability_sha256"]
+                or sha256(mask_path.read_bytes()).hexdigest() != metadata["accepted_mask_sha256"]):
+            raise PrivilegedTeacherError("teacher cache member differs")
+        probability = np.load(probability_path, allow_pickle=False)
+        accepted = np.load(mask_path, allow_pickle=False)
+    except PrivilegedTeacherError:
+        raise
+    except Exception as error:
+        raise PrivilegedTeacherError(f"teacher cache cannot be loaded: {error}") from error
+    return TeacherEvidence(
+        _readonly(probability, "float32"), _readonly(accepted, "bool"), float(metadata["coverage"]),
+        float(metadata["latest_coverage"]), MappingProxyType(dict(metadata["coverage_by_segment"])),
+        str(metadata["status"]), bool(metadata["distillation_allowed"]), (),
+        str(metadata["match_sha256"]), str(metadata["mapping_sha256"]), metadata["teacher_oof_sha256"],
+    )
 
 
 def _frame_sha256(frame: pd.DataFrame) -> str:
@@ -145,4 +190,3 @@ def build_teacher_oof(
         distillation_allowed=True, split_evidence=tuple(split_evidence), match_sha256=match_sha,
         mapping_sha256=mapping_sha, teacher_oof_sha256=_vector_sha256(train["row_id"], probability),
     )
-

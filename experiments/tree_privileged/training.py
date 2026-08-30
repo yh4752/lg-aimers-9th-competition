@@ -17,6 +17,8 @@ from experiments.tree_expert.inputs import PREDICTION_COLUMNS, VerifiedOfficialD
 
 from .contracts import load_contract
 from .features import CandidateFeatureBatch, CandidateFeatureSkip, fit_candidate_features, transform_candidate_features
+from .profiles import ProfileStrengths
+from .teacher import TeacherEvidence
 
 
 class PrivilegedTrainingError(RuntimeError):
@@ -140,6 +142,8 @@ def run_candidate_job(
     model_factory: ModelFactory | None = None,
     feature_builder=fit_candidate_features,
     feature_transformer=transform_candidate_features,
+    teacher_evidence: TeacherEvidence | None = None,
+    strengths: ProfileStrengths | tuple[int, int, int] = (75, 150, 300),
 ) -> CandidateJobResult:
     output = Path(output_dir); output.mkdir(parents=True, exist_ok=True)
     _atomic(output / "job.json", _canonical({**asdict(job), "gpu_id": gpu_id}))
@@ -153,6 +157,7 @@ def run_candidate_job(
         aligned = _baseline(baseline, valid_labeled)
         state, train_batch = feature_builder(
             fit_rows, history, valid_year=job.valid_year, candidate_id=job.candidate_id,
+            teacher_evidence=teacher_evidence, strengths=strengths,
         )
         valid_batch = feature_transformer(valid_labeled.drop(columns="control_success"), state)
         if train_batch.soft_target is None or valid_batch.soft_target is not None:
@@ -197,4 +202,3 @@ def run_candidate_job(
                                     f"{type(error).__name__}: {error}", None)
         _terminal(output, result, {"status": "failed", "reason": result.failure})
         return result
-
