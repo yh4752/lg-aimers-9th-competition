@@ -49,7 +49,8 @@ def _prediction_frame(source: pd.DataFrame, probability) -> pd.DataFrame:
     }
     if not required.issubset(source.columns):
         raise FinalRuntimeError("candidate source columns differ")
-    output = source.loc[:, sorted(required)].copy(deep=True)
+    optional = {"base_state", "count_state"}.intersection(source.columns)
+    output = source.loc[:, sorted(required | optional)].copy(deep=True)
     output["probability"] = probability
     return output
 

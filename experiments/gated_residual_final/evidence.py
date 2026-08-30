@@ -53,11 +53,18 @@ def _metadata(frame: pd.DataFrame, year: int) -> pd.DataFrame:
     }
     if type(frame) is not pd.DataFrame or frame.empty or not required.issubset(frame.columns):
         raise EvidenceError(f"E2 OOF columns differ: {year}")
-    output = frame.loc[:, sorted(required)].copy()
+    optional = {"base_state", "balls_before", "strikes_before"}.intersection(frame.columns)
+    output = frame.loc[:, sorted(required | optional)].copy()
     if not pd.to_numeric(output["oof_year"], errors="coerce").eq(year).all():
         raise EvidenceError(f"E2 OOF year differs: {year}")
     output["row_id"] = output["row_id"].astype(str)
     output["hand_matchup"] = output["pitcher_hand"].astype(str) + output["batter_hand"].astype(str)
+    if {"balls_before", "strikes_before"}.issubset(output.columns):
+        output["count_state"] = (
+            pd.to_numeric(output["balls_before"], errors="raise").astype(int).astype(str)
+            + "-"
+            + pd.to_numeric(output["strikes_before"], errors="raise").astype(int).astype(str)
+        )
     return output
 
 

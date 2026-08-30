@@ -193,7 +193,10 @@ def evidence_from_predictions(
         latest_non_worse += int(seed_folds.get(latest_year, float("-inf")) >= 0.0)
     threshold = int(minimum_segment_rows or load_contract().gates["minimum_segment_rows"])
     regressions: list[float] = []
-    segment_columns = [column for column in ("game_type", "hand_matchup") if column in frame]
+    segment_columns = [
+        column for column in ("game_type", "hand_matchup", "base_state", "count_state")
+        if column in frame
+    ]
     work = frame.assign(_gain=gain)
     for column in segment_columns:
         for _, group in work.groupby(column, sort=True, observed=True):

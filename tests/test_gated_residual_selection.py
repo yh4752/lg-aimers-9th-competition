@@ -92,3 +92,21 @@ def test_evidence_computes_seed_and_segment_gates() -> None:
     assert evidence.non_worse_seed_count == 3
     assert evidence.latest_non_worse_seed_count == 3
     assert evidence.maximum_segment_regression == 0.0
+
+
+def test_base_and_count_segments_are_included_in_regression_gate() -> None:
+    frame = pd.DataFrame({
+        "row_id": ["a", "b", "c", "d"], "target": [1, 1, 0, 0],
+        "p_anchor": [0.5] * 4, "probability": [0.6, 0.6, 0.6, 0.6],
+        "oof_year": [2024] * 4, "pitcher_id": ["p1", "p2", "p3", "p4"],
+        "game_type": ["R"] * 4, "hand_matchup": ["RL"] * 4,
+        "base_state": ["empty", "empty", "loaded", "loaded"],
+        "count_state": ["0-0", "0-0", "3-2", "3-2"],
+    })
+
+    evidence = evidence_from_predictions(
+        "candidate", frame, seed_predictions={42: frame, 2026: frame, 3407: frame},
+        minimum_segment_rows=1, bootstrap_repetitions=50,
+    )
+
+    assert evidence.maximum_segment_regression > 0.1
