@@ -1,0 +1,35 @@
+{
+  "version": "gated_residual_final_v1",
+  "search": {
+    "alpha": [0.025, 0.05, 0.075, 0.1, 0.15, 0.2, 0.3],
+    "k": [25, 100, 400],
+    "beta": [0.05, 0.1, 0.2],
+    "lambda": [100, 500, 2000],
+    "archetypes": ["G0", "G1", "G2", "G3"]
+  },
+  "gates": {
+    "weighted_gain": 0.00005,
+    "latest_gain": 0.0,
+    "minimum_fold_gain": -0.00003,
+    "bootstrap_lower": 0.0,
+    "minimum_non_worse_seeds": 2,
+    "minimum_latest_non_worse_seeds": 2,
+    "maximum_segment_regression": 0.0003,
+    "minimum_segment_rows": 5000
+  },
+  "expected_hashes": {
+    "e2_submission": "8bc33042b9258049f905df0c733b1153d1cedfac39cb0732b2a7e154629d779a",
+    "stage_a_handoff": "2894e29ff83291f95f72e7708d915161ea8a7a13fee10090be8e61872c65adae",
+    "stage_b_handoff": "e435f431e4d21036bc0524d14d73d0701e2cdca0ad4c1cb78c28f9017b066929",
+    "train_csv": "d2081186b458b49f60b082be480c273135833e15ba59a76d033af28bcf8763ff",
+    "trackman_history": "f7818f9ee0ccefe7c2cf69fa99efe6e5cb882d8b886dd96d2394bcf3b53f33a9"
+  },
+  "runtime": {
+    "maximum_seconds": 28800,
+    "full_fit_guard_seconds": 7200,
+    "full_fit_seeds": [42, 2026, 3407],
+    "maximum_deployed_models": 9,
+    "depth": 10,
+    "maximum_iterations": 2400
+  }
+}
