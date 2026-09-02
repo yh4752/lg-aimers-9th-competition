@@ -151,9 +151,10 @@ checkpoint가 2~3 epoch에 형성됐다. 학습 난수의 출발값인 seed를 �
 
 ### Tree Expert E2
 
-E2는 기존 확률을 **anchor**, 즉 출발점으로 두고 CatBoost가 남은 오차만 학습했다.
-이를 **residual correction**, 잔차 보정이라고 한다. 정답 전체를 새로 맞히기보다
-기존 답안에서 반복되는 실수만 고치는 방식이다.
+E2의 **anchor**, 즉 출발점은 TabM 예측이 아니었다. 과거 학습 데이터에서 투수의
+통산·시즌·최근 성공률을 계산하고 표본 수에 따라 전체 평균 쪽으로 평활화한 확률이었다.
+CatBoost는 정답 전체가 아니라 이 확률이 남긴 오차만 학습했다. 이를 **residual
+correction**, 잔차 보정이라고 한다. TabM은 E2의 개선을 판단하기 위한 비교 기준이었다.
 
 seed 42, 2026, 3407의 세 모델을 평균했고 세 시간 fold에서 모두 개선됐다. weighted
 Brier 개선은 `0.0008375137`, 가장 약한 fold의 개선도 `0.0003439904`였다.
@@ -356,14 +357,14 @@ Codex가 대신 실행한 것으로 표현하지 않는다.
 Git에는 원본 데이터, 대용량 OOF, 모델과 ZIP을 올리지 않는다. 작은 JSON evidence와
 SHA-256은 대용량 원본이 바뀌지 않았는지 확인하는 식별자로 사용한다.
 
-## 13. 블로그로 옮길 때의 기준
+## 13. 공개 블로그 글
 
-이 문서는 저장소의 사실 기준이다. `yonghyun-blog`에 발행할 글은 이 문서를 그대로
-복사하기보다 다음 세 편으로 나누는 편이 독자가 이해하기 쉽다.
+이 문서는 저장소의 사실 기준이다. `yonghyun-blog`에는 내용을 그대로 복사하지 않고,
+독자가 판단의 흐름을 따라가기 쉽도록 다음 세 편으로 나눠 공개했다.
 
-1. **검증 설계 편**: 왜 무작위 분할 대신 시간 전이 OOF를 사용했는가
-2. **모델 개선 편**: TabM 872점에서 Tree Expert E2 977점까지 무엇을 바꿨는가
-3. **운영 회고 편**: 9시간 실행 후 OOM이 남긴 실험 예산과 복구 설계 교훈
+1. **검증 설계 편**: [무작위 분할 대신 시간 전이 OOF를 선택한 이유](https://yonghyun-blog.vercel.app/blog/lg-aimers-9th-competition/2026-09-02-temporal-oof-validation/)
+2. **모델 개선 편**: [TabM 872점에서 Tree Expert E2 977점까지](https://yonghyun-blog.vercel.app/blog/lg-aimers-9th-competition/2026-09-02-tabm-to-tree-expert-e2/)
+3. **운영 회고 편**: [9시간 학습이 OOM으로 끝난 뒤 세운 ML 실험 운영 원칙](https://yonghyun-blog.vercel.app/blog/lg-aimers-9th-competition/2026-09-02-ml-experiment-oom-retrospective/)
 
 공개 글에서는 개인 로컬 경로와 대용량 산출물 위치를 제외한다. 면접용 답변과 아직
 이해가 부족한 부분은 공개 글에 섞지 않고 별도 개인 노트로 관리한다. 블로그 글에서도

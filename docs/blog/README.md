@@ -7,3 +7,9 @@
 - 글은 이 폴더에서 수정한 뒤 블로그 저장소의 `npm run sync:posts`로 동기화한다.
 - `src/content/blog/`에 복사된 발행본은 직접 수정하지 않는다.
 - 수치와 판정은 `reports/experiment_registry.json`과 `reports/EXPERIMENT_LEDGER.md`를 기준으로 확인한다.
+
+## 공개 글
+
+1. [무작위 분할 대신 시간 전이 OOF를 선택한 이유](https://yonghyun-blog.vercel.app/blog/lg-aimers-9th-competition/2026-09-02-temporal-oof-validation/)
+2. [TabM 872점에서 Tree Expert E2 977점까지](https://yonghyun-blog.vercel.app/blog/lg-aimers-9th-competition/2026-09-02-tabm-to-tree-expert-e2/)
+3. [9시간 학습이 OOM으로 끝난 뒤 세운 ML 실험 운영 원칙](https://yonghyun-blog.vercel.app/blog/lg-aimers-9th-competition/2026-09-02-ml-experiment-oom-retrospective/)
