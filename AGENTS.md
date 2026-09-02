@@ -3,7 +3,7 @@
 ## DACON 규칙 안전선
 
 - 현재 규칙은 `competition_rules/policy.json`의
-  `dacon-236743-2026-08-13`이다. 모든 실험은 코드 작성 전에 해당 디렉터리와
+  `dacon-236743-2026-08-15`다. 모든 실험은 코드 작성 전에 해당 디렉터리와
   자기 범위의 `experiment_contract.json`을 읽고 검증한다.
 - 계약은 공식 train·Trackman만 사용하고, 학습은 training rows only, 평가는
   `current_row_only`, 시간 정보는 pre-pitch only, 외부 API는 false여야 한다.

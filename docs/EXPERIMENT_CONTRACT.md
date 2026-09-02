@@ -15,7 +15,7 @@
 ## DACON 규칙 전이 gate
 
 현재 정책은 `competition_rules/policy.json`의
-`dacon-236743-2026-08-13`이다. 각 실험은 자기 설정과 후보 범위를 고정한
+`dacon-236743-2026-08-15`다. 각 실험은 자기 설정과 후보 범위를 고정한
 `experiment_contract.json`을 가져야 하며, 평가 범위는 `current_row_only`다.
 
 1. **실험 시작 gate**: 공식 train·TrackMan만 사용하고, training rows only,

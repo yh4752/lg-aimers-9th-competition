@@ -2,7 +2,7 @@
 
 ## 결론
 
-확인된 실험은 **25건**, 원본 결과가 없어 보류한 실행은 **6건**이다. 서로 다른 `comparison_group`의 Brier를 한 순위로 합치지 않았으며, 실행 실패와 성능 기각도 분리했다.
+확인된 실험은 **26건**, 원본 결과가 없어 보류한 실행은 **6건**이다. 서로 다른 `comparison_group`의 Brier를 한 순위로 합치지 않았으며, 실행 실패와 성능 기각도 분리했다.
 
 현재 최고 규칙 준수 Public 결과는 Tree Expert E2다. E2 이후 후보는 일부 양의 OOF 신호를 보였지만 최소 개선량, 시즌 안정성, 배포 정렬 또는 오차 다양성 중 하나 이상을 통과하지 못했다.
 
@@ -45,6 +45,7 @@ Public 점수는 OOF Brier와 다른 척도이며, 이 5건으로 점수 환산�
 | `tree_hierarchical_residual_v1` | rejected | — | 6.29719e-05 | -8.359e-06 | — | — | B |
 | `tree_hetero_residual_s3_v1` | rejected | — | 1.25014545316763e-05 | -1.36291450071454e-05 | 1.70650261923988e-05 | 0.998725379488123 | B |
 | `tree_privileged_profile_p_only_v1` | rejected | — | 2.02677513555682e-05 | — | 2.24495818452464e-05 | — | A |
+| `failure_regime_e3_v1` | failed | — | — | — | — | — | A |
 
 ### `comparison_group=failure_label_cutoff_audit`
 
@@ -122,6 +123,7 @@ Public 점수는 OOF Brier와 다른 척도이며, 이 5건으로 점수 환산�
 | `instability` | 5 |
 | `performance` | 7 |
 | `rule_quarantine` | 1 |
+| `runtime` | 1 |
 
 ## 증거가 부족한 실행
 

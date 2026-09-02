@@ -293,5 +293,7 @@ AI는 실행 코드, 중단 후 재개할 수 있는 handoff 구조, manifest와
 8. 다음 실험은 모델 아이디어와 함께 대표 작업의 시간·peak RAM을 먼저 측정하고,
    실행 제한 안에 decision과 audit까지 끝나는지 계산한 뒤 시작한다.
 
-초기 실험의 세부 기록은 [라운드 문서](rounds/README.md), 모든 완료 실행의 숫자와
-판정은 [실험 장부](../reports/EXPERIMENT_LEDGER.md)에서 이어서 볼 수 있다.
+프로젝트 전체를 비전공자 관점에서 다시 읽으려면
+[프로젝트 회고](PROJECT_RETROSPECTIVE.md)를 참고하면 된다. 초기 실험의 세부 기록은
+[라운드 문서](rounds/README.md), 모든 완료 실행의 숫자와 판정은
+[실험 장부](../reports/EXPERIMENT_LEDGER.md)에서 이어서 볼 수 있다.

@@ -174,6 +174,7 @@ def test_generated_audit_and_readme_match_registry_public_scores() -> None:
     ]
     audit = Path("reports/EXPERIMENT_RESET_AUDIT.md").read_text(encoding="utf-8")
     readme = Path("README.md").read_text(encoding="utf-8")
+    assert audit == render_audit_markdown(audit_registry(payload))
     for score in scores:
         assert score in audit
     assert "977.3809532715" in readme
