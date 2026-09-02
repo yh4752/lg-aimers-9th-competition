@@ -108,7 +108,7 @@ def test_load_registry_rejects_non_object_root(tmp_path: Path) -> None:
 def test_repository_registry_is_valid_and_contains_known_public_scores() -> None:
     payload = load_registry(Path("reports/experiment_registry.json"))
     experiments = {row["experiment_id"]: row for row in payload["experiments"]}
-    assert len(experiments) == 25
+    assert len(experiments) == 26
     assert experiments["catboost_smooth_v1"]["public_score"] == 828.9963889533
     assert experiments["xgboost_aggressive_capacity_v1"]["public_score"] == 820.9583317093
     assert experiments["tabm_hand_matchup_version_d_seed3407_v1"]["public_score"] == 872.3920184667
@@ -117,6 +117,9 @@ def test_repository_registry_is_valid_and_contains_known_public_scores() -> None
         0.00002026775135556824
     )
     assert experiments["tree_privileged_profile_p_only_v1"]["status"] == "rejected"
+    assert experiments["failure_regime_e3_v1"]["status"] == "failed"
+    assert experiments["failure_regime_e3_v1"]["failure_class"] == "runtime"
+    assert experiments["failure_regime_e3_v1"]["submission_sha256"] is None
 
 
 def test_audit_never_ranks_different_comparison_groups_together() -> None:

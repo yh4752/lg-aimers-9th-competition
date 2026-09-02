@@ -31,6 +31,7 @@
 | 23 | `tree_hetero_residual_s3_v1` | E2 anchor + XGBoost·LightGBM 잔차 보정 | 2021→2022·2022→2023 구조 선택, 2023→2024 확인 | XGBoost gain `0.0000058661`·상관 `0.9985597`, LightGBM gain `0.0000125015`·상관 `0.9987254`; 두 후보 모두 2022→2023 악화 | rejected; fixed direct residual structure closed | — | [rejection](rejections/tree_hetero_residual_s3_rejection.json) |
 | 24 | `tree_privileged_trackman_teacher_v1` | TrackMan exact-pitch teacher 적격성 감사 | 전체·최신 시즌 exact match coverage | 전체 약 `0.39%`, 최신 약 `0.29%`; 요구 기준 `30%/20%`에 크게 미달 | diagnostic; exact-match distillation closed | — | handoff SHA-256 `5754124…ddd2` |
 | 25 | `tree_privileged_profile_p_only_v1` | E2 anchor + rolling target profile CatBoost | 2021→2022·2022→2023·2023→2024 | 공식 weighted gain `0.0000202678`, latest `0.0000224496`, 3 folds 개선; 최소 gain `0.00005` 미달 | rejected; profile definition must change | — | handoff SHA-256 `b89c7757…bd8fc` |
+| 26 | `failure_regime_e3_v1` | E2 anchor + 전역·최근·R/F 성공 전문가 + middle·wild·reverse 전문가 + 행 단위 gate | 2021→2022·2022→2023 구조 선택, 2023→2024 확인, 3 seed 계획 | OOF 작업 63개 중 53개 완료: screening 14, confirmation 7, extra seed 32. Kaggle Version 70이 `33,677.4초` 뒤 메모리 부족으로 종료돼 판정·전체 학습·감사에 도달하지 못함 | failed; resource memory, 제출 패키지 차단 | — | [failure evidence](evidence/failure_regime_e3_20260902.json) |
 
 ## 원본 증거 재확보가 필요한 실행
 
@@ -73,6 +74,14 @@
   방향이었지만 공식 weighted gain이 기준의 약 40.5%에 그쳤다. 별도 3-seed 평균
   진단도 `0.0000418138`로 기준에 못 미쳤고 2023 fold gain은 `0.0000045861`이었다.
   같은 profile 정의와 exact-match 구성을 반복하지 않는다.
+- E3는 과거 failure audit의 수치를 숨기지 않고 해석을 바꾼 후보였다. 기존 감사의
+  `7.16~7.44%` middle·reverse 중첩을 삭제 사유가 아니라 두 현상이 함께 나타나는
+  신호로 보존했고, `wild`는 성공도 middle도 reverse도 아닌 실패로 정의했다.
+  실제 실행에서는 OOF 작업 63개 중 53개까지 끝났지만 약 9시간 21분 뒤 메모리 부족으로
+  종료됐다. 저장 상태는 `extra_seeds`였고 decision·full fit·audit는 시작하지 못했다.
+  따라서 부분 Brier로 성능을 주장하지 않으며 이 후보는 `rejected`가 아닌 `failed`다.
+  다음 반복은 모델 가설보다 먼저 파일럿 실측으로 peak RAM과 작업 시간을 계산하고,
+  단계 사이 모델 풀 해제와 단일 최신 resume 보존을 계약에 포함해야 한다.
 - 대용량 OOF, 모델과 ZIP은 Google Drive에 두고 이 장부는 작은 evidence와 실행 ID,
   SHA-256으로 원본을 식별한다.
 

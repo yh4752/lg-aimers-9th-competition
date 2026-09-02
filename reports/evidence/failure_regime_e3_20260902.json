@@ -1,0 +1,66 @@
+{
+  "schema_version": 1,
+  "experiment_id": "failure_regime_e3_v1",
+  "recorded_at": "2026-09-02",
+  "status": "failed",
+  "status_reason": "Kaggle Version 70 exhausted available memory after 33677.4 seconds before OOF completion",
+  "failure_class": "resource_memory",
+  "candidate_decision": null,
+  "submission_eligible": false,
+  "submission_block_reason": "The campaign did not complete OOF selection, full fit, inference audit, or packaging gates",
+  "runtime": {
+    "platform": "Kaggle",
+    "accelerator": "Tesla T4 x2",
+    "elapsed_seconds": 33677.4,
+    "terminal_message": "Your notebook tried to allocate more memory than is available.0"
+  },
+  "campaign_state": {
+    "saved_status": "running",
+    "saved_phase": "extra_seeds",
+    "recipe_id": "b12372c20e00ed6ef96f895e7aaf7fb4913b210478c7d44214b0764539f5227b",
+    "oof_jobs_planned": 63,
+    "oof_jobs_completed": 53,
+    "oof_jobs_pending": 10,
+    "phase_counts": {
+      "screening": 14,
+      "confirmation": 7,
+      "extra_seeds": 32,
+      "decision": 0,
+      "full_fit": 0,
+      "audit": 0
+    }
+  },
+  "artifacts": [
+    {
+      "name": "results.zip",
+      "size_bytes": 2280623307,
+      "sha256": "cdd0e913c3439a12821cdaba1ca643f462c3b93186fe549e7d6900a73f462823",
+      "role": "final Kaggle output archive"
+    },
+    {
+      "name": "failure_regime_e3_review.zip",
+      "size_bytes": 12892553,
+      "sha256": "405c5cd2cb2005f79eee105c88b2a0ccbd7bfb6cfb0b9f4f15e59842f80f461e",
+      "role": "earlier partial review bundle"
+    },
+    {
+      "name": "failure_regime_e3_handoff.zip",
+      "size_bytes": 12892554,
+      "sha256": "bf9f16af73024003474ca52982e5f6703dddae953632ef320af8b624ec47aaa3",
+      "role": "earlier partial handoff bundle"
+    }
+  ],
+  "source_verification": {
+    "runtime_member_count": 47,
+    "matched_member_count": 47,
+    "missing_member_count": 0,
+    "mismatched_member_count": 0,
+    "local_code_identity_sha256": "886dbd423458d3bb9799afc8e712c01f6f2e195f128d89bb7406b4eaf7ec681e",
+    "contract_sha256": "20ee7321c8f2f6b58ca89d84cd75dbcec60666e5c7896d14166efa6e49a3e3b6"
+  },
+  "interpretation": {
+    "performance_claim_allowed": false,
+    "partial_metrics_are_diagnostic_only": true,
+    "lesson": "The aggressive expert design was not rejected by validation; the monolithic run exceeded memory before a candidate decision. Future campaigns must budget peak memory and wall time from measured pilot jobs, release model pools between phases, and preserve one current resume artifact."
+  }
+}

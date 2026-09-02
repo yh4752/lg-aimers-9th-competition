@@ -923,6 +923,51 @@
       "failure_class": "performance",
       "lesson": "The official candidate was too weak; the diagnostic three-seed mean reached gain 0.00004181384518595898, but the 2023 fold gain was only 0.0000045861.",
       "repeat_policy": "redefine"
+    },
+    {
+      "experiment_id": "failure_regime_e3_v1",
+      "family": "catboost_expert_ensemble",
+      "variant": "e2_anchor_failure_regime_gate",
+      "completed_at": "2026-09-02",
+      "status": "failed",
+      "status_reason": "Kaggle exhausted available memory after 33677.4 seconds with 53 of 63 OOF jobs complete",
+      "evidence_grade": "A",
+      "comparison_group": "e2_temporal_3fold",
+      "folds": [
+        "2021->2022",
+        "2022->2023",
+        "2023->2024"
+      ],
+      "validation_rows": null,
+      "baseline_id": "tree_expert_e2_c1_catboost",
+      "baseline_brier": null,
+      "candidate_brier": null,
+      "weighted_gain": null,
+      "worst_fold_gain": null,
+      "latest_fold_gain": null,
+      "max_segment_regression": null,
+      "residual_correlation": null,
+      "seed_stability": "incomplete",
+      "public_score": null,
+      "submission_sha256": null,
+      "artifact_paths": [
+        "results.zip",
+        "failure_regime_e3_review.zip",
+        "failure_regime_e3_handoff.zip"
+      ],
+      "artifact_sha256": [
+        "cdd0e913c3439a12821cdaba1ca643f462c3b93186fe549e7d6900a73f462823",
+        "405c5cd2cb2005f79eee105c88b2a0ccbd7bfb6cfb0b9f4f15e59842f80f461e",
+        "bf9f16af73024003474ca52982e5f6703dddae953632ef320af8b624ec47aaa3"
+      ],
+      "evidence_paths": [
+        "reports/evidence/failure_regime_e3_20260902.json"
+      ],
+      "rule_audit_status": "not_run",
+      "row_independence_status": "not_run",
+      "failure_class": "runtime",
+      "lesson": "The monolithic aggressive campaign exceeded memory before selection; future runs must derive memory and time budgets from measured pilot jobs and release model pools between phases.",
+      "repeat_policy": "blocked"
     }
   ],
   "evidence_gaps": [
