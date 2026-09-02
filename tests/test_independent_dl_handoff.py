@@ -80,11 +80,11 @@ def test_handoff_uses_child_runtime_and_existing_colab_secret() -> None:
     assert "import tabicl" in text
 
 
-def test_roadmap_marks_dl_code_ready_and_waiting_for_user_run() -> None:
+def test_roadmap_records_completed_dl_evidence_and_next_research_boundary() -> None:
     text = (ROOT / "docs/ROADMAP.md").read_text(encoding="utf-8")
 
-    assert "독립 DL 캠페인 코드: `code_ready`" in text
-    assert "Colab Pro·Drive 실행: `waiting_for_user_run`" in text
-    assert "P2 Brier" in text
+    assert "규칙 준수 TabM 단일 모델: Public `872.3920184667`" in text
+    assert "TabM은 유효한 독립 축" in text
+    assert "더 긴 학습과 단순 seed 평균은 이미 이득이" in text
     assert "TabICLv2" in text
-    assert "`research_only`" in text
+    assert "대회 사용 가능성" in text

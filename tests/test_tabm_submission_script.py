@@ -16,6 +16,7 @@ from submission.tabm_candidate import (
     ImportedTabMCandidate,
     render_validation_script,
 )
+from submission.tree_expert_e2_candidate import TREE_E2_ADAPTER_ID
 from submission import tabm_version_d_script as runtime
 
 
@@ -56,7 +57,7 @@ def test_rendered_script_is_deterministic_parseable_and_registered(
     ast.parse(first.decode("utf-8"))
     assert candidate.model_sha256.encode() in first
     assert callable(resolve_adapter_factory(candidate.candidate_id))
-    assert set(ADAPTER_FACTORIES) == {CANDIDATE_ID}
+    assert set(ADAPTER_FACTORIES) == {CANDIDATE_ID, TREE_E2_ADAPTER_ID}
 
 
 def test_package_renderer_equals_validated_renderer(tmp_path: Path) -> None:
