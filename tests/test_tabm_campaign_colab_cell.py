@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 from pathlib import Path
+import subprocess
+import sys
 
 
 CELL = Path("experiments/tabm_campaign/COLAB_STAGE_C_RECOVERY_CELL.py")
+HANDOFF_BUILDER = Path("tools/prepare_tabm_colab_stage_c_handoff.py")
 
 
 def test_colab_cell_is_self_contained_and_small() -> None:
@@ -46,3 +49,14 @@ def test_colab_renderer_is_byte_deterministic() -> None:
     from tools import render_tabm_colab_stage_c_recovery_cell as renderer
 
     assert renderer.render() == renderer.render()
+
+
+def test_colab_handoff_builder_supports_direct_script_execution() -> None:
+    completed = subprocess.run(
+        [sys.executable, str(HANDOFF_BUILDER), "--help"],
+        capture_output=True,
+        check=False,
+        text=True,
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert "--data-dir" in completed.stdout

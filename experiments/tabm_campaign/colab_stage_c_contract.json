@@ -29,6 +29,7 @@
     }
   },
   "target_candidate_id": "c_final__a__p2__piecewise_linear__bce__plateau__s42__s3407__tr2022__va2023",
+  "target_job_config_sha256": "09d83cb9ba103e77920c43f2013778da116634657a18e14f461b7196e4258389",
   "expected_completed_jobs": 20,
   "snapshot_interval_seconds": 1200,
   "interrupt_grace_seconds": 180

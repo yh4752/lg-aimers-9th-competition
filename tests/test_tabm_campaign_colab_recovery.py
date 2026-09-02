@@ -7,6 +7,7 @@ from pathlib import Path
 import stat
 import subprocess
 import sys
+from types import SimpleNamespace
 from zipfile import ZIP_DEFLATED, ZipFile, ZipInfo
 
 import pytest
@@ -16,6 +17,7 @@ from experiments.tabm_campaign.colab_recovery import (
     ProcessReceipt,
     RuntimeIdentity,
     SanitizedResume,
+    _checkpoint_binding,
     acquire_process_lock,
     create_emergency_snapshot,
     file_sha256,
@@ -43,6 +45,28 @@ _MEMBERS = {
     "trackman_history.csv": b"season\n2023\n",
     "train.csv": b"row_id,target\n1,0\n",
 }
+
+
+def test_checkpoint_binding_uses_target_job_config_sha256() -> None:
+    identity = SimpleNamespace(
+        target_candidate_id="candidate",
+        campaign_config_sha256="a" * 64,
+        target_job_config_sha256="b" * 64,
+        training_source_sha256="d" * 64,
+        cache_sha256="c" * 64,
+    )
+    meta = {
+        "candidate_id": "candidate",
+        "epoch": 3,
+        "checkpoint": "checkpoint.pt",
+        "checkpoint_binding": {
+            "config_sha256": "b" * 64,
+            "training_source_sha256": "d" * 64,
+            "cache_sha256": "c" * 64,
+        },
+    }
+
+    assert _checkpoint_binding(meta, identity)["config_sha256"] == "b" * 64
 
 
 def _contract() -> dict[str, object]:
@@ -325,6 +349,7 @@ def _runtime_identity(
         base_manifest_sha256=sanitized.source_manifest_sha256,
         sanitized_resume_sha256=sanitized.sanitized_sha256,
         campaign_config_sha256="a" * 64,
+        target_job_config_sha256="b" * 64,
         runtime_sha256="e" * 64,
         training_source_sha256="d" * 64,
         cache_sha256="c" * 64,
@@ -357,7 +382,7 @@ def _stable_training_dir(
                 "epoch": epoch,
                 "checkpoint": "checkpoint.pt",
                 "checkpoint_binding": {
-                    "config_sha256": identity.campaign_config_sha256,
+                    "config_sha256": identity.target_job_config_sha256,
                     "cache_sha256": identity.cache_sha256,
                     "training_source_sha256": identity.training_source_sha256,
                 },
@@ -632,7 +657,7 @@ def test_supervisor_interrupt_requests_epoch_boundary_and_exports_snapshot(
                     "epoch": 0,
                     "checkpoint": "checkpoint.pt",
                     "checkpoint_binding": {
-                        "config_sha256": identity.campaign_config_sha256,
+                        "config_sha256": identity.target_job_config_sha256,
                         "cache_sha256": identity.cache_sha256,
                         "training_source_sha256": identity.training_source_sha256,
                     },

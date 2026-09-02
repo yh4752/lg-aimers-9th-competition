@@ -913,6 +913,21 @@ def test_checkpoint_validator_accepts_actual_stage_p_cpu_states(tmp_path: Path) 
         meta_adapter_state=None,
     )
 
+    single_bin_mask = payload["model"]["model.num_module.impl.single_bin_mask"]
+    payload["model"]["model.num_module.impl.single_bin_mask"] = torch.ones(
+        1, dtype=torch.bool
+    )
+    torch.save(payload, path)
+    with pytest.raises(RowFeatureProxyError, match="embedding mask"):
+        _validate_checkpoint_payload(
+            job,
+            result,
+            path,
+            meta_epoch=2,
+            meta_adapter_state=None,
+        )
+
+    payload["model"]["model.num_module.impl.single_bin_mask"] = single_bin_mask
     payload["cuda_rng"] = [
         torch.tensor(
             list((42).to_bytes(8, byteorder=sys.byteorder, signed=False)),

@@ -4,6 +4,8 @@ import json
 import os
 import shutil
 import stat
+import subprocess
+import sys
 import threading
 import time
 from hashlib import sha256
@@ -28,6 +30,24 @@ TRAIN = b"row_id,year,control_success\nr1,2023,1\n"
 HISTORY = b"pitcher_id,season\np1,2023\n"
 REAL_CONTRACT_BYTES = DEFAULT_ROW_FEATURE_PROXY_CONTRACT.read_bytes()
 REAL_CONTRACT_SHA = sha256(REAL_CONTRACT_BYTES).hexdigest()
+
+
+def test_prepare_input_cli_can_run_as_a_script_outside_repo(tmp_path: Path) -> None:
+    script = (
+        Path(__file__).resolve().parents[1]
+        / "tools/prepare_tabm_row_feature_colab_input.py"
+    )
+
+    result = subprocess.run(
+        [sys.executable, str(script), "--help"],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "--data-dir" in result.stdout
 
 
 def _write_inputs(root: Path) -> None:

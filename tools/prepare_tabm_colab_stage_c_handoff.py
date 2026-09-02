@@ -8,9 +8,15 @@ import json
 import os
 from pathlib import Path
 import shutil
+import sys
 import tempfile
 from typing import Mapping
 from zipfile import ZIP_DEFLATED, ZipFile, ZipInfo
+
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 from experiments.tabm_campaign.artifacts import verify_resume_bundle
 from experiments.tabm_campaign.colab_recovery import (
@@ -22,7 +28,6 @@ from experiments.tabm_campaign.colab_recovery import (
 )
 
 
-ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_CELL = ROOT / "experiments/tabm_campaign/COLAB_STAGE_C_RECOVERY_CELL.py"
 _ZIP_TIMESTAMP = (2026, 1, 1, 0, 0, 0)
 

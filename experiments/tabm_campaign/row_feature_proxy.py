@@ -840,18 +840,32 @@ def _validate_tabm_model_state(
     ):
         raise RowFeatureProxyError("checkpoint TabM embedding mask is invalid")
     single_bin_mask = state.get("model.num_module.impl.single_bin_mask")
-    if single_bin_mask is not None and (
-        not isinstance(single_bin_mask, torch.Tensor)
-        or single_bin_mask.layout != torch.strided
-        or single_bin_mask.device.type != "cpu"
-        or single_bin_mask.dtype != torch.bool
-        or tuple(single_bin_mask.shape) != (n_num,)
-        or not single_bin_mask.is_contiguous()
-        or single_bin_mask.untyped_storage().nbytes() < single_bin_mask.numel()
-    ):
-        raise RowFeatureProxyError(
-            "checkpoint TabM single-bin embedding mask is invalid"
+    if single_bin_mask is not None:
+        single_bin_mask_valid = (
+            isinstance(single_bin_mask, torch.Tensor)
+            and single_bin_mask.layout == torch.strided
+            and single_bin_mask.device.type == "cpu"
+            and single_bin_mask.dtype == torch.bool
+            and tuple(single_bin_mask.shape) == (n_num,)
+            and single_bin_mask.is_contiguous()
+            and single_bin_mask.untyped_storage().nbytes() >= single_bin_mask.numel()
+            and bool(single_bin_mask.any().item())
         )
+        if single_bin_mask_valid:
+            if n_bins == 1:
+                single_bin_mask_valid = mask is None and bool(
+                    single_bin_mask.all().item()
+                )
+            else:
+                single_bin_mask_valid = mask is not None and torch.equal(
+                    single_bin_mask, mask.sum(dim=1) == 1
+                )
+        if not single_bin_mask_valid:
+            raise RowFeatureProxyError("checkpoint TabM embedding mask is invalid")
+    elif n_bins == 1 or (
+        mask is not None and bool((mask.sum(dim=1) == 1).any().item())
+    ):
+        raise RowFeatureProxyError("checkpoint TabM embedding mask is invalid")
 
     parameter_names = [
         "model.num_module.linear0.weight",

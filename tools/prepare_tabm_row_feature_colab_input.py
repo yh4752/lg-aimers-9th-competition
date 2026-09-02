@@ -2,6 +2,12 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
+import sys
+
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 from experiments.tabm_campaign.row_feature_colab import file_sha256, prepare_input_archive
 from experiments.tabm_campaign.row_feature_contracts import (

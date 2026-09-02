@@ -49,6 +49,7 @@ class RuntimeIdentity:
     base_manifest_sha256: str
     sanitized_resume_sha256: str
     campaign_config_sha256: str
+    target_job_config_sha256: str
     runtime_sha256: str
     training_source_sha256: str
     cache_sha256: str | None
@@ -430,7 +431,7 @@ def _checkpoint_binding(
     if not isinstance(binding, Mapping):
         raise ColabRecoveryError("checkpoint binding is absent")
     required = {
-        "config_sha256": identity.campaign_config_sha256,
+        "config_sha256": identity.target_job_config_sha256,
         "training_source_sha256": identity.training_source_sha256,
     }
     for key, expected in required.items():
@@ -1027,6 +1028,7 @@ def collect_runtime_identity(
     sanitized: SanitizedResume,
     runtime_sha256: str,
     target_candidate_id: str,
+    target_job_config_sha256: str,
 ) -> RuntimeIdentity:
     import numpy
     import pandas
@@ -1044,6 +1046,7 @@ def collect_runtime_identity(
         base_manifest_sha256=sanitized.source_manifest_sha256,
         sanitized_resume_sha256=sanitized.sanitized_sha256,
         campaign_config_sha256=file_sha256(config_path),
+        target_job_config_sha256=target_job_config_sha256,
         runtime_sha256=runtime_sha256,
         training_source_sha256=training_source,
         cache_sha256=None,
@@ -1085,10 +1088,17 @@ def _run_colab_handoff(args: argparse.Namespace) -> int:
         contract,
     )
     target_id = str(contract["target_candidate_id"])
+    target_job_config_sha256 = str(contract.get("target_job_config_sha256", ""))
+    if len(target_job_config_sha256) != 64 or any(
+        character not in "0123456789abcdef"
+        for character in target_job_config_sha256
+    ):
+        raise ColabRecoveryError("target job config SHA-256 contract is invalid")
     identity = collect_runtime_identity(
         sanitized=sanitized,
         runtime_sha256=args.runtime_sha256,
         target_candidate_id=target_id,
+        target_job_config_sha256=target_job_config_sha256,
     )
     resume = sanitized.path
     resume_source = "stage_C_base"
