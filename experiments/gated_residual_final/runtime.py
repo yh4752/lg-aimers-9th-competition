@@ -1,14 +1,17 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
+import copyreg
 from dataclasses import asdict
 import importlib.util
+from io import BytesIO
 import json
 from pathlib import Path
 import pickle
 import shutil
 from statistics import median
 import time
+from types import MappingProxyType
 from typing import Callable, Mapping
 from zipfile import ZipFile
 
@@ -41,6 +44,41 @@ from .selection import (
 
 class FinalRuntimeError(ValueError):
     pass
+
+
+def _reduce_mapping_proxy(value: MappingProxyType) -> tuple[object, tuple[dict[object, object]]]:
+    return dict, (dict(value),)
+
+
+def _serialize_feature_state(state: object) -> bytes:
+    buffer = BytesIO()
+    pickler = pickle.Pickler(buffer, protocol=5)
+    dispatch_table = copyreg.dispatch_table.copy()
+    dispatch_table[type(MappingProxyType({}))] = _reduce_mapping_proxy
+    pickler.dispatch_table = dispatch_table
+    pickler.dump(state)
+    return buffer.getvalue()
+
+
+def _load_audit_rows(path: Path, *, valid_year: int) -> pd.DataFrame:
+    if type(valid_year) is not int or isinstance(valid_year, bool):
+        raise FinalRuntimeError("audit validation year differs")
+    source = Path(path)
+    if not source.is_file() or source.is_symlink():
+        raise FinalRuntimeError("audit test data is absent")
+    rows = pd.read_csv(source, nrows=64)
+    if (
+        rows.empty
+        or "control_success" in rows
+        or not {"row_id", "season"}.issubset(rows.columns)
+        or rows["row_id"].isna().any()
+        or not rows["row_id"].is_unique
+    ):
+        raise FinalRuntimeError("audit test rows differ")
+    seasons = pd.to_numeric(rows["season"], errors="coerce")
+    if seasons.isna().any() or not seasons.eq(valid_year).all():
+        raise FinalRuntimeError("audit test season differs")
+    return rows.copy(deep=True)
 
 
 def _prediction_frame(source: pd.DataFrame, probability) -> pd.DataFrame:
@@ -175,6 +213,9 @@ class ProductionFinalRuntime:
         self.base = ProductionStageARuntime(
             Path(official_root), verified_input.e2_input, self.root / "direct_base",
         )
+        self._audit_rows = _load_audit_rows(
+            Path(official_root) / "test.csv", valid_year=2025,
+        )
         repository = Path(__file__).resolve().parents[2]
         self.bindings = ArtifactBindings(
             code_sha256=code_identity_sha256(repository),
@@ -249,7 +290,7 @@ class ProductionFinalRuntime:
             "state/config.json": state_root / "config.json",
             "state/counts.json": state_root / "counts.json",
         }
-        paths["state/feature_state.pkl"].write_bytes(pickle.dumps(state, protocol=5))
+        paths["state/feature_state.pkl"].write_bytes(_serialize_feature_state(state))
         paths["state/calibration.pkl"].write_bytes(pickle.dumps(self._calibrator, protocol=5))
         paths["state/config.json"].write_bytes(canonical_json(asdict(self.selected_config)))
         paths["state/counts.json"].write_bytes(canonical_json({
@@ -399,7 +440,7 @@ class ProductionFinalRuntime:
             config=self.selected_config,
             calibrator=self._calibrator,
         )
-        rows = self.base.train.drop(columns=["control_success"], errors="ignore").head(64).copy()
+        rows = self._audit_rows.copy(deep=True)
         report = audit_row_independence(predictor, rows)
         path = Path(output) / "audit_report.json"
         path.parent.mkdir(parents=True, exist_ok=True)

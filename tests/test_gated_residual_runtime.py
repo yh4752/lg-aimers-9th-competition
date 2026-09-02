@@ -1,11 +1,15 @@
 from __future__ import annotations
 
 import json
+import pickle
 from pathlib import Path
 
 import pandas as pd
 
+import experiments.gated_residual_final.runtime as runtime_module
+from experiments.direct_expert.features import fit_direct_features, transform_direct_features
 from experiments.gated_residual_final.runtime import evaluate_candidates
+from tests.direct_expert_fixtures import make_history_rows, make_train_rows
 
 
 def _seed_frame(seed: int) -> pd.DataFrame:
@@ -52,3 +56,36 @@ def test_candidate_evaluation_records_hard_rejection(tmp_path: Path) -> None:
     assert outcome.decision.status == "rejected"
     assert "weighted_gain" in outcome.decision.failed_gates
     assert json.loads(outcome.evidence_path.read_text())["status"] == "completed_no_candidate"
+
+
+def test_production_feature_state_roundtrips_read_only_mappings() -> None:
+    train = make_train_rows()
+    prefix = train.loc[train["season"].lt(2024)]
+    state, _ = fit_direct_features(prefix, make_history_rows(), valid_year=2024)
+    serializer = getattr(runtime_module, "_serialize_feature_state", None)
+
+    assert callable(serializer)
+    restored = pickle.loads(serializer(state))
+    valid = train.loc[train["season"].eq(2024)].drop(columns="control_success")
+    expected = transform_direct_features(valid, state)
+    observed = transform_direct_features(valid, restored)
+
+    pd.testing.assert_frame_equal(observed.frame, expected.frame)
+    assert dict(restored.source_hashes) == dict(state.source_hashes)
+    assert dict(restored.tree_state.source_hashes) == dict(state.tree_state.source_hashes)
+
+
+def test_audit_rows_are_loaded_from_the_unlabeled_validation_season(tmp_path: Path) -> None:
+    test_path = tmp_path / "test.csv"
+    rows = make_train_rows().drop(columns="control_success").head(8).copy()
+    rows["season"] = 2025
+    rows.to_csv(test_path, index=False)
+    loader = getattr(runtime_module, "_load_audit_rows", None)
+
+    assert callable(loader)
+    observed = loader(test_path, valid_year=2025)
+
+    assert len(observed) == len(rows)
+    assert observed["season"].eq(2025).all()
+    assert observed["row_id"].is_unique
+    assert "control_success" not in observed
