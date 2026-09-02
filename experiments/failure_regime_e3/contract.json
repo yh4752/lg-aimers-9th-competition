@@ -1,0 +1,35 @@
+{
+  "schema_version": 1,
+  "campaign_id": "failure_regime_e3_v1",
+  "policy_version": "dacon-236743-2026-08-15",
+  "data": {
+    "allowed_sources": ["official_train", "official_trackman"],
+    "training_rows_only": true,
+    "evaluation_scope": "current_row_only",
+    "pre_pitch_only": true,
+    "external_api": false
+  },
+  "folds": [[2021, 2022], [2022, 2023], [2023, 2024]],
+  "selection_years": [2022, 2023],
+  "confirmation_year": 2024,
+  "seeds": [42, 2026, 3407],
+  "roles": [
+    {"role_id": "S_GLOBAL", "target": "success", "decay": 0.55, "recent_seasons": null, "game_type": null, "profile": "high_ctr"},
+    {"role_id": "S_FAST", "target": "success", "decay": 0.30, "recent_seasons": null, "game_type": null, "profile": "high_ctr"},
+    {"role_id": "S_R", "target": "success", "decay": 0.55, "recent_seasons": null, "game_type": "R", "profile": "high_ctr"},
+    {"role_id": "S_F", "target": "success", "decay": 0.55, "recent_seasons": null, "game_type": "F", "profile": "high_ctr"},
+    {"role_id": "MIDDLE", "target": "middle", "decay": 0.55, "recent_seasons": null, "game_type": null, "profile": "high_ctr"},
+    {"role_id": "WILD", "target": "wild", "decay": 0.55, "recent_seasons": null, "game_type": null, "profile": "high_ctr"},
+    {"role_id": "REVERSE", "target": "reverse", "decay": 0.55, "recent_seasons": null, "game_type": null, "profile": "high_ctr"}
+  ],
+  "model": {
+    "success": {"iterations": 2400, "depth": 10, "learning_rate": 0.03, "l2_leaf_reg": 6.0, "random_strength": 0.35, "max_ctr_complexity": 3, "border_count": 128, "od_wait": 150},
+    "subtype": {"iterations": 1800, "depth": 9, "learning_rate": 0.035, "l2_leaf_reg": 6.0, "random_strength": 0.35, "max_ctr_complexity": 3, "border_count": 128, "od_wait": 120},
+    "gate": {"iterations": 600, "depth": 3, "learning_rate": 0.025, "l2_leaf_reg": 20.0, "random_strength": 0.1}
+  },
+  "label_gate": {"delta_tolerance": 0.02, "minimum_coverage": 0.95, "minimum_binary_fraction": 0.999, "minimum_success_agreement": 0.999, "minimum_positive_rows": 5000},
+  "blend": {"e2_weights": [0.5, 0.6, 0.7, 0.8], "gate_strengths": [0.5, 0.75, 1.0]},
+  "gates": {"weighted_gain": 0.00025, "latest_gain": 0.00015, "minimum_fold_gain": 0.0, "bootstrap_lower": 0.0001, "maximum_segment_regression": 0.0003, "minimum_segment_rows": 5000, "minimum_non_worse_seeds": 3},
+  "runtime": {"wall_seconds": 36000, "new_job_guard_seconds": 1800, "artifact_reserve_seconds": 900, "snapshot_interval_seconds": 600, "minimum_free_bytes": 8589934592, "maximum_deployed_models": 24, "inference_max_seconds": 480},
+  "versions": {"catboost": "1.2.10", "pandas": "2.0.3", "numpy": "1.26.4"}
+}
