@@ -17,10 +17,7 @@ from experiments.catboost_50_50_realign.runtime_inventory import (
 
 ROOT = Path(__file__).resolve().parents[1]
 CELL = ROOT / "experiments/catboost_50_50_realign/COLAB_CATBOOST_50_50_REALIGN_CELL.py"
-PYTHON = (
-    "/Users/yonghyun/Documents/lg-aimers-9th-competition/artifacts/"
-    "tabm_submission_python311/bin/python"
-)
+PYTHON = str(ROOT / "artifacts/tabm_submission_python311/bin/python")
 
 
 def test_runtime_inventory_is_explicit_and_rule_safe() -> None:

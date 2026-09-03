@@ -587,8 +587,8 @@ submission packages. Documentation text and explicit rejection messages are allo
 
 Inputs:
 
-- `/Users/yonghyun/Documents/lg-aimers-9th-competition/artifacts/temporal_portfolio_t2b_handoff/temporal_portfolio_t2b_input.zip`
-- `/Users/yonghyun/Downloads/temporal_t2b_handoff.zip`
+- `/path/to/lg-aimers-9th-competition/artifacts/temporal_portfolio_t2b_handoff/temporal_portfolio_t2b_input.zip`
+- `/path/to/Downloads/temporal_t2b_handoff.zip`
 
 Output:
 

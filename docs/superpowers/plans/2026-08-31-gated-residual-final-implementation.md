@@ -724,8 +724,8 @@ Run:
 ```bash
 python tools/prepare_gated_residual_final_input.py \
   --e2-input artifacts/direct_expert_input.zip \
-  --stage-a /Users/yonghyun/Downloads/direct_expert_stage_A_handoff.zip \
-  --stage-b /Users/yonghyun/Downloads/direct_expert_handoff.zip \
+  --stage-a /path/to/Downloads/direct_expert_stage_A_handoff.zip \
+  --stage-b /path/to/Downloads/direct_expert_handoff.zip \
   --output artifacts/gated_residual_final_input.zip
 ```
 

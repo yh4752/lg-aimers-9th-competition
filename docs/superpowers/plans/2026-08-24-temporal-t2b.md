@@ -350,8 +350,8 @@ Decode the generated cell runtime in a fresh temporary directory and import
 
 The command must consume:
 
-- `/Users/yonghyun/Downloads/temporal_t1_review.zip`
-- `/Users/yonghyun/Downloads/temporal_t2a_handoff (1).zip`
+- `/path/to/Downloads/temporal_t1_review.zip`
+- `/path/to/Downloads/temporal_t2a_handoff (1).zip`
 
 It must produce `artifacts/temporal_portfolio_t2b_handoff/temporal_portfolio_t2b_input.zip`.
 Do not run this full OOF preparation inside Codex without separate approval.

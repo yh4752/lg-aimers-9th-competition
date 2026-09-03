@@ -750,11 +750,11 @@ CATBOOST_BLEND_CELL_READY path=<absolute-path> sha256=<sha256> size_bytes=<10000
 Explain the fixed folds/config/weights/gates, Stage C reuse, direct uploads, markers, 45-minute-to-2-hour estimate, 3-hour cap, 20-minute emergency downloads, rerun safety, outputs, and what the user returns. Include:
 
 ```bash
-cd /Users/yonghyun/Documents/lg-aimers-9th-competition
+cd /path/to/lg-aimers-9th-competition
 
 artifacts/tabm_submission_python311/bin/python \
   tools/prepare_catboost_tabm_blend_input.py \
-  --data-dir /Users/yonghyun/Documents/kaggle-lg-aimers-9th-data-upload \
+  --data-dir /path/to/kaggle-lg-aimers-9th-data-upload \
   --output artifacts/catboost_tabm_blend_input.zip
 ```
 

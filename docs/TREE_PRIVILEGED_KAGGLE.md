@@ -13,7 +13,7 @@ TrackMan 원본에서 야구 상태 범위를 벗어난 98행과 게임 내부 �
 ```bash
 artifacts/tabm_submission_python311/bin/python \
   tools/prepare_tree_privileged_input.py \
-  --e2-handoff "/Users/yonghyun/Downloads/tree_expert_e2_handoff (1).zip" \
+  --e2-handoff "/path/to/Downloads/tree_expert_e2_handoff (1).zip" \
   --output artifacts/tree_privileged_input.zip
 ```
 

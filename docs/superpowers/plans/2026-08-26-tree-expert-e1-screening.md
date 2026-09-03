@@ -1153,10 +1153,10 @@ Run the test and expect failure because the runbook is absent.
 It must give one exact local preparation command:
 
 ```bash
-cd /Users/yonghyun/Documents/lg-aimers-9th-competition
+cd /path/to/lg-aimers-9th-competition
 artifacts/tabm_submission_python311/bin/python \
   tools/prepare_tree_expert_e1_input.py \
-  --stage-c-delivery /Users/yonghyun/Downloads/tabm_colab_stage_C_delivery.zip \
+  --stage-c-delivery /path/to/Downloads/tabm_colab_stage_C_delivery.zip \
   --output artifacts/tree_expert_e1_input.zip
 ```
 

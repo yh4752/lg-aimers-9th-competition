@@ -29,11 +29,11 @@ GPU, RMSE다. 실행 후 아래 네 후보만 비교한다.
 터미널에서 아래 명령을 그대로 실행한다.
 
 ```bash
-cd /Users/yonghyun/Documents/lg-aimers-9th-competition
+cd /path/to/lg-aimers-9th-competition
 
 artifacts/tabm_submission_python311/bin/python \
   tools/prepare_catboost_tabm_blend_input.py \
-  --data-dir /Users/yonghyun/Documents/kaggle-lg-aimers-9th-data-upload \
+  --data-dir /path/to/kaggle-lg-aimers-9th-data-upload \
   --output artifacts/catboost_tabm_blend_input.zip
 ```
 

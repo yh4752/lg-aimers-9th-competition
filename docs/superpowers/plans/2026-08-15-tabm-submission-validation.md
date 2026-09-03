@@ -596,7 +596,7 @@ Expected: all tests PASS, compilation exits zero, and diff check prints nothing.
 
 ```bash
 .venv/bin/python tools/prepare_tabm_submission_validation_handoff.py \
-  --delivery "/Users/yonghyun/Downloads/tabm_hand_matchup_stage_D_review_delivery (1).zip" \
+  --delivery "/path/to/Downloads/tabm_hand_matchup_stage_D_review_delivery (1).zip" \
   --output-dir artifacts/tabm_submission_validation_handoff
 .venv/bin/python - <<'PY'
 from pathlib import Path

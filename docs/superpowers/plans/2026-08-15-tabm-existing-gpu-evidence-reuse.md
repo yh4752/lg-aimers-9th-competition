@@ -537,10 +537,10 @@ runs in this environment.
 ```bash
 artifacts/tabm_submission_python311/bin/python \
   tools/build_tabm_submission_from_existing_evidence.py \
-  --stage-c-delivery /Users/yonghyun/Downloads/tabm_colab_stage_C_delivery.zip \
-  --stage-d-delivery '/Users/yonghyun/Downloads/tabm_hand_matchup_stage_D_review_delivery.zip' \
+  --stage-c-delivery /path/to/Downloads/tabm_colab_stage_C_delivery.zip \
+  --stage-d-delivery '/path/to/Downloads/tabm_hand_matchup_stage_D_review_delivery.zip' \
   --candidate-root artifacts/tabm_submission_validation_handoff_v2/candidate \
-  --official-data /Users/yonghyun/Documents/kaggle-lg-aimers-9th-data-upload \
+  --official-data /path/to/kaggle-lg-aimers-9th-data-upload \
   --output-dir artifacts/tabm_submission_version_d
 ```
 

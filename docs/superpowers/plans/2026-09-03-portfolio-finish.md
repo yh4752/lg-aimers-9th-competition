@@ -21,29 +21,31 @@
 
 - [ ] **Step 1: 사용자 이름이 포함된 경로를 확인한다**
 
-Run: `git grep -n 'yonghyun'`
+Run: `git grep -n '/Users/'`
 
-Expected: 실행 안내와 과거 계획, 테스트 fixture의 위치가 출력된다.
+Expected: 실행 안내와 과거 계획, 테스트 fixture의 위치가 출력된다. 실제 사용자 이름이
+포함된 경로와 경로 금지 검사 문자열을 구분한다.
 
 - [ ] **Step 2: 경로를 공용 표기로 바꾼다**
 
 다음 순서로 치환한다.
 
 ```text
-/Users/yonghyun/Documents/lg-aimers-9th-competition → <REPO_ROOT>
-/Users/yonghyun/Documents/LG_AIMERS_2026 → <LEGACY_WORKSPACE>
-/Users/yonghyun/Documents/kaggle-lg-aimers-9th-data-upload → <OFFICIAL_DATA_DIR>
-/Users/yonghyun/Downloads → <DOWNLOAD_DIR>
-/Users/yonghyun → /Users/example
+개인 저장소 절대 경로 → /path/to/lg-aimers-9th-competition
+이전 작업 공간 절대 경로 → /path/to/legacy-lg-aimers-workspace
+공식 데이터 절대 경로 → /path/to/kaggle-lg-aimers-9th-data-upload
+다운로드 폴더 절대 경로 → /path/to/Downloads
+그 밖의 사용자 홈 경로 → /Users/example
 ```
 
 `assert "/Users/" not in text`처럼 절대 경로 금지를 검사하는 문자열은 바꾸지 않는다.
 
 - [ ] **Step 3: 개인 경로가 사라졌는지 확인한다**
 
-Run: `git grep -n 'yonghyun'`
+Run: `git grep -n '/Users/'`
 
-Expected: 출력 없음.
+Expected: `/Users/example` fixture와 `assert "/Users/" not in text` 같은 검사 문자열만
+남고 실제 사용자 이름은 남지 않는다.
 
 - [ ] **Step 4: 경로 관련 테스트를 실행한다**
 

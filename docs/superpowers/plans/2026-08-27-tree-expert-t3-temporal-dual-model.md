@@ -1164,7 +1164,7 @@ Expected: exit code 0 with no output.
 ```bash
 artifacts/tabm_submission_python311/bin/python \
   tools/prepare_tree_expert_t3_input.py \
-  --e2-handoff "/Users/yonghyun/Downloads/tree_expert_e2_handoff (1).zip" \
+  --e2-handoff "/path/to/Downloads/tree_expert_e2_handoff (1).zip" \
   --output artifacts/tree_expert_t3_input.zip
 ```
 

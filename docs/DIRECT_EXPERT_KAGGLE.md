@@ -12,7 +12,7 @@ Public 977점 제출에 실제 사용한 E2 3시드 모델을 해시로 묶은 �
 `<S4_HANDOFF>`만 실제 S4 handoff 경로로 바꾼다.
 
 ```bash
-cd /Users/yonghyun/Documents/lg-aimers-9th-competition
+cd /path/to/lg-aimers-9th-competition
 
 artifacts/tabm_submission_python311/bin/python \
   tools/prepare_direct_expert_input.py \

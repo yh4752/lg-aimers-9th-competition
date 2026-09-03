@@ -55,8 +55,7 @@ def test_embedded_runtime_imports_without_repository_on_pythonpath(
     environment["PYTHONPATH"] = str(tmp_path)
     completed = subprocess.run(
         [
-            "/Users/yonghyun/Documents/lg-aimers-9th-competition/artifacts/"
-            "tabm_submission_python311/bin/python",
+            str(ROOT / "artifacts/tabm_submission_python311/bin/python"),
             "-c",
             "from experiments.catboost_tabm_blend.contracts import build_jobs,load_contract;"
             "from experiments.catboost_tabm_blend.colab import EmergencyCadence;"

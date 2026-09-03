@@ -36,7 +36,7 @@ epoch 예산으로 짝을 맞춰 Brier 차이를 본다. 결과는 후속 연구
 ```bash
 artifacts/tabm_submission_python311/bin/python \
   tools/prepare_tabm_row_feature_colab_input.py \
-  --data-dir /Users/yonghyun/Documents/kaggle-lg-aimers-9th-data-upload \
+  --data-dir /path/to/kaggle-lg-aimers-9th-data-upload \
   --output artifacts/tabm_row_feature_input.zip
 ```
 

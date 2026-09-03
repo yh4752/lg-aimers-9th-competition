@@ -55,7 +55,7 @@ tests/
 공통 테스트 Python은 다음 절대 경로를 사용한다.
 
 ```bash
-PY=/Users/yonghyun/Documents/lg-aimers-9th-competition/artifacts/tabm_submission_python311/bin/python
+PY=/path/to/lg-aimers-9th-competition/artifacts/tabm_submission_python311/bin/python
 ```
 
 ## Task 1: 불변 계약과 세 job 정의

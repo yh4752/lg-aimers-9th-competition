@@ -540,10 +540,10 @@ Expected: no diff errors and all focused tests pass.
 ```bash
 artifacts/tabm_submission_python311/bin/python \
   tools/build_gated_residual_submission.py \
-  --delivery /Users/yonghyun/Downloads/gated_residual_final_delivery.zip \
-  --review /Users/yonghyun/Downloads/gated_residual_final_review.zip \
-  --handoff /Users/yonghyun/Downloads/gated_residual_final_handoff.zip \
-  --official-data /Users/yonghyun/Documents/kaggle-lg-aimers-9th-data-upload \
+  --delivery /path/to/Downloads/gated_residual_final_delivery.zip \
+  --review /path/to/Downloads/gated_residual_final_review.zip \
+  --handoff /path/to/Downloads/gated_residual_final_handoff.zip \
+  --official-data /path/to/kaggle-lg-aimers-9th-data-upload \
   --output-dir artifacts/gated_residual_g0_submission_20260831
 ```
 

@@ -14,16 +14,16 @@ CatBoost를 50:50으로 섞었을 때 세 연도 OOF에서 개선이 반복되�
 중단하므로, 예전에 만든 파일이 있다면 이름을 바꾸거나 다른 위치를 지정한다.
 
 ```bash
-cd /Users/yonghyun/Documents/lg-aimers-9th-competition
+cd /path/to/lg-aimers-9th-competition
 
 artifacts/tabm_submission_python311/bin/python \
   tools/prepare_catboost_50_50_realign_input.py \
-  --training-input /Users/yonghyun/Documents/lg-aimers-9th-competition/artifacts/catboost_tabm_blend_input.zip \
-  --stage-c-delivery /Users/yonghyun/Downloads/tabm_colab_stage_C_delivery.zip \
-  --deployment-resume /Users/yonghyun/Downloads/catboost_deployment_emergency_1eef761337e3.zip \
-  --deployment-review /Users/yonghyun/Downloads/catboost_deployment_review.zip \
-  --oof-audit /Users/yonghyun/Documents/lg-aimers-9th-competition/artifacts/oof_reset_audit_runs/oof_reset_audit_20260821T130502Z_06e0e656/oof_reset_audit_results.zip \
-  --output /Users/yonghyun/Documents/lg-aimers-9th-competition/artifacts/catboost_50_50_realign_input.zip
+  --training-input /path/to/lg-aimers-9th-competition/artifacts/catboost_tabm_blend_input.zip \
+  --stage-c-delivery /path/to/Downloads/tabm_colab_stage_C_delivery.zip \
+  --deployment-resume /path/to/Downloads/catboost_deployment_emergency_1eef761337e3.zip \
+  --deployment-review /path/to/Downloads/catboost_deployment_review.zip \
+  --oof-audit /path/to/lg-aimers-9th-competition/artifacts/oof_reset_audit_runs/oof_reset_audit_20260821T130502Z_06e0e656/oof_reset_audit_results.zip \
+  --output /path/to/lg-aimers-9th-competition/artifacts/catboost_50_50_realign_input.zip
 ```
 
 성공하면 마지막에 다음 형식의 로그가 나온다.

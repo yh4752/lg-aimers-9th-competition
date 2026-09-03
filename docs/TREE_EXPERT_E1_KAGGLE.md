@@ -10,10 +10,10 @@ E1은 기존 TabM 제출물을 대체하는 최종 학습이 아니다. 2023년�
 입력 ZIP을 만들지 않고 오류로 종료한다.
 
 ```bash
-cd /Users/yonghyun/Documents/lg-aimers-9th-competition
+cd /path/to/lg-aimers-9th-competition
 artifacts/tabm_submission_python311/bin/python \
   tools/prepare_tree_expert_e1_input.py \
-  --stage-c-delivery /Users/yonghyun/Downloads/tabm_colab_stage_C_delivery.zip \
+  --stage-c-delivery /path/to/Downloads/tabm_colab_stage_C_delivery.zip \
   --output artifacts/tree_expert_e1_input.zip
 ```
 

@@ -876,9 +876,9 @@ git commit -m "docs: explain RF expert experiment"
 After confirming the exact local E2 handoff path, run only the local archive preparation:
 
 ```bash
-cd /Users/yonghyun/Documents/lg-aimers-9th-competition
+cd /path/to/lg-aimers-9th-competition
 artifacts/tabm_submission_python311/bin/python tools/prepare_tree_expert_rf_input.py \
-  --e2-handoff "/Users/yonghyun/Downloads/tree_expert_e2_handoff (1).zip" \
+  --e2-handoff "/path/to/Downloads/tree_expert_e2_handoff (1).zip" \
   --output artifacts/tree_expert_rf_input.zip
 ```
 

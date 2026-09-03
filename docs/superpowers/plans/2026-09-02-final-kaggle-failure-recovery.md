@@ -15,7 +15,7 @@
 **Files:**
 - Verify: `experiments/failure_regime_e3/`
 - Verify: `tests/test_failure_regime_e3_*.py`
-- Verify: `/Users/yonghyun/Downloads/results.zip`
+- Verify: `/path/to/Downloads/results.zip`
 
 1. Compare every E3 runtime source member embedded in `results.zip` with the recovered worktree source.
 2. Stop if any source member differs or is missing.

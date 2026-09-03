@@ -949,8 +949,8 @@ Run:
 ```bash
 python3 -m pytest tests/test_tabm_campaign_colab_recovery.py -k handoff -v
 python3 tools/prepare_tabm_colab_stage_c_handoff.py \
-  --data-dir /Users/yonghyun/Documents/kaggle-lg-aimers-9th-data-upload \
-  --base-resume /Users/yonghyun/Downloads/tabm_search_stage_C_resume_bundle.zip \
+  --data-dir /path/to/kaggle-lg-aimers-9th-data-upload \
+  --base-resume /path/to/Downloads/tabm_search_stage_C_resume_bundle.zip \
   --output-dir artifacts/tabm_colab_stage_c_handoff
 ```
 
@@ -1027,8 +1027,8 @@ Run:
 
 ```bash
 python3 tools/prepare_tabm_colab_stage_c_handoff.py \
-  --data-dir /Users/yonghyun/Documents/kaggle-lg-aimers-9th-data-upload \
-  --base-resume /Users/yonghyun/Downloads/tabm_search_stage_C_resume_bundle.zip \
+  --data-dir /path/to/kaggle-lg-aimers-9th-data-upload \
+  --base-resume /path/to/Downloads/tabm_search_stage_C_resume_bundle.zip \
   --output-dir artifacts/tabm_colab_stage_c_handoff_second
 shasum -a 256 \
   artifacts/tabm_colab_stage_c_handoff/lg-aimers-9th-data.zip \

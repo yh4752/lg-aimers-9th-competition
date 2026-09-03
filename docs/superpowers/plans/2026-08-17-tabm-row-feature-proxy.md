@@ -683,7 +683,7 @@ Explain purpose, the six bundles, why they comply with row independence, 14-job 
 ```bash
 artifacts/tabm_submission_python311/bin/python \
   tools/prepare_tabm_row_feature_colab_input.py \
-  --data-dir /Users/yonghyun/Documents/kaggle-lg-aimers-9th-data-upload \
+  --data-dir /path/to/kaggle-lg-aimers-9th-data-upload \
   --output artifacts/tabm_row_feature_input.zip
 ```
 

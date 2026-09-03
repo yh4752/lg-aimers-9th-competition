@@ -578,8 +578,8 @@ Run:
 
 ```bash
 shasum -a 256 \
-  "/Users/yonghyun/Downloads/tree_privileged_handoff.zip" \
-  "/Users/yonghyun/Downloads/tree_privileged_handoff (1).zip"
+  "/path/to/Downloads/tree_privileged_handoff.zip" \
+  "/path/to/Downloads/tree_privileged_handoff (1).zip"
 ```
 
 Expected: P-only 번들의 SHA-256이
@@ -595,7 +595,7 @@ Run:
 artifacts/tabm_submission_python311/bin/python tools/build_experiment_audit.py \
   --registry reports/experiment_registry.json \
   --output reports/EXPERIMENT_RESET_AUDIT.md \
-  --artifact tree_privileged_profile_p_only_v1=b89c77570560422914d7fba99ff13c32733226e3ce91e7a5404d134a627bd8fc:"/Users/yonghyun/Downloads/tree_privileged_handoff (1).zip"
+  --artifact tree_privileged_profile_p_only_v1=b89c77570560422914d7fba99ff13c32733226e3ce91e7a5404d134a627bd8fc:"/path/to/Downloads/tree_privileged_handoff (1).zip"
 ```
 
 Expected: `EXPERIMENT_AUDIT_SUCCESS experiments=25 evidence_gaps=6`.

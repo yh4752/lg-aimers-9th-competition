@@ -177,7 +177,7 @@ def test_jobs_are_finite_and_stage_registered():
 
 - [ ] **Step 2: Run the tests and confirm RED**
 
-Run: `/Users/yonghyun/Documents/lg-aimers-9th-competition/artifacts/tabm_submission_python311/bin/python -m pytest tests/test_tree_expert_hc_contracts.py -q`
+Run: `/path/to/lg-aimers-9th-competition/artifacts/tabm_submission_python311/bin/python -m pytest tests/test_tree_expert_hc_contracts.py -q`
 
 Expected: `ModuleNotFoundError: No module named 'experiments.tree_expert.hc_contracts'`.
 
@@ -209,7 +209,7 @@ The job builder must register:
 
 - [ ] **Step 4: Run contract tests and confirm GREEN**
 
-Run: `/Users/yonghyun/Documents/lg-aimers-9th-competition/artifacts/tabm_submission_python311/bin/python -m pytest tests/test_tree_expert_hc_contracts.py -q`
+Run: `/path/to/lg-aimers-9th-competition/artifacts/tabm_submission_python311/bin/python -m pytest tests/test_tree_expert_hc_contracts.py -q`
 
 Expected: all tests pass.
 
@@ -245,7 +245,7 @@ def test_distinct_previous_handoffs_fail(tmp_path, two_distinct_handoffs):
 
 - [ ] **Step 2: Run and confirm RED**
 
-Run: `/Users/yonghyun/Documents/lg-aimers-9th-competition/artifacts/tabm_submission_python311/bin/python -m pytest tests/test_tree_expert_hc_inputs.py -q`
+Run: `/path/to/lg-aimers-9th-competition/artifacts/tabm_submission_python311/bin/python -m pytest tests/test_tree_expert_hc_inputs.py -q`
 
 Expected: missing `hc_inputs` module.
 
@@ -282,7 +282,7 @@ Add `prepare_hc_input(e2_handoff, output)` in the same module. It creates a smal
 
 - [ ] **Step 5: Run focused and existing E2 artifact tests**
 
-Run: `/Users/yonghyun/Documents/lg-aimers-9th-competition/artifacts/tabm_submission_python311/bin/python -m pytest tests/test_tree_expert_hc_inputs.py tests/test_tree_expert_e2_artifacts.py tests/test_tree_expert_t3_inputs.py -q`
+Run: `/path/to/lg-aimers-9th-competition/artifacts/tabm_submission_python311/bin/python -m pytest tests/test_tree_expert_hc_inputs.py tests/test_tree_expert_e2_artifacts.py tests/test_tree_expert_t3_inputs.py -q`
 
 Expected: all tests pass.
 
@@ -314,7 +314,7 @@ def test_source_baseline_is_2020_to_2021_and_frozen(contract, cache):
 
 - [ ] **Step 2: Run and confirm RED**
 
-Run: `/Users/yonghyun/Documents/lg-aimers-9th-competition/artifacts/tabm_submission_python311/bin/python -m pytest tests/test_tree_expert_hc_base.py -q`
+Run: `/path/to/lg-aimers-9th-competition/artifacts/tabm_submission_python311/bin/python -m pytest tests/test_tree_expert_hc_base.py -q`
 
 Expected: missing `hc_base` module.
 
@@ -334,7 +334,7 @@ The same completed jobs must be reused byte-for-byte. A changed contract/code/da
 
 - [ ] **Step 6: Run focused regression tests**
 
-Run: `/Users/yonghyun/Documents/lg-aimers-9th-competition/artifacts/tabm_submission_python311/bin/python -m pytest tests/test_tree_expert_hc_base.py tests/test_tree_expert_e2_baseline.py tests/test_tree_expert_e2_training.py -q`
+Run: `/path/to/lg-aimers-9th-competition/artifacts/tabm_submission_python311/bin/python -m pytest tests/test_tree_expert_hc_base.py tests/test_tree_expert_e2_baseline.py tests/test_tree_expert_e2_training.py -q`
 
 Expected: all tests pass.
 
@@ -370,7 +370,7 @@ def test_shrinkage_uses_parent_rate():
 
 - [ ] **Step 2: Run and confirm RED**
 
-Run: `/Users/yonghyun/Documents/lg-aimers-9th-competition/artifacts/tabm_submission_python311/bin/python -m pytest tests/test_tree_expert_hc_features.py -q`
+Run: `/path/to/lg-aimers-9th-competition/artifacts/tabm_submission_python311/bin/python -m pytest tests/test_tree_expert_hc_features.py -q`
 
 Expected: missing `hc_features` module.
 
@@ -405,7 +405,7 @@ For one frozen state, compare singleton, original batch, shuffled batch, rebatch
 
 - [ ] **Step 6: Run feature and policy tests**
 
-Run: `/Users/yonghyun/Documents/lg-aimers-9th-competition/artifacts/tabm_submission_python311/bin/python -m pytest tests/test_tree_expert_hc_features.py tests/test_rules_policy.py tests/test_row_independence_evidence.py -q`
+Run: `/path/to/lg-aimers-9th-competition/artifacts/tabm_submission_python311/bin/python -m pytest tests/test_tree_expert_hc_features.py tests/test_rules_policy.py tests/test_row_independence_evidence.py -q`
 
 Expected: all tests pass.
 
@@ -440,7 +440,7 @@ Also test exact row alignment, `residual_target == target - p0`, probability cli
 
 - [ ] **Step 2: Run and confirm RED**
 
-Run: `/Users/yonghyun/Documents/lg-aimers-9th-competition/artifacts/tabm_submission_python311/bin/python -m pytest tests/test_tree_expert_hc_training.py -q`
+Run: `/path/to/lg-aimers-9th-competition/artifacts/tabm_submission_python311/bin/python -m pytest tests/test_tree_expert_hc_training.py -q`
 
 Expected: missing `hc_training` module.
 
@@ -473,7 +473,7 @@ The production default is CatBoost, but tests inject a tiny deterministic regres
 
 - [ ] **Step 6: Run training and E2 feature regression tests**
 
-Run: `/Users/yonghyun/Documents/lg-aimers-9th-competition/artifacts/tabm_submission_python311/bin/python -m pytest tests/test_tree_expert_hc_training.py tests/test_tree_expert_features.py tests/test_tree_expert_e2_training.py -q`
+Run: `/path/to/lg-aimers-9th-competition/artifacts/tabm_submission_python311/bin/python -m pytest tests/test_tree_expert_hc_training.py tests/test_tree_expert_features.py tests/test_tree_expert_e2_training.py -q`
 
 Expected: all tests pass.
 
@@ -507,7 +507,7 @@ Also test unseen keys, sparse keys, parent fallback, effect clipping, logit stab
 
 - [ ] **Step 2: Run and confirm RED**
 
-Run: `/Users/yonghyun/Documents/lg-aimers-9th-competition/artifacts/tabm_submission_python311/bin/python -m pytest tests/test_tree_expert_hc_calibration.py -q`
+Run: `/path/to/lg-aimers-9th-competition/artifacts/tabm_submission_python311/bin/python -m pytest tests/test_tree_expert_hc_calibration.py -q`
 
 Expected: missing `hc_calibration` module.
 
@@ -531,7 +531,7 @@ Produce C2 predictions for only `(0.25, 0.5, 0.75, 1.0)`. Alpha selection uses s
 
 - [ ] **Step 5: Run calibration and feature tests**
 
-Run: `/Users/yonghyun/Documents/lg-aimers-9th-competition/artifacts/tabm_submission_python311/bin/python -m pytest tests/test_tree_expert_hc_calibration.py tests/test_tree_expert_hc_features.py -q`
+Run: `/path/to/lg-aimers-9th-competition/artifacts/tabm_submission_python311/bin/python -m pytest tests/test_tree_expert_hc_calibration.py tests/test_tree_expert_hc_features.py -q`
 
 Expected: all tests pass.
 
@@ -577,7 +577,7 @@ Create one fixture for every individual gate failure, C2 passing while C1 fails,
 
 - [ ] **Step 3: Run and confirm RED**
 
-Run: `/Users/yonghyun/Documents/lg-aimers-9th-competition/artifacts/tabm_submission_python311/bin/python -m pytest tests/test_tree_expert_hc_metrics.py tests/test_tree_expert_hc_decisions.py -q`
+Run: `/path/to/lg-aimers-9th-competition/artifacts/tabm_submission_python311/bin/python -m pytest tests/test_tree_expert_hc_metrics.py tests/test_tree_expert_hc_decisions.py -q`
 
 Expected: missing HC metric/decision modules.
 
@@ -597,7 +597,7 @@ Every rejected decision includes machine-readable failed gate names. Decisions n
 
 - [ ] **Step 6: Run metric, decision, and existing metric regression tests**
 
-Run: `/Users/yonghyun/Documents/lg-aimers-9th-competition/artifacts/tabm_submission_python311/bin/python -m pytest tests/test_tree_expert_hc_metrics.py tests/test_tree_expert_hc_decisions.py tests/test_tree_expert_metrics.py tests/test_tree_expert_e2_decisions.py -q`
+Run: `/path/to/lg-aimers-9th-competition/artifacts/tabm_submission_python311/bin/python -m pytest tests/test_tree_expert_hc_metrics.py tests/test_tree_expert_hc_decisions.py tests/test_tree_expert_metrics.py tests/test_tree_expert_e2_decisions.py -q`
 
 Expected: all tests pass.
 
@@ -632,7 +632,7 @@ def test_model_delivery_requires_accepted_hash_bound_evidence(tmp_path, rejected
 
 - [ ] **Step 3: Run and confirm RED**
 
-Run: `/Users/yonghyun/Documents/lg-aimers-9th-competition/artifacts/tabm_submission_python311/bin/python -m pytest tests/test_tree_expert_hc_state.py tests/test_tree_expert_hc_artifacts.py -q`
+Run: `/path/to/lg-aimers-9th-competition/artifacts/tabm_submission_python311/bin/python -m pytest tests/test_tree_expert_hc_state.py tests/test_tree_expert_hc_artifacts.py -q`
 
 Expected: missing HC state/artifact modules.
 
@@ -653,7 +653,7 @@ The handoff contains one review, one resume, optional acceptance, and optional m
 
 - [ ] **Step 6: Run artifact and repository policy tests**
 
-Run: `/Users/yonghyun/Documents/lg-aimers-9th-competition/artifacts/tabm_submission_python311/bin/python -m pytest tests/test_tree_expert_hc_state.py tests/test_tree_expert_hc_artifacts.py tests/test_rules_repository_enforcement.py -q`
+Run: `/path/to/lg-aimers-9th-competition/artifacts/tabm_submission_python311/bin/python -m pytest tests/test_tree_expert_hc_state.py tests/test_tree_expert_hc_artifacts.py tests/test_rules_repository_enforcement.py -q`
 
 Expected: all tests pass.
 
@@ -683,7 +683,7 @@ Test these complete paths:
 
 - [ ] **Step 2: Run and confirm RED**
 
-Run: `/Users/yonghyun/Documents/lg-aimers-9th-competition/artifacts/tabm_submission_python311/bin/python -m pytest tests/test_tree_expert_hc_runner.py -q`
+Run: `/path/to/lg-aimers-9th-competition/artifacts/tabm_submission_python311/bin/python -m pytest tests/test_tree_expert_hc_runner.py -q`
 
 Expected: missing `hc_runner` module.
 
@@ -701,7 +701,7 @@ Before delivery, measure 245,789-row inference, enforce `<=480s`, enforce serial
 
 - [ ] **Step 6: Run runner and focused campaign tests**
 
-Run: `/Users/yonghyun/Documents/lg-aimers-9th-competition/artifacts/tabm_submission_python311/bin/python -m pytest tests/test_tree_expert_hc_runner.py tests/test_tree_expert_hc_training.py tests/test_tree_expert_hc_calibration.py tests/test_tree_expert_hc_decisions.py -q`
+Run: `/path/to/lg-aimers-9th-competition/artifacts/tabm_submission_python311/bin/python -m pytest tests/test_tree_expert_hc_runner.py tests/test_tree_expert_hc_training.py tests/test_tree_expert_hc_calibration.py tests/test_tree_expert_hc_decisions.py -q`
 
 Expected: all tests pass.
 
@@ -743,7 +743,7 @@ TREE_HC_ERROR
 
 - [ ] **Step 3: Run and confirm RED**
 
-Run: `/Users/yonghyun/Documents/lg-aimers-9th-competition/artifacts/tabm_submission_python311/bin/python -m pytest tests/test_tree_expert_hc_kaggle.py tests/test_tree_expert_hc_kaggle_cell.py -q`
+Run: `/path/to/lg-aimers-9th-competition/artifacts/tabm_submission_python311/bin/python -m pytest tests/test_tree_expert_hc_kaggle.py tests/test_tree_expert_hc_kaggle_cell.py -q`
 
 Expected: missing HC Kaggle modules/cell.
 
@@ -760,9 +760,9 @@ The build tool inventories only required modules and contract files, creates a c
 Run:
 
 ```bash
-/Users/yonghyun/Documents/lg-aimers-9th-competition/artifacts/tabm_submission_python311/bin/python tools/build_tree_hc_kaggle_cell.py
+/path/to/lg-aimers-9th-competition/artifacts/tabm_submission_python311/bin/python tools/build_tree_hc_kaggle_cell.py
 shasum -a 256 experiments/tree_expert/KAGGLE_HC_CELL.py
-/Users/yonghyun/Documents/lg-aimers-9th-competition/artifacts/tabm_submission_python311/bin/python tools/build_tree_hc_kaggle_cell.py
+/path/to/lg-aimers-9th-competition/artifacts/tabm_submission_python311/bin/python tools/build_tree_hc_kaggle_cell.py
 shasum -a 256 experiments/tree_expert/KAGGLE_HC_CELL.py
 wc -c experiments/tree_expert/KAGGLE_HC_CELL.py
 ```
@@ -771,7 +771,7 @@ Expected: both hashes match; size is below `1000000` bytes.
 
 - [ ] **Step 7: Run Kaggle and existing cell regression tests**
 
-Run: `/Users/yonghyun/Documents/lg-aimers-9th-competition/artifacts/tabm_submission_python311/bin/python -m pytest tests/test_tree_expert_hc_kaggle.py tests/test_tree_expert_hc_kaggle_cell.py tests/test_tree_expert_e2_kaggle_cell.py tests/test_tree_expert_t3_kaggle.py -q`
+Run: `/path/to/lg-aimers-9th-competition/artifacts/tabm_submission_python311/bin/python -m pytest tests/test_tree_expert_hc_kaggle.py tests/test_tree_expert_hc_kaggle_cell.py tests/test_tree_expert_e2_kaggle_cell.py tests/test_tree_expert_t3_kaggle.py -q`
 
 Expected: all tests pass.
 
@@ -819,13 +819,13 @@ Expected:
 
 - [ ] **Step 3: Run the focused HC suite**
 
-Run: `/Users/yonghyun/Documents/lg-aimers-9th-competition/artifacts/tabm_submission_python311/bin/python -m pytest tests/test_tree_expert_hc_contracts.py tests/test_tree_expert_hc_inputs.py tests/test_tree_expert_hc_base.py tests/test_tree_expert_hc_features.py tests/test_tree_expert_hc_training.py tests/test_tree_expert_hc_calibration.py tests/test_tree_expert_hc_metrics.py tests/test_tree_expert_hc_decisions.py tests/test_tree_expert_hc_state.py tests/test_tree_expert_hc_artifacts.py tests/test_tree_expert_hc_runner.py tests/test_tree_expert_hc_kaggle.py tests/test_tree_expert_hc_kaggle_cell.py -q`
+Run: `/path/to/lg-aimers-9th-competition/artifacts/tabm_submission_python311/bin/python -m pytest tests/test_tree_expert_hc_contracts.py tests/test_tree_expert_hc_inputs.py tests/test_tree_expert_hc_base.py tests/test_tree_expert_hc_features.py tests/test_tree_expert_hc_training.py tests/test_tree_expert_hc_calibration.py tests/test_tree_expert_hc_metrics.py tests/test_tree_expert_hc_decisions.py tests/test_tree_expert_hc_state.py tests/test_tree_expert_hc_artifacts.py tests/test_tree_expert_hc_runner.py tests/test_tree_expert_hc_kaggle.py tests/test_tree_expert_hc_kaggle_cell.py -q`
 
 Expected: all tests pass.
 
 - [ ] **Step 4: Run existing tree-expert and rules regressions**
 
-Run: `/Users/yonghyun/Documents/lg-aimers-9th-competition/artifacts/tabm_submission_python311/bin/python -m pytest tests/test_tree_expert_e2_artifacts.py tests/test_tree_expert_e2_baseline.py tests/test_tree_expert_e2_training.py tests/test_tree_expert_e2_decisions.py tests/test_tree_expert_t3_inputs.py tests/test_tree_expert_t3_decisions.py tests/test_rules_policy.py tests/test_rules_repository_enforcement.py tests/test_row_independence_evidence.py -q`
+Run: `/path/to/lg-aimers-9th-competition/artifacts/tabm_submission_python311/bin/python -m pytest tests/test_tree_expert_e2_artifacts.py tests/test_tree_expert_e2_baseline.py tests/test_tree_expert_e2_training.py tests/test_tree_expert_e2_decisions.py tests/test_tree_expert_t3_inputs.py tests/test_tree_expert_t3_decisions.py tests/test_rules_policy.py tests/test_rules_repository_enforcement.py tests/test_row_independence_evidence.py -q`
 
 Expected: all tests pass.
 

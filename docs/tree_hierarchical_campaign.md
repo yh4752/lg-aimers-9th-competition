@@ -62,7 +62,7 @@ H3 산출물도 모델 delivery일 뿐 제출 ZIP은 아니다. 제출 코드는
 ```bash
 artifacts/tabm_submission_python311/bin/python \
   tools/prepare_tree_hc_input.py \
-  --e2-handoff "/Users/yonghyun/Downloads/tree_expert_e2_handoff (1).zip" \
+  --e2-handoff "/path/to/Downloads/tree_expert_e2_handoff (1).zip" \
   --output artifacts/tree_hierarchical_input.zip
 ```
 

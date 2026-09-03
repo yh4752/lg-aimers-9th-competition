@@ -25,15 +25,15 @@
 `--artifact` 줄만 남기고, 같은 옵션을 파일마다 반복한다.
 
 ```bash
-cd /Users/yonghyun/Documents/lg-aimers-9th-competition
+cd /path/to/lg-aimers-9th-competition
 
 artifacts/tabm_submission_python311/bin/python \
   tools/run_oof_reset_audit.py \
-  --artifact /Users/yonghyun/Downloads/tabm_colab_stage_C_delivery.zip \
-  --artifact /Users/yonghyun/Downloads/tabm_row_feature_stage_P_delivery.zip \
-  --artifact /Users/yonghyun/Downloads/catboost_tabm_blend_delivery.zip \
-  --artifact /Users/yonghyun/Downloads/catboost_deployment_review.zip \
-  --artifact /Users/yonghyun/Downloads/hierarchical_tabm_review.zip \
+  --artifact /path/to/Downloads/tabm_colab_stage_C_delivery.zip \
+  --artifact /path/to/Downloads/tabm_row_feature_stage_P_delivery.zip \
+  --artifact /path/to/Downloads/catboost_tabm_blend_delivery.zip \
+  --artifact /path/to/Downloads/catboost_deployment_review.zip \
+  --artifact /path/to/Downloads/hierarchical_tabm_review.zip \
   --output-root artifacts/oof_reset_audit_runs
 ```
 

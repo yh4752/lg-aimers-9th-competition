@@ -295,7 +295,7 @@ Expected: 첫 evidence 파일 부재로 FAIL.
 
 - [ ] **Step 3: 원본 바이트를 변경하지 않고 선별 복사**
 
-원본은 `/Users/yonghyun/Documents/LG_AIMERS_2026/reports/kyh/high_score/`이다.
+원본은 `/path/to/legacy-lg-aimers-workspace/reports/kyh/high_score/`이다.
 각 원본 내용을 읽고 `apply_patch`로 위 대상 경로에 동일한 UTF-8 바이트를 만든다.
 키 순서, 공백, 개행을 정리하지 않는다. 원본 저장소 파일은 수정하지 않는다.
 
@@ -626,7 +626,7 @@ Expected: 이 Task에서 의도한 테스트 및 필요한 문서 수정만 표�
 
 - [ ] **Step 4: 기존 저장소 무변경 확인**
 
-Run: `git -C /Users/yonghyun/Documents/LG_AIMERS_2026 status --short`
+Run: `git -C /path/to/legacy-lg-aimers-workspace status --short`
 
 Expected: 이전 작업 전 존재하던 사용자 변경만 유지되고, 이 계획이 추가한 변경은 없음.
 
