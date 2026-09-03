@@ -21,6 +21,8 @@
 | 최근 판정 | E3가 OOF 53/63 완료 후 메모리 부족으로 종료되어 `failed` 판정 |
 | 다음 방향 | 새 대회에서는 대표 작업의 시간·최대 RAM을 먼저 측정한 뒤 장시간 캠페인 시작 |
 
+![LG Aimers 9기 실험 흐름](docs/assets/lg-aimers-experiment-journey.svg)
+
 ## 처음 읽는다면
 
 프로젝트 전체를 한 번에 읽기보다 아래 세 글을 순서대로 보면 판단의 흐름을 따라가기
@@ -35,6 +37,8 @@
 
 세부 수치와 근거 파일까지 확인하려면
 [프로젝트 전체 회고](docs/PROJECT_RETROSPECTIVE.md)로 이어서 읽으면 됩니다.
+짧은 소개가 필요하면 [포트폴리오 요약](docs/PORTFOLIO_SUMMARY.md), 발표나 면접을
+준비한다면 [면접 문답](docs/INTERVIEW_QA.md)부터 확인할 수 있습니다.
 
 ## 이 프로젝트에서 풀려고 한 문제
 
@@ -134,6 +138,9 @@ Public 점수였습니다.
 
 ## 저장소 안내
 
+- [포트폴리오 요약](docs/PORTFOLIO_SUMMARY.md): 채용 담당자가 1~2분 안에 읽을 수 있는
+  문제·접근·결과·역할 요약
+- [면접 문답](docs/INTERVIEW_QA.md): 검증, 지표, 모델과 역할을 내 말로 설명하기 위한 자료
 - [프로젝트 회고](docs/PROJECT_RETROSPECTIVE.md): 문제, 판단, 실패와 협업을 비전공자도
   이해할 수 있게 정리한 전체 사례 연구
 - [실험 여정](docs/EXPERIMENT_JOURNEY.md): 문제 인식부터 E3 실행 실패까지의 기술적 흐름

@@ -1,0 +1,87 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1440" height="720" viewBox="0 0 1440 720" role="img" aria-labelledby="title desc">
+  <title id="title">LG Aimers 9기 실험 흐름</title>
+  <desc id="desc">시간 전이 검증과 전처리 연구를 거쳐 TabM 872.39점에서 Tree Expert E2 977.38점으로 개선했고, 후속 E3는 메모리 부족으로 성능을 판정하지 못한 과정</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#f7f8fc"/>
+      <stop offset="1" stop-color="#eef3f9"/>
+    </linearGradient>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="150%">
+      <feDropShadow dx="0" dy="8" stdDeviation="10" flood-color="#24324a" flood-opacity="0.10"/>
+    </filter>
+    <style>
+      .text { font-family: Pretendard, "Noto Sans KR", AppleSDGothicNeo, sans-serif; fill: #162033; }
+      .title { font-size: 38px; font-weight: 750; letter-spacing: -1px; }
+      .subtitle { font-size: 18px; fill: #5b667a; }
+      .step { font-size: 14px; font-weight: 700; letter-spacing: 1px; }
+      .card-title { font-size: 23px; font-weight: 750; }
+      .card-body { font-size: 16px; fill: #5b667a; }
+      .score { font-size: 30px; font-weight: 800; }
+      .label { font-size: 14px; font-weight: 700; }
+    </style>
+  </defs>
+
+  <rect width="1440" height="720" rx="28" fill="url(#bg)"/>
+  <text class="text title" x="92" y="86">모델보다 먼저, 믿을 수 있는 비교 기준을 만들었다</text>
+  <text class="text subtitle" x="92" y="122">LG Aimers 9기 · 시간 순서를 지킨 검증에서 제출 후보까지</text>
+
+  <line x1="235" y1="300" x2="1165" y2="300" stroke="#aab5c6" stroke-width="4" stroke-linecap="round"/>
+  <path d="M1154 291 L1170 300 L1154 309" fill="none" stroke="#aab5c6" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
+
+  <g filter="url(#shadow)">
+    <rect x="80" y="190" width="270" height="220" rx="22" fill="#ffffff" stroke="#cbd5e1"/>
+    <circle cx="116" cy="226" r="17" fill="#334155"/>
+    <text class="text step" x="109" y="231" fill="#ffffff">1</text>
+    <text class="text card-title" x="108" y="278">시간 전이 OOF</text>
+    <text class="text card-body" x="108" y="313">과거 시즌으로 학습해</text>
+    <text class="text card-body" x="108" y="338">바로 다음 시즌을 검증</text>
+    <rect x="108" y="363" width="176" height="28" rx="14" fill="#edf2f7"/>
+    <text class="text label" x="124" y="382">누출 없는 비교 기준</text>
+  </g>
+
+  <g filter="url(#shadow)">
+    <rect x="380" y="190" width="270" height="220" rx="22" fill="#ffffff" stroke="#cbd5e1"/>
+    <circle cx="416" cy="226" r="17" fill="#334155"/>
+    <text class="text step" x="409" y="231" fill="#ffffff">2</text>
+    <text class="text card-title" x="408" y="278">전처리 5단계</text>
+    <text class="text card-body" x="408" y="313">변환과 상호작용을</text>
+    <text class="text card-body" x="408" y="338">한 단계씩 비교</text>
+    <rect x="408" y="363" width="178" height="28" rx="14" fill="#edf2f7"/>
+    <text class="text label" x="424" y="382">hand_matchup 채택</text>
+  </g>
+
+  <g filter="url(#shadow)">
+    <rect x="680" y="190" width="270" height="220" rx="22" fill="#ffffff" stroke="#94a3b8"/>
+    <circle cx="716" cy="226" r="17" fill="#475569"/>
+    <text class="text step" x="709" y="231" fill="#ffffff">3</text>
+    <text class="text card-title" x="708" y="278">TabM 첫 제출</text>
+    <text class="text score" x="708" y="330" fill="#334155">872.39</text>
+    <text class="text card-body" x="708" y="360">규칙 준수 DL 기준선</text>
+    <rect x="708" y="378" width="112" height="25" rx="13" fill="#eef2ff"/>
+    <text class="text label" x="724" y="395" fill="#4338ca">Public 점수</text>
+  </g>
+
+  <g filter="url(#shadow)">
+    <rect x="980" y="174" width="380" height="252" rx="24" fill="#102a43" stroke="#102a43" stroke-width="2"/>
+    <circle cx="1018" cy="212" r="18" fill="#f4c95d"/>
+    <text class="text step" x="1011" y="217" fill="#102a43">4</text>
+    <text class="text card-title" x="1010" y="267" fill="#ffffff">Tree Expert E2</text>
+    <text class="text score" x="1010" y="323" fill="#f8d878">977.38</text>
+    <text class="text card-body" x="1010" y="355" fill="#d7e3ef">투수 기준 확률 + CatBoost 잔차 보정</text>
+    <rect x="1010" y="380" width="134" height="28" rx="14" fill="#f4c95d"/>
+    <text class="text label" x="1026" y="399" fill="#102a43">최고 확인 제출</text>
+  </g>
+
+  <path d="M1170 426 C1170 468 1122 482 1068 507" fill="none" stroke="#9b5964" stroke-width="3" stroke-dasharray="7 7"/>
+  <path d="M1077 495 L1065 509 L1084 508" fill="none" stroke="#9b5964" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+
+  <g filter="url(#shadow)">
+    <rect x="812" y="486" width="548" height="150" rx="22" fill="#fff8f7" stroke="#d9a3aa"/>
+    <rect x="840" y="516" width="112" height="28" rx="14" fill="#9b5964"/>
+    <text class="text label" x="858" y="535" fill="#ffffff">후속 실험 E3</text>
+    <text class="text card-title" x="840" y="579">33,677초 뒤 메모리 부족</text>
+    <text class="text card-body" x="840" y="608">성능 기각이 아니라 실행 실패 · 제출 후보 미생성</text>
+  </g>
+
+  <text class="text subtitle" x="92" y="664">핵심 교훈: 평균 점수뿐 아니라 시간 순서, 최악 구간, 규칙 준수와 실행 가능성을 함께 검증한다.</text>
+</svg>
